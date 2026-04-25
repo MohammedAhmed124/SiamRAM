@@ -1,0 +1,13 @@
+services:
+  cpu:
+    build:
+      context: .
+      dockerfile: Dockerfile.cpu
+    image: siamram-cpu
+    command: ["bash", "-lc", "sleep infinity"]
+    volumes:
+      - .:/app
+      - siamram_venv_cpu:/app/.venv
+
+volumes:
+  siamram_venv_cpu:

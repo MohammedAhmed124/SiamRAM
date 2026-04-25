@@ -1,0 +1,14 @@
+{
+  "name": "SiamRAM (GPU)",
+  "dockerComposeFile": ["../docker-compose.gpu.yml"],
+  "service": "gpu",
+  "workspaceFolder": "/app",
+  "overrideCommand": false,
+  "runServices": ["gpu"],
+  "postCreateCommand": "uv sync --frozen",
+  "customizations": {
+    "vscode": {
+      "extensions": ["ms-python.python", "ms-toolsai.jupyter", "charliermarsh.ruff"]
+    }
+  }
+}

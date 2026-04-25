@@ -1,0 +1,13 @@
+.git
+.gitignore
+.venv
+.vscode
+.idea
+.ruff_cache
+.pytest_cache
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.ipynb_checkpoints
+checkpoints/

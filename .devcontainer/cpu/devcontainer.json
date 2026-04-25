@@ -1,0 +1,14 @@
+{
+  "name": "SiamRAM (CPU)",
+  "dockerComposeFile": ["../docker-compose.cpu.yml"],
+  "service": "cpu",
+  "workspaceFolder": "/app",
+  "overrideCommand": false,
+  "runServices": ["cpu"],
+  "postCreateCommand": "uv sync --frozen",
+  "customizations": {
+    "vscode": {
+      "extensions": ["ms-python.python", "ms-toolsai.jupyter", "charliermarsh.ruff"]
+    }
+  }
+}

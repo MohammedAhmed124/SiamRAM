@@ -1,6 +1,7 @@
+from typing import Optional
 
 import numpy as np
-from typing import Optional
+
 
 class BBoxEKF:
     """
@@ -10,7 +11,7 @@ class BBoxEKF:
     """
 
     DIM_X = 4
-    DIM_Z = 2   # we observe (cx, cy) only
+    DIM_Z = 2  # we observe (cx, cy) only
 
     def __init__(self, bbox, process_noise: float = 2.0, meas_noise: float = 5.0,
                  vel_window: int = 100):
@@ -44,14 +45,16 @@ class BBoxEKF:
             B = (H[0, 1] - new_cx_h * H[2, 1]) / denom
             C = (H[1, 0] - new_cy_h * H[2, 0]) / denom
             D = (H[1, 1] - new_cy_h * H[2, 1]) / denom
-            F[0, 0] = A;   F[0, 1] = B
-            F[1, 0] = C;   F[1, 1] = D
+            F[0, 0] = A
+            F[0, 1] = B
+            F[1, 0] = C
+            F[1, 1] = D
         return F
 
     def predict(self, H: Optional[np.ndarray] = None, H_reliable: bool = False):
         cx, cy = self.x[0], self.x[1]
         if H is not None and H_reliable:
-            denom    = H[2, 0] * cx + H[2, 1] * cy + H[2, 2]
+            denom = H[2, 0] * cx + H[2, 1] * cy + H[2, 2]
             new_cx_h = (H[0, 0] * cx + H[0, 1] * cy + H[0, 2]) / (denom + 1e-8)
             new_cy_h = (H[1, 0] * cx + H[1, 1] * cy + H[1, 2]) / (denom + 1e-8)
         else:
@@ -59,7 +62,7 @@ class BBoxEKF:
             new_cy_h = cy
         self.x[0] = new_cx_h + self.x[2]
         self.x[1] = new_cy_h + self.x[3]
-        F      = self._compute_jacobian(H, H_reliable, cx, cy, new_cx_h, new_cy_h)
+        F = self._compute_jacobian(H, H_reliable, cx, cy, new_cx_h, new_cy_h)
         self.P = F @ self.P @ F.T + self.Q
 
     def update(self, bbox):
@@ -68,13 +71,13 @@ class BBoxEKF:
         cy = float(y1 + h / 2.0)
         self._bw = 0.85 * self._bw + 0.15 * float(w)
         self._bh = 0.85 * self._bh + 0.15 * float(h)
-        z     = np.array([cx, cy])
+        z = np.array([cx, cy])
         innov = z - self._H_mat @ self.x
-        S     = self._H_mat @ self.P @ self._H_mat.T + self.R
-        K     = self.P @ self._H_mat.T @ np.linalg.inv(S)
-        self.x     = self.x + K @ innov
-        I_KH       = np.eye(self.DIM_X) - K @ self._H_mat
-        self.P     = I_KH @ self.P
+        S = self._H_mat @ self.P @ self._H_mat.T + self.R
+        K = self.P @ self._H_mat.T @ np.linalg.inv(S)
+        self.x = self.x + K @ innov
+        I_KH = np.eye(self.DIM_X) - K @ self._H_mat
+        self.P = I_KH @ self.P
 
     def get_bbox(self) -> np.ndarray:
         cx, cy = self.x[0], self.x[1]
@@ -96,13 +99,13 @@ class BBoxEKF:
         self.x[1] = float(y1 + h / 2.0)
         self.x[2] = float(velocity[0])
         self.x[3] = float(velocity[1])
-        self._bw  = float(w)
-        self._bh  = float(h)
-        self.P    = np.diag([25., 25., 40., 40.]).astype(float)
+        self._bw = float(w)
+        self._bh = float(h)
+        self.P = np.diag([25., 25., 40., 40.]).astype(float)
 
     def nudge_position(self, bbox):
         x1, y1, w, h = bbox
         self.x[0] = float(x1 + w / 2.0)
         self.x[1] = float(y1 + h / 2.0)
-        self._bw  = float(w)
-        self._bh  = float(h)
+        self._bw = float(w)
+        self._bh = float(h)

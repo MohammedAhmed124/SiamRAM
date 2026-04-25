@@ -1,20 +1,22 @@
-import os
 import gc
+import os
+from typing import List
+
 import cv2
 import numpy as np
-from typing import List
+from numpy._typing import NDArray
+
 from utils.utils import _iou
 
-
-PANEL_W     = 240
-GAP         = 8
+PANEL_W = 240
+GAP = 8
 FPS_DEFAULT = 30
-FONT        = cv2.FONT_HERSHEY_SIMPLEX
+FONT = cv2.FONT_HERSHEY_SIMPLEX
 
-C_GT     = (255, 120,   0)
-C_SEARCH = (0,   200, 255)
-C_UPDATE = (0,   200,  80)
-C_FRAME  = (180, 180, 180)
+C_GT = (255, 120, 0)
+C_SEARCH = (0, 200, 255)
+C_UPDATE = (0, 200, 80)
+C_FRAME = (180, 180, 180)
 
 
 def _confidence_color(score: float):
@@ -108,11 +110,11 @@ def _draw_legend(canvas: np.ndarray, x: int, y: int) -> None:
         the template and search crop panels above it.
     """
     entries = [
-        (C_GT,          "GT bbox (init)"),
-        ((0, 255,   0), "Pred  conf=1.0"),
+        (C_GT, "GT bbox (init)"),
+        ((0, 255, 0), "Pred  conf=1.0"),
         ((0, 128, 255), "Pred  conf=0.5"),
-        ((0,   0, 255), "Pred  conf=0.0"),
-        (C_SEARCH,      "Search region"),
+        ((0, 0, 255), "Pred  conf=0.0"),
+        (C_SEARCH, "Search region"),
         ((0, 165, 255), "YOLO ROI"),
     ]
     for i, (color, text) in enumerate(entries):
@@ -146,12 +148,12 @@ def _refresh_panels(tracker, dyn_image, panel_template, panel_search,
         the dynamic bbox changes. Keeping it out of run_inference makes the
         crop + resize + stamp sequence reusable and keeps the main loop readable.
     """
-    from utils.utils import get_extended_crop, extend_bbox
+    from utils.utils import extend_bbox, get_extended_crop
 
     dyn_bbox = tracker.running_dynamic_bbox
-    cfg      = tracker.tracking_config
-    ih, iw   = dyn_image.shape[:2]
-    pad_val  = np.mean(dyn_image, axis=(0, 1))
+    cfg = tracker.tracking_config
+    ih, iw = dyn_image.shape[:2]
+    pad_val = np.mean(dyn_image, axis=(0, 1))
 
     t_ctx = extend_bbox(dyn_bbox, image_width=iw, image_height=ih,
                         offset=cfg["template_bbox_offset"])
@@ -171,10 +173,10 @@ def _refresh_panels(tracker, dyn_image, panel_template, panel_search,
 
 
 def run_inference(
-    initial_bbox: List[int],
-    video_path:   str,
+    initial_bbox: List[int] | NDArray[np.integer],
+    video_path: str,
     tracker,
-    output_path:  str  = "outputs/tracked_video.mp4",
+    output_path: str = "outputs/tracked_video.mp4",
     output_video: bool = True,
 ):
     """
@@ -217,23 +219,23 @@ def run_inference(
         both for quick evaluation runs (False — minimal overhead, fast) and for
         producing demo videos for inspection (True).
     """
-    is_dam        = hasattr(tracker, 'tracker')
+    is_dam = hasattr(tracker, 'tracker')
     inner_tracker = tracker.tracker if is_dam else tracker
 
     initial_bbox = np.array(initial_bbox).astype(int)
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     head, tail = os.path.split(output_path)
-    bbox_dir   = os.path.join(head, "bboxes")
+    bbox_dir = os.path.join(head, "bboxes")
     os.makedirs(bbox_dir, exist_ok=True)
-    bbox_file  = os.path.join(bbox_dir, os.path.splitext(tail)[0] + ".txt")
+    bbox_file = os.path.join(bbox_dir, os.path.splitext(tail)[0] + ".txt")
 
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open video: {video_path}")
 
-    fps          = cap.get(cv2.CAP_PROP_FPS) or FPS_DEFAULT
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS) or FPS_DEFAULT
+    int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
     ret, first_bgr = cap.read()
     if not ret or first_bgr is None:
@@ -243,26 +245,26 @@ def run_inference(
     h, w = first_bgr.shape[:2]
 
     if output_video:
-        C_OCCLUDED        = (0,   0,   220)
-        C_YOLO_CANDIDATE  = (0,   200, 255)
-        C_YOLO_DISTRACTOR = (0,   0,   180)
-        C_STATUS_OCC      = (0,   0,   200)
-        C_STATUS_OK       = (0,   180, 0  )
-        C_STATUS_TEXT     = (255, 255, 255)
+        C_OCCLUDED = (0, 0, 220)
+        C_YOLO_CANDIDATE = (0, 200, 255)
+        C_YOLO_DISTRACTOR = (0, 0, 180)
+        C_STATUS_OCC = (0, 0, 200)
+        C_STATUS_OK = (0, 180, 0)
+        C_STATUS_TEXT = (255, 255, 255)
 
         canvas_h = max(h, PANEL_W * 2 + GAP)
-        total_w  = w + PANEL_W
-        y_off    = (canvas_h - h) // 2
+        total_w = w + PANEL_W
+        y_off = (canvas_h - h) // 2
 
-        canvas         = np.zeros((canvas_h, total_w, 3), dtype=np.uint8)
+        canvas = np.zeros((canvas_h, total_w, 3), dtype=np.uint8)
         panel_template = np.zeros((PANEL_W, PANEL_W, 3), dtype=np.uint8)
-        panel_search   = np.zeros((PANEL_W, PANEL_W, 3), dtype=np.uint8)
-        row_tmpl       = np.s_[0             : PANEL_W,           w : total_w]
-        row_search     = np.s_[PANEL_W + GAP : PANEL_W * 2 + GAP, w : total_w]
+        panel_search = np.zeros((PANEL_W, PANEL_W, 3), dtype=np.uint8)
+        row_tmpl = np.s_[0: PANEL_W, w: total_w]
+        row_search = np.s_[PANEL_W + GAP: PANEL_W * 2 + GAP, w: total_w]
 
         avi_path = os.path.splitext(output_path)[0] + "_tmp.avi"
-        writer   = cv2.VideoWriter(avi_path, cv2.VideoWriter_fourcc(*"XVID"),
-                                   fps, (total_w, canvas_h))
+        writer = cv2.VideoWriter(avi_path, cv2.VideoWriter_fourcc(*"XVID"),
+                                 fps, (total_w, canvas_h))
 
         def _draw_status_pill(canvas: np.ndarray, in_occlusion: bool) -> None:
             """
@@ -287,15 +289,15 @@ def run_inference(
                 so it captures y_off and the colour constants without needing them
                 passed as arguments every call.
             """
-            label  = "OCCLUDED" if in_occlusion else "TRACKING"
-            color  = C_STATUS_OCC if in_occlusion else C_STATUS_OK
-            px     = 8
-            py     = y_off + 8
+            label = "OCCLUDED" if in_occlusion else "TRACKING"
+            color = C_STATUS_OCC if in_occlusion else C_STATUS_OK
+            px = 8
+            py = y_off + 8
             pw, ph = 140, 28
-            r      = ph // 2
-            cv2.rectangle(canvas, (px + r, py),          (px + pw - r, py + ph), color, -1)
-            cv2.circle  (canvas,  (px + r,      py + r),  r, color, -1)
-            cv2.circle  (canvas,  (px + pw - r, py + r),  r, color, -1)
+            r = ph // 2
+            cv2.rectangle(canvas, (px + r, py), (px + pw - r, py + ph), color, -1)
+            cv2.circle(canvas, (px + r, py + r), r, color, -1)
+            cv2.circle(canvas, (px + pw - r, py + r), r, color, -1)
             (tw, th), _ = cv2.getTextSize(label, FONT, 0.50, 1)
             cv2.putText(canvas, label,
                         (px + (pw - tw) // 2, py + (ph + th) // 2 - 1),
@@ -306,9 +308,9 @@ def run_inference(
                         frame_idx=0, updated=True)
 
         canvas.fill(0)
-        canvas[y_off : y_off + h, :w] = first_bgr
-        canvas[row_tmpl]              = panel_template
-        canvas[row_search]            = panel_search
+        canvas[y_off: y_off + h, :w] = first_bgr
+        canvas[row_tmpl] = panel_template
+        canvas[row_search] = panel_search
         bx, by, bw, bh = map(int, initial_bbox)
         cv2.rectangle(canvas, (bx, by + y_off), (bx + bw, by + bh + y_off), C_GT, 2)
         _draw_status_pill(canvas, in_occlusion=False)
@@ -324,9 +326,9 @@ def run_inference(
     tracked_bboxes = [initial_bbox]
 
     import time
-    times_normal    = []
+    times_normal = []
     times_occlusion = []
-    frame_times     = []
+    frame_times = []
 
     try:
         frame_idx = 1
@@ -336,15 +338,15 @@ def run_inference(
             if not ret or frame is None:
                 break
 
-            t0           = time.perf_counter()
-            result       = tracker.update(frame)
-            elapsed_ms   = (time.perf_counter() - t0) * 1000.0
+            t0 = time.perf_counter()
+            result = tracker.update(frame)
+            elapsed_ms = (time.perf_counter() - t0) * 1000.0
             frame_times.append(elapsed_ms)
 
-            bbox         = result[0]
-            score        = result[1]
+            bbox = result[0]
+            score = result[1]
             in_occlusion = result[2] if is_dam else False
-            yolo_dets    = result[3] if (is_dam and len(result) > 3) else []
+            yolo_dets = result[3] if (is_dam and len(result) > 3) else []
 
             tracked_bboxes.append(bbox)
 
@@ -354,8 +356,8 @@ def run_inference(
                 times_normal.append(elapsed_ms)
 
             if output_video:
-                cur_dyn_bbox     = inner_tracker.running_dynamic_bbox
-                cur_dyn_obj      = inner_tracker.running_dynamic_image
+                cur_dyn_bbox = inner_tracker.running_dynamic_bbox
+                cur_dyn_obj = inner_tracker.running_dynamic_image
                 template_updated = not np.array_equal(cur_dyn_bbox, last_dyn_bbox)
 
                 if template_updated:
@@ -368,9 +370,9 @@ def run_inference(
                     _stamp_panel(panel_search, "SEARCH CTX", updated=False)
 
                 canvas.fill(0)
-                canvas[y_off : y_off + h, :w] = frame
-                canvas[row_tmpl]              = panel_template
-                canvas[row_search]            = panel_search
+                canvas[y_off: y_off + h, :w] = frame
+                canvas[row_tmpl] = panel_template
+                canvas[row_search] = panel_search
 
                 if in_occlusion:
                     cv2.rectangle(canvas, (w, 0), (total_w - 1, canvas_h - 1), C_OCCLUDED, 3)
@@ -388,7 +390,7 @@ def run_inference(
                     for det in yolo_dets:
                         dx, dy, dw, dh = map(int, det)
                         is_dist = held is not None and _iou(det, held) >= tracker.tau_occ
-                        color   = C_YOLO_DISTRACTOR if is_dist else C_YOLO_CANDIDATE
+                        color = C_YOLO_DISTRACTOR if is_dist else C_YOLO_CANDIDATE
                         cv2.rectangle(canvas, (dx, dy + y_off), (dx + dw, dy + dh + y_off),
                                       color, 1)
                         cv2.putText(canvas, "D" if is_dist else "Y",
@@ -416,7 +418,7 @@ def run_inference(
                 if is_dam and in_occlusion:
                     rx, ry, rw, rh = tracker._get_yolo_search_roi(frame)
                     cv2.rectangle(canvas,
-                                  (rx,      ry      + y_off),
+                                  (rx, ry + y_off),
                                   (rx + rw, ry + rh + y_off),
                                   (0, 165, 255), 1)
                     cv2.putText(canvas, "YOLO ROI",
@@ -475,9 +477,9 @@ def run_inference(
               f"fps={1000 / a.mean():.1f}")
 
     print("\n─── Latency Report ───────────────────────────────────────")
-    _stats("ALL FRAMES",   frame_times)
+    _stats("ALL FRAMES", frame_times)
     _stats("NORMAL TRACK", times_normal)
-    _stats("OCCLUSION",    times_occlusion)
+    _stats("OCCLUSION", times_occlusion)
     if times_occlusion:
         print(f"  occlusion frames: {len(times_occlusion)} "
               f"({100 * len(times_occlusion) / len(frame_times):.1f}% of total)")

@@ -1,14 +1,12 @@
-from abc import abstractmethod, ABC
+import math
+from abc import ABC, abstractmethod
 from collections import namedtuple
-from typing import Dict, Any, Union, Optional
+from typing import Any, Dict, Optional, Union
 
 import numpy as np
 import torch
 
-from .utils import unravel_index, make_grid
-import math 
-
-
+from .utils import make_grid
 
 TrackerEncodeResult = namedtuple("TrackerEncodeResult", ["regression_map", "classification_label"])
 TrackerDecodeResult = namedtuple("TrackerDecodeResult", ["bbox", "pred_coords"])

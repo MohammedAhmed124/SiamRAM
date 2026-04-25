@@ -1,23 +1,14 @@
 
-from collections import deque
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Tuple, Callable, Union, Optional
-from statistics import mean
+from typing import Any, Callable, Dict, Optional, Tuple, Union
+
 import albumentations as albu
 import numpy as np
 import torch
 import torch.nn as nn
-import cv2
- 
- 
-from utils.box_coder import gaussian_label_function
-from utils.box_coder import TrackerDecodeResult, SiamABCBoxCoder
-from utils.utils import to_device, limit, squared_size, get_extended_crop, clamp_bbox, convert_xywh_to_xyxy, extend_bbox
-from ..model import constants
-from ..model.custom_bn import AdaptiveBatchNorm
-from typing import Optional
-import torch 
-from torch import nn
+
+from utils.box_coder import TrackerDecodeResult
+from utils.utils import limit, squared_size, to_device
 
 
 class TrackingState:

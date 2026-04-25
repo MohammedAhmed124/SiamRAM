@@ -1,8 +1,9 @@
 """Source: https://github.com/qymeng94/SLTT/blob/main/modules/neuron.py"""
 
 import torch
-from spikingjelly.clock_driven.neuron import LIFNode
 from spikingjelly.clock_driven import surrogate as surrogate_sj
+from spikingjelly.clock_driven.neuron import LIFNode
+
 
 class SLTTNeuron(LIFNode):
     def __init__(self, surrogate_function = surrogate_sj.PiecewiseQuadratic()):

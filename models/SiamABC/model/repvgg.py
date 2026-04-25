@@ -8,10 +8,11 @@ File: https://github.com/researchmm/Stark/blob/main/lib/models/stark/repvgg.py
 
 """
 
-import torch.nn as nn
+import copy
+
 import numpy as np
 import torch
-import copy
+import torch.nn as nn
 
 
 class FrozenBatchNorm2d(torch.nn.Module):
@@ -262,8 +263,8 @@ class RepVGG(nn.Module):
 
 
 optional_groupwise_layers = [2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26]
-g2_map = {l: 2 for l in optional_groupwise_layers}
-g4_map = {l: 4 for l in optional_groupwise_layers}
+g2_map = {L: 2 for L in optional_groupwise_layers}
+g4_map = {L: 4 for L in optional_groupwise_layers}
 
 
 def create_RepVGG_A0(deploy=False, last_layer='stage3', freeze_bn=False, last_stage_block=14):

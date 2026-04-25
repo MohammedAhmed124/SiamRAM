@@ -11,7 +11,8 @@ File: https://github.com/researchmm/Stark/blob/main/lib/models/stark/resnet.py
 import torch
 import torch.nn as nn
 from torch.hub import load_state_dict_from_url
-from torchvision.models.resnet import BasicBlock, Bottleneck, conv1x1, conv3x3
+from torchvision.models.resnet import BasicBlock, Bottleneck, conv1x1
+
 '''2021.1.5 Modified from torchvision.models.resnet
 Now the 
 '''

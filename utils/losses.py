@@ -23,15 +23,9 @@ bbox → GIoU Loss (masked to positive locations only)
     exactly what we want.
 """
 
-from typing import Dict
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-
-from external.SiamABC.core.models import SiamABC
-
 from external.SiamABC.core.models.loss import BoxLoss
-
 
 
 class TrackingHeadLoss(nn.Module):

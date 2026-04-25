@@ -176,3 +176,5 @@ cython_debug/
 data/
 
 outputs/
+
+yolo11n.pt

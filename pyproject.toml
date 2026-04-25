@@ -4,13 +4,63 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+      "albumentations>=2.0.8",
+      "coloredlogs>=15.0.1",
+      "easydict>=1.13",
+      "einops>=0.8.2",
+      "fire>=0.7.1",
+      "gdown>=6.0.0",
+      "got10k>=0.1.3",
+      "hydra-core>=1.3.2",
+      "imageio>=2.37.3",
+      "ipykernel>=7.2.0",
+      "ipython>=8.39.0",
+      "ipywidgets>=8.1.8",
+      "jpeg4py>=0.1.4",
+      "lmdb>=2.2.0",
+      "matplotlib>=3.10.9",
+      "numpy>=2.2.6",
+      "opencv-python>=4.13.0.92",
+      "pandas>=2.3.3",
+      "pillow>=12.2.0",
+      "pycocotools>=2.0.11",
+      "pytorch-toolbelt>=0.8.0",
+      "pyyaml>=6.0.3",
+      "scikit-learn>=1.7.2",
+      "scipy>=1.15.3",
+      "shapely>=2.1.2",
+      "six>=1.17.0",
+      "spikingjelly>=0.0.0.0.14",
+      "tensorboardx>=2.6.5",
+      "timm>=1.0.26",
+      "torch>=2.11.0",
+      "torchaudio>=2.11.0",
+      "torchmetrics>=1.9.0",
+      "torchvision>=0.26.0",
+      "tqdm>=4.67.3",
+      "typing-extensions>=4.15.0",
+      "ultralytics>=8.4.41",
+      "wandb>=0.26.1",
+]
 
 [dependency-groups]
 dev = [
+  "opencv-stubs>=0.1.3",
+  "pandas-stubs>=2.3.3.260113",
   "ruff>=0.15.12",
   "ty>=0.0.32",
 ]
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu130" }]
+torchvision = [{ index = "pytorch-cu130" }]
+torchaudio = [{ index = "pytorch-cu130" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
 
 [tool.ty.environment]
 python-version = "3.10"

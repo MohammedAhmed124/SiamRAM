@@ -1,11 +1,13 @@
-import cv2
-import numpy as np
 from collections import deque
 from typing import List, Optional, Tuple
+
+import cv2
+import numpy as np
 from ultralytics import YOLO
-from utils.utils import _iou, _extract_descriptor, _cos_sim
+
+from utils.utils import _cos_sim, _extract_descriptor, _iou
+
 from .motion_model import BBoxEKF
-from ultralytics import YOLO
 from .ram_memory import AppearanceMemory
 
 
@@ -13,75 +15,75 @@ class SiamRAMTracker:
 
     def __init__(
         self,
-        siam_tracker:                     object,
-        yolo_weights:                     str   = "yolo11n.pt",
-        conf_threshold:                   float = 0.60,
-        reacq_threshold:                  float = 0.55,
-        yolo_conf:                        float = 0.30,
-        yolo_iou:                         float = 0.45,
-        app_match_threshold:              float = 0.72,
-        nudge_alpha:                      float = 0.30,
-        tau_occ:                          float = 0.40,
-        beta:                             float = 0.06,
-        mem_capacity:                     int   = 20,
-        tau_iou:                          float = 0.40,
-        tau_area:                         float = 0.25,
-        ncc_threshold:                    float = 0.70,
-        ncc_expand:                       float = 2.5,
-        conf_history_len:                 int   = 200,
-        history_decay:                    float = 0.5,
-        history_skip_last:                int   = 2,
-        yolo_search_expand:               float = 5.0,
-        roi_start_expand:                 float = 1.5,
-        size_history_len:                 int   = 40,
-        drm_capacity:                     int   = 8,
-        drm_tau_sim:                      float = 0.85,
-        drm_window_W:                     int   = 10,
-        drm_mmin:                         int   = 3,
-        drm_lam_iou:                      float = 0.40,
-        drm_lam_app:                      float = 0.30,
-        drm_lam_mot:                      float = 0.20,
-        drm_lam_time:                     float = 0.10,
-        drm_alpha:                        float = 0.05,
-        drm_gamma:                        float = 0.30,
-        drm_margin:                       float = 0.35,
-        drm_top_k:                        int   = 3,
-        drm_skip_threshold:               float = 0.80,
-        drm_lam_dist:                     float = 0.15,
-        drm_dist_sigma_factor:            float = 2.5,
-        drm_lam_cand_dir:                 float = 0.15,
-        drm_lam_cand_vel:                 float = 0.20,
-        vel_score_min_speed:              float = 0.5,
-        ekf_process_noise:                float = 2.0,
-        ekf_meas_noise:                   float = 5.0,
-        homo_max_corners:                 int   = 200,
-        homo_inlier_threshold:            float = 0.50,
-        shrinkage_min_drop_frac:          float = 0.06,
-        shrinkage_max_lookback:           int   = 60,
-        velocity_lookback:                int   = 3,
-        velocity_smooth_alpha:            float = 0.4,
-        distractor_bank_maxlen:           int   = 50,
-        velocity_decay:                   float = 0.95,
-        search_expand_growth_factor:      float = 1.2,
-        search_expand_growth_every:       int   = 5,
-        search_expand_max:                float = 15.0,
-        long_distance_conf_threshold:     float = 0.35,
-        long_distance_area_fraction:      float = 0.004,
-        long_distance_mode:               bool  = False,
-        enter_occlusion_on_loss:          bool  = True,
-        velocity_window_average:          int   = 80,
-        occlusion_patience:               int   = 5,
-        occlusion_hysteresis:             float = 0.10,
-        tiny_roi_start_expand:            float = 3.0,
-        tiny_yolo_search_expand:          float = 20.0,
+        siam_tracker: object,
+        yolo_weights: str = "yolo11n.pt",
+        conf_threshold: float = 0.60,
+        reacq_threshold: float = 0.55,
+        yolo_conf: float = 0.30,
+        yolo_iou: float = 0.45,
+        app_match_threshold: float = 0.72,
+        nudge_alpha: float = 0.30,
+        tau_occ: float = 0.40,
+        beta: float = 0.06,
+        mem_capacity: int = 20,
+        tau_iou: float = 0.40,
+        tau_area: float = 0.25,
+        ncc_threshold: float = 0.70,
+        ncc_expand: float = 2.5,
+        conf_history_len: int = 200,
+        history_decay: float = 0.5,
+        history_skip_last: int = 2,
+        yolo_search_expand: float = 5.0,
+        roi_start_expand: float = 1.5,
+        size_history_len: int = 40,
+        drm_capacity: int = 8,
+        drm_tau_sim: float = 0.85,
+        drm_window_W: int = 10,
+        drm_mmin: int = 3,
+        drm_lam_iou: float = 0.40,
+        drm_lam_app: float = 0.30,
+        drm_lam_mot: float = 0.20,
+        drm_lam_time: float = 0.10,
+        drm_alpha: float = 0.05,
+        drm_gamma: float = 0.30,
+        drm_margin: float = 0.35,
+        drm_top_k: int = 3,
+        drm_skip_threshold: float = 0.80,
+        drm_lam_dist: float = 0.15,
+        drm_dist_sigma_factor: float = 2.5,
+        drm_lam_cand_dir: float = 0.15,
+        drm_lam_cand_vel: float = 0.20,
+        vel_score_min_speed: float = 0.5,
+        ekf_process_noise: float = 2.0,
+        ekf_meas_noise: float = 5.0,
+        homo_max_corners: int = 200,
+        homo_inlier_threshold: float = 0.50,
+        shrinkage_min_drop_frac: float = 0.06,
+        shrinkage_max_lookback: int = 60,
+        velocity_lookback: int = 3,
+        velocity_smooth_alpha: float = 0.4,
+        distractor_bank_maxlen: int = 50,
+        velocity_decay: float = 0.95,
+        search_expand_growth_factor: float = 1.2,
+        search_expand_growth_every: int = 5,
+        search_expand_max: float = 15.0,
+        long_distance_conf_threshold: float = 0.35,
+        long_distance_area_fraction: float = 0.004,
+        long_distance_mode: bool = False,
+        enter_occlusion_on_loss: bool = True,
+        velocity_window_average: int = 80,
+        occlusion_patience: int = 5,
+        occlusion_hysteresis: float = 0.10,
+        tiny_roi_start_expand: float = 3.0,
+        tiny_yolo_search_expand: float = 20.0,
         tiny_search_expand_growth_factor: float = 1.3,
-        tiny_search_expand_growth_every:  int   = 5,
-        tiny_search_expand_max:           float = 40.0,
-        entry_patience:                   int   = 3,
-        cand_collection_frames:           int   = 3,
-        vel_dir_hard_gate:                float = 0.5,
-        yolo_filter_class:                bool  = False,
-        yolo_class_detect_frames:         int   = 5,
+        tiny_search_expand_growth_every: int = 5,
+        tiny_search_expand_max: float = 40.0,
+        entry_patience: int = 3,
+        cand_collection_frames: int = 3,
+        vel_dir_hard_gate: float = 0.5,
+        yolo_filter_class: bool = False,
+        yolo_class_detect_frames: int = 5,
     ):
         """
         Inputs:
@@ -160,135 +162,134 @@ class SiamRAMTracker:
             touching the implementation. Keeping all defaults sane means it works
             out of the box for most scenarios while still being fully adjustable.
         """
-        self.tracker              = siam_tracker
-        self.yolo                 = YOLO(yolo_weights)
-        self.conf_threshold       = conf_threshold
-        self.reacq_threshold      = reacq_threshold
-        self.yolo_conf            = yolo_conf
-        self.yolo_iou_thr         = yolo_iou
-        self.app_match_threshold  = app_match_threshold
-        self.nudge_alpha          = nudge_alpha
-        self.tau_occ              = tau_occ
-        self.beta                 = beta
-        self.ncc_threshold        = ncc_threshold
-        self.ncc_expand           = ncc_expand
-        self.conf_history_len     = conf_history_len
-        self.history_decay        = history_decay
-        self.history_skip_last    = history_skip_last
-        self.yolo_search_expand   = yolo_search_expand
-        self.roi_start_expand     = roi_start_expand
-        self.size_history_len     = size_history_len
+        self.tracker = siam_tracker
+        self.yolo = YOLO(yolo_weights)
+        self.conf_threshold = conf_threshold
+        self.reacq_threshold = reacq_threshold
+        self.yolo_conf = yolo_conf
+        self.yolo_iou_thr = yolo_iou
+        self.app_match_threshold = app_match_threshold
+        self.nudge_alpha = nudge_alpha
+        self.tau_occ = tau_occ
+        self.beta = beta
+        self.ncc_threshold = ncc_threshold
+        self.ncc_expand = ncc_expand
+        self.conf_history_len = conf_history_len
+        self.history_decay = history_decay
+        self.history_skip_last = history_skip_last
+        self.yolo_search_expand = yolo_search_expand
+        self.roi_start_expand = roi_start_expand
+        self.size_history_len = size_history_len
 
-        self.ekf_process_noise     = ekf_process_noise
-        self.ekf_meas_noise        = ekf_meas_noise
-        self.homo_max_corners      = homo_max_corners
+        self.ekf_process_noise = ekf_process_noise
+        self.ekf_meas_noise = ekf_meas_noise
+        self.homo_max_corners = homo_max_corners
         self.homo_inlier_threshold = homo_inlier_threshold
 
         self.shrinkage_min_drop_frac = shrinkage_min_drop_frac
-        self.shrinkage_max_lookback  = shrinkage_max_lookback
+        self.shrinkage_max_lookback = shrinkage_max_lookback
 
-        self.velocity_lookback      = velocity_lookback
-        self.velocity_smooth_alpha  = velocity_smooth_alpha
+        self.velocity_lookback = velocity_lookback
+        self.velocity_smooth_alpha = velocity_smooth_alpha
 
         self._distractor_bank_maxlen = distractor_bank_maxlen
         self.velocity_window_average = velocity_window_average
 
         self.search_expand_growth_factor = search_expand_growth_factor
-        self.search_expand_growth_every  = search_expand_growth_every
-        self.search_expand_max           = search_expand_max
-        self._occ_frames: int            = 0
+        self.search_expand_growth_every = search_expand_growth_every
+        self.search_expand_max = search_expand_max
+        self._occ_frames: int = 0
 
         self._drm_dist_sigma_factor = drm_dist_sigma_factor
-        self._size_history: deque   = deque(maxlen=size_history_len)
+        self._size_history: deque = deque(maxlen=size_history_len)
         self._cam_disp_history: deque = deque(maxlen=conf_history_len)
         self._vel_history: deque = deque(maxlen=200)
 
-        self.long_distance_conf_threshold  = long_distance_conf_threshold
-        self.long_distance_area_fraction   = long_distance_area_fraction
-        self.long_distance_mode            = long_distance_mode
-        self.recovered_early_occlusion     = True
-        self.enter_occlusion_on_loss       = enter_occlusion_on_loss
+        self.long_distance_conf_threshold = long_distance_conf_threshold
+        self.long_distance_area_fraction = long_distance_area_fraction
+        self.long_distance_mode = long_distance_mode
+        self.recovered_early_occlusion = True
+        self.enter_occlusion_on_loss = enter_occlusion_on_loss
         self._drm_kwargs = dict(
-            lam_iou        = drm_lam_iou,
-            lam_app        = drm_lam_app,
-            lam_mot        = drm_lam_mot,
-            lam_time       = drm_lam_time,
-            alpha          = drm_alpha,
-            gamma          = drm_gamma,
-            margin         = drm_margin,
-            top_k          = drm_top_k,
-            skip_threshold = drm_skip_threshold,
-            lam_dist       = drm_lam_dist,
-            lam_cand_dir   = drm_lam_cand_dir,
+            lam_iou=drm_lam_iou,
+            lam_app=drm_lam_app,
+            lam_mot=drm_lam_mot,
+            lam_time=drm_lam_time,
+            alpha=drm_alpha,
+            gamma=drm_gamma,
+            margin=drm_margin,
+            top_k=drm_top_k,
+            skip_threshold=drm_skip_threshold,
+            lam_dist=drm_lam_dist,
+            lam_cand_dir=drm_lam_cand_dir,
         )
 
-        self._drm_lam_cand_dir        = drm_lam_cand_dir
-        self._vel_score_min_speed     = vel_score_min_speed
-        self._entry_patience          = max(1, entry_patience)
-        self._cand_collection_frames  = max(1, cand_collection_frames)
+        self._drm_lam_cand_dir = drm_lam_cand_dir
+        self._vel_score_min_speed = vel_score_min_speed
+        self._entry_patience = max(1, entry_patience)
+        self._cand_collection_frames = max(1, cand_collection_frames)
 
-        self.tiny_roi_start_expand            = tiny_roi_start_expand
-        self.tiny_yolo_search_expand          = tiny_yolo_search_expand
+        self.tiny_roi_start_expand = tiny_roi_start_expand
+        self.tiny_yolo_search_expand = tiny_yolo_search_expand
         self.tiny_search_expand_growth_factor = tiny_search_expand_growth_factor
-        self.tiny_search_expand_growth_every  = tiny_search_expand_growth_every
-        self.tiny_search_expand_max           = tiny_search_expand_max
+        self.tiny_search_expand_growth_every = tiny_search_expand_growth_every
+        self.tiny_search_expand_max = tiny_search_expand_max
 
         self.memory = AppearanceMemory(
-            capacity     = mem_capacity,
-            tau_iou      = tau_iou,
-            tau_area     = tau_area,
-            drm_capacity = drm_capacity,
-            tau_sim      = drm_tau_sim,
-            window_W     = drm_window_W,
-            mmin         = drm_mmin,
+            capacity=mem_capacity,
+            tau_iou=tau_iou,
+            tau_area=tau_area,
+            drm_capacity=drm_capacity,
+            tau_sim=drm_tau_sim,
+            window_W=drm_window_W,
+            mmin=drm_mmin,
         )
 
-        self.current_bbox:       Optional[np.ndarray] = None
-        self.held_box:           Optional[np.ndarray] = None
-        self.in_occlusion:       bool                 = False
-        self.frame_idx:          int                  = 0
-        self.velocity:           np.ndarray           = np.zeros(2)
-        self.prev_gray:          Optional[np.ndarray] = None
-        self.init_frame:         Optional[np.ndarray] = None
-        self.init_bbox:          Optional[np.ndarray] = None
-        self._last_yolo:         List                 = []
-        self._yolo_cache:        List                 = []
-        self._distractor_bank:   deque                = deque(maxlen=distractor_bank_maxlen)
-        self._out_of_frame:      bool                 = False
-        self._exit_edge:         Optional[str]        = None
-        self._search_cx:         Optional[float]      = None
-        self._search_cy:         Optional[float]      = None
-        self._conf_history:      deque                = deque(maxlen=conf_history_len)
-        self._center_history:    deque                = deque(maxlen=200)
-        self._cam_vel_history:   deque                = deque(maxlen=200)
+        self.current_bbox: Optional[np.ndarray] = None
+        self.held_box: Optional[np.ndarray] = None
+        self.in_occlusion: bool = False
+        self.frame_idx: int = 0
+        self.velocity: np.ndarray = np.zeros(2)
+        self.prev_gray: Optional[np.ndarray] = None
+        self.init_frame: Optional[np.ndarray] = None
+        self.init_bbox: Optional[np.ndarray] = None
+        self._last_yolo: List = []
+        self._yolo_cache: List = []
+        self._distractor_bank: deque = deque(maxlen=distractor_bank_maxlen)
+        self._out_of_frame: bool = False
+        self._exit_edge: Optional[str] = None
+        self._search_cx: Optional[float] = None
+        self._search_cy: Optional[float] = None
+        self._conf_history: deque = deque(maxlen=conf_history_len)
+        self._center_history: deque = deque(maxlen=200)
+        self._cam_vel_history: deque = deque(maxlen=200)
 
-        self._vel_dir_hard_gate        = vel_dir_hard_gate
-        self._yolo_filter_class        = yolo_filter_class
+        self._vel_dir_hard_gate = vel_dir_hard_gate
+        self._yolo_filter_class = yolo_filter_class
         self._yolo_class_detect_frames = yolo_class_detect_frames
-        self._target_class_id:  Optional[int] = None
-        self._class_warmup_done: bool          = False
+        self._target_class_id: Optional[int] = None
+        self._class_warmup_done: bool = False
 
-        self._occ_phase:          int  = 0
+        self._occ_phase: int = 0
         self._pending_candidates: List = []
 
-        self._cand_frames:   List = []
-        self._occ_cam_vels:  List = []
+        self._cand_frames: List = []
+        self._occ_cam_vels: List = []
 
         self._entry_streak: int = 0
 
         self.ekf: Optional[BBoxEKF] = None
-        self._last_H:          Optional[np.ndarray] = None
-        self._last_H_reliable: bool                 = False
+        self._last_H: Optional[np.ndarray] = None
+        self._last_H_reliable: bool = False
 
-        self._flow_scale   = 0.5
-        self._cached_pts   = None
+        self._flow_scale = 0.5
+        self._cached_pts = None
         self._cached_shape = None
 
         self._low_score_streak = 0
-        self._occlusion_patience   = occlusion_patience
+        self._occlusion_patience = occlusion_patience
         self._occlusion_hysteresis = occlusion_hysteresis
         self._gated_score = 1.0
-
 
     def initialize(self, frame: np.ndarray, bbox) -> None:
         """
@@ -316,37 +317,37 @@ class SiamRAMTracker:
         self.tracker.enable_tta()
         bbox = np.array(bbox, dtype=int)
         self.tracker.initialize(frame, bbox)
-        self.current_bbox     = bbox.copy()
-        self.held_box         = bbox.copy()
-        self.in_occlusion     = False
-        self.frame_idx        = 0
-        self.velocity         = np.zeros(2)
-        self.prev_gray        = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        self.init_frame       = frame.copy()
-        self.init_bbox        = bbox.copy()
+        self.current_bbox = bbox.copy()
+        self.held_box = bbox.copy()
+        self.in_occlusion = False
+        self.frame_idx = 0
+        self.velocity = np.zeros(2)
+        self.prev_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        self.init_frame = frame.copy()
+        self.init_bbox = bbox.copy()
         self._distractor_bank = deque(maxlen=self._distractor_bank_maxlen)
-        self._out_of_frame    = False
-        self._exit_edge       = None
-        self._search_cx       = None
-        self._search_cy       = None
+        self._out_of_frame = False
+        self._exit_edge = None
+        self._search_cx = None
+        self._search_cy = None
         self._size_history.clear()
         self.memory.reset()
         self._conf_history.clear()
         self._cam_disp_history.clear()
-        self._yolo_cache      = []
-        self._occ_frames      = 0
-        self._occ_phase       = 0
+        self._yolo_cache = []
+        self._occ_frames = 0
+        self._occ_phase = 0
         self._pending_candidates = []
         self.recovered_early_occlusion = True
-        self._last_H          = None
+        self._last_H = None
         self._last_H_reliable = False
-        self._last_yolo       = []
+        self._last_yolo = []
 
-        self._entry_streak  = 0
-        self._cand_frames   = []
-        self._occ_cam_vels  = []
+        self._entry_streak = 0
+        self._cand_frames = []
+        self._occ_cam_vels = []
 
-        self._target_class_id   = None
+        self._target_class_id = None
         self._class_warmup_done = False
 
         self.ekf = BBoxEKF(bbox,
@@ -360,7 +361,6 @@ class SiamRAMTracker:
         self._cam_vel_history.clear()
         if desc is not None:
             self.memory.try_admit(bbox, desc, bbox)
-
 
     def update(self, frame: np.ndarray) -> Tuple[np.ndarray, float, bool, List]:
         """
@@ -388,12 +388,12 @@ class SiamRAMTracker:
             transitions — entering occlusion, recovery phases, EKF prediction —
             happen as a side effect of calling this.
         """
-        self.frame_idx  += 1
-        self._last_yolo  = []
+        self.frame_idx += 1
+        self._last_yolo = []
         self._yolo_cache = []
 
         H, H_reliable, current_gray = self._estimate_homography(frame)
-        self._last_H          = H
+        self._last_H = H
         self._last_H_reliable = H_reliable
 
         if self.in_occlusion and self._out_of_frame:
@@ -412,7 +412,6 @@ class SiamRAMTracker:
             return np.zeros(4, dtype=int), 0.0, True, self._last_yolo
 
         return bbox.copy(), float(score), self.in_occlusion, self._last_yolo
-
 
     def _normal_update(self, frame: np.ndarray) -> Tuple[np.ndarray, float]:
         """
@@ -448,9 +447,9 @@ class SiamRAMTracker:
         pred_bbox = np.array(pred_bbox, dtype=int)
 
         if (self._yolo_filter_class
-        and not self._class_warmup_done
-        and self.frame_idx <= self._yolo_class_detect_frames * 3
-        and self.frame_idx % max(1, self._yolo_class_detect_frames) == 0):
+            and not self._class_warmup_done
+            and self.frame_idx <= self._yolo_class_detect_frames * 3
+            and self.frame_idx % max(1, self._yolo_class_detect_frames) == 0):
             self._try_detect_target_class(frame)
             if self.frame_idx >= self._yolo_class_detect_frames * 2:
                 self._maybe_commit_target_class()
@@ -471,23 +470,23 @@ class SiamRAMTracker:
             effective_threshold = 0.0
 
         if (score < effective_threshold
-                and self.frame_idx >= 30
-                and self.enter_occlusion_on_loss):
+            and self.frame_idx >= 30
+            and self.enter_occlusion_on_loss):
             self._entry_streak += 1
         else:
             self._entry_streak = 0
 
         if (self._entry_streak >= self._entry_patience
-                and self.frame_idx >= 30
-                and self.enter_occlusion_on_loss):
+            and self.frame_idx >= 30
+            and self.enter_occlusion_on_loss):
 
-            entry_streak_val   = self._entry_streak
+            entry_streak_val = self._entry_streak
             self._entry_streak = 0
-            self.in_occlusion  = True
+            self.in_occlusion = True
 
             is_exiting, exit_edge = self._detect_exit_direction(frame)
             self._out_of_frame = is_exiting
-            self._exit_edge    = exit_edge
+            self._exit_edge = exit_edge
 
             loss_cause = self._classify_loss_cause()
             if is_exiting:
@@ -500,11 +499,11 @@ class SiamRAMTracker:
                 f"entry_streak={entry_streak_val}"
             )
 
-            area_skip    = self._detect_shrinkage_onset(
-                max_lookback  = self.shrinkage_max_lookback,
-                min_drop_frac = self.shrinkage_min_drop_frac,
+            area_skip = self._detect_shrinkage_onset(
+                max_lookback=self.shrinkage_max_lookback,
+                min_drop_frac=self.shrinkage_min_drop_frac,
             )
-            drift_skip   = self._detect_center_drift_skip(
+            drift_skip = self._detect_center_drift_skip(
                 max_lookback=self.shrinkage_max_lookback)
             dynamic_skip = max(area_skip, drift_skip)
 
@@ -521,10 +520,10 @@ class SiamRAMTracker:
                 f"history_len={len(self._conf_history)}"
             )
 
-            self._occ_phase          = 0
+            self._occ_phase = 0
             self._pending_candidates = []
-            self._cand_frames        = []
-            self._occ_cam_vels       = []
+            self._cand_frames = []
+            self._occ_cam_vels = []
 
             self.ekf = self._rebuild_ekf_from_clean_history(
                 skip_override=effective_skip)
@@ -545,12 +544,12 @@ class SiamRAMTracker:
         h_fr, w_fr = frame.shape[:2]
         if self._last_H is not None:
             cx, cy = w_fr / 2.0, h_fr / 2.0
-            denom  = (self._last_H[2,0]*cx + self._last_H[2,1]*cy
-                      + self._last_H[2,2] + 1e-8)
-            ncx    = ((self._last_H[0,0]*cx + self._last_H[0,1]*cy
-                       + self._last_H[0,2]) / denom)
-            ncy    = ((self._last_H[1,0]*cx + self._last_H[1,1]*cy
-                       + self._last_H[1,2]) / denom)
+            denom = (self._last_H[2, 0] * cx + self._last_H[2, 1] * cy
+                     + self._last_H[2, 2] + 1e-8)
+            ncx = ((self._last_H[0, 0] * cx + self._last_H[0, 1] * cy
+                    + self._last_H[0, 2]) / denom)
+            ncy = ((self._last_H[1, 0] * cx + self._last_H[1, 1] * cy
+                    + self._last_H[1, 2]) / denom)
             self._cam_vel_history.append(np.array([ncx - cx, ncy - cy]))
         else:
             self._cam_vel_history.append(np.zeros(2))
@@ -568,19 +567,18 @@ class SiamRAMTracker:
                 self.memory.try_admit(pred_bbox, desc, self.current_bbox)
 
         self.current_bbox = pred_bbox.copy()
-        self.held_box     = pred_bbox.copy()
+        self.held_box = pred_bbox.copy()
         self._size_history.append((int(pred_bbox[2]), int(pred_bbox[3])))
         self._conf_history.append((pred_bbox.copy(), self.velocity.copy(),
                                    self._last_H, self._last_H_reliable))
 
         return pred_bbox, score
 
-
     def _compute_velocity_from_history(
         self,
-        current_bbox:  np.ndarray,
-        lookback:      Optional[int]   = None,
-        smooth_alpha:  Optional[float] = None,
+        current_bbox: np.ndarray,
+        lookback: Optional[int] = None,
+        smooth_alpha: Optional[float] = None,
     ) -> np.ndarray:
         """
         Inputs:
@@ -607,14 +605,14 @@ class SiamRAMTracker:
             right matters a lot — bad velocity estimates cause the EKF to
             extrapolate the wrong direction during occlusion.
         """
-        lb    = lookback     if lookback     is not None else self.velocity_lookback
+        lb = lookback if lookback is not None else self.velocity_lookback
         alpha = smooth_alpha if smooth_alpha is not None else self.velocity_smooth_alpha
 
         if not self._conf_history:
             return np.zeros(2)
 
         history = list(self._conf_history)
-        n_back  = min(lb, len(history))
+        n_back = min(lb, len(history))
         if n_back == 0:
             return np.zeros(2)
 
@@ -622,8 +620,8 @@ class SiamRAMTracker:
         curr_cy = current_bbox[1] + current_bbox[3] / 2.0
 
         ref_bbox = history[-n_back][0]
-        ref_cx   = ref_bbox[0] + ref_bbox[2] / 2.0
-        ref_cy   = ref_bbox[1] + ref_bbox[3] / 2.0
+        ref_cx = ref_bbox[0] + ref_bbox[2] / 2.0
+        ref_cy = ref_bbox[1] + ref_bbox[3] / 2.0
 
         raw_vx = (curr_cx - ref_cx) / n_back
         raw_vy = (curr_cy - ref_cy) / n_back
@@ -631,7 +629,6 @@ class SiamRAMTracker:
         vx = alpha * raw_vx + (1.0 - alpha) * self.velocity[0]
         vy = alpha * raw_vy + (1.0 - alpha) * self.velocity[1]
         return np.array([vx, vy])
-
 
     def _init_search_centre_from_history(self, skip_override=None) -> None:
         """
@@ -657,20 +654,19 @@ class SiamRAMTracker:
             area honest at the start of recovery.
         """
         history = list(self._conf_history)
-        skip    = (min(self.history_skip_last, len(history) - 1)
-                   if skip_override is None else skip_override)
-        clean   = history[:len(history) - skip] if skip > 0 else history
+        skip = (min(self.history_skip_last, len(history) - 1)
+                if skip_override is None else skip_override)
+        clean = history[:len(history) - skip] if skip > 0 else history
 
         if clean:
-            last_clean_bbox  = clean[-1][0].astype(float)
-            self._search_cx  = last_clean_bbox[0] + last_clean_bbox[2] / 2.0
-            self._search_cy  = last_clean_bbox[1] + last_clean_bbox[3] / 2.0
+            last_clean_bbox = clean[-1][0].astype(float)
+            self._search_cx = last_clean_bbox[0] + last_clean_bbox[2] / 2.0
+            self._search_cy = last_clean_bbox[1] + last_clean_bbox[3] / 2.0
         else:
-            self._search_cx  = float(self.current_bbox[0]
-                                     + self.current_bbox[2] / 2.0)
-            self._search_cy  = float(self.current_bbox[1]
-                                     + self.current_bbox[3] / 2.0)
-
+            self._search_cx = float(self.current_bbox[0]
+                                    + self.current_bbox[2] / 2.0)
+            self._search_cy = float(self.current_bbox[1]
+                                    + self.current_bbox[3] / 2.0)
 
     def _occlusion_update(self, frame: np.ndarray) -> Tuple[np.ndarray, float]:
         """
@@ -701,11 +697,11 @@ class SiamRAMTracker:
         """
         h_fr, w_fr = frame.shape[:2]
 
-        ekf_raw         = self.ekf.get_bbox()
+        ekf_raw = self.ekf.get_bbox()
         self._search_cx = float(ekf_raw[0] + ekf_raw[2] / 2.0)
         self._search_cy = float(ekf_raw[1] + ekf_raw[3] / 2.0)
-        self.held_box   = self._clamp_bbox_to_frame(ekf_raw, frame)
-        self.velocity   = self.ekf.get_velocity()
+        self.held_box = self._clamp_bbox_to_frame(ekf_raw, frame)
+        self.velocity = self.ekf.get_velocity()
         self._occ_frames += 1
 
         if self._out_of_frame and self._exit_edge is not None:
@@ -724,21 +720,25 @@ class SiamRAMTracker:
             vel_inward = False
             if ekf_inside and self._exit_edge is not None:
                 vel_inward = {
-                    'right':  float(self.velocity[0]) < 0,
-                    'left':   float(self.velocity[0]) > 0,
+                    'right': float(self.velocity[0]) < 0,
+                    'left': float(self.velocity[0]) > 0,
                     'bottom': float(self.velocity[1]) < 0,
-                    'top':    float(self.velocity[1]) > 0,
+                    'top': float(self.velocity[1]) > 0,
                 }.get(self._exit_edge, True)
             if ekf_inside and vel_inward:
                 self._out_of_frame = False
-                self._exit_edge    = None
+                self._exit_edge = None
         else:
             if (self._search_cx < 0 or self._search_cx >= w_fr or
-                    self._search_cy < 0 or self._search_cy >= h_fr):
-                if   self._search_cx >= w_fr: self._exit_edge = 'right'
-                elif self._search_cx < 0:     self._exit_edge = 'left'
-                elif self._search_cy >= h_fr: self._exit_edge = 'bottom'
-                else:                         self._exit_edge = 'top'
+                self._search_cy < 0 or self._search_cy >= h_fr):
+                if self._search_cx >= w_fr:
+                    self._exit_edge = 'right'
+                elif self._search_cx < 0:
+                    self._exit_edge = 'left'
+                elif self._search_cy >= h_fr:
+                    self._exit_edge = 'bottom'
+                else:
+                    self._exit_edge = 'top'
                 self._out_of_frame = True
 
         if self._occ_phase == 0:
@@ -747,7 +747,6 @@ class SiamRAMTracker:
             return self._occ_phase_collect(frame)
         else:
             return self._occ_phase_final_drm(frame)
-
 
     def _occ_phase_siam(self, frame: np.ndarray) -> Tuple[np.ndarray, float]:
         """
@@ -780,8 +779,8 @@ class SiamRAMTracker:
 
         obj_w, obj_h = self._get_median_size()
 
-        roi_cx    = rx + rw / 2.0
-        roi_cy    = ry + rh / 2.0
+        roi_cx = rx + rw / 2.0
+        roi_cy = ry + rh / 2.0
         seed_bbox = np.array([
             int(roi_cx - obj_w / 2.0),
             int(roi_cy - obj_h / 2.0),
@@ -799,20 +798,20 @@ class SiamRAMTracker:
             cand_vel_phase0 = None
             if self._conf_history:
                 last_bbox = self._conf_history[-1][0]
-                dx = (pred_bbox[0] + pred_bbox[2]/2.0) - (last_bbox[0] + last_bbox[2]/2.0)
-                dy = (pred_bbox[1] + pred_bbox[3]/2.0) - (last_bbox[1] + last_bbox[3]/2.0)
+                dx = (pred_bbox[0] + pred_bbox[2] / 2.0) - (last_bbox[0] + last_bbox[2] / 2.0)
+                dy = (pred_bbox[1] + pred_bbox[3] / 2.0) - (last_bbox[1] + last_bbox[3] / 2.0)
                 cam = self._cam_vel_from_H(frame)
                 cand_vel_phase0 = np.array([dx - cam[0], dy - cam[1]])
 
             drm_results = self.memory.drm_match(
-                frame           = frame,
-                candidates      = [pred_bbox],
-                ref_bbox        = self.held_box,
-                velocity        = self.velocity,
-                distractor_bank = self._distractor_bank,
-                search_cx       = self._search_cx,
-                search_cy       = self._search_cy,
-                dist_sigma      = self._effective_dist_sigma(frame),
+                frame=frame,
+                candidates=[pred_bbox],
+                ref_bbox=self.held_box,
+                velocity=self.velocity,
+                distractor_bank=self._distractor_bank,
+                search_cx=self._search_cx,
+                search_cy=self._search_cy,
+                dist_sigma=self._effective_dist_sigma(frame),
                 **self._drm_kwargs,
             )
 
@@ -835,11 +834,10 @@ class SiamRAMTracker:
 
             self.tracker.tracking_state.bbox = self.held_box.copy()
 
-        self._cand_frames  = []
+        self._cand_frames = []
         self._occ_cam_vels = []
-        self._occ_phase    = 1
+        self._occ_phase = 1
         return self.held_box, score
-
 
     def _occ_phase_collect(self, frame: np.ndarray) -> Tuple[np.ndarray, float]:
         """
@@ -870,7 +868,7 @@ class SiamRAMTracker:
         cam_vel = self._cam_vel_from_H(frame)
         self._occ_cam_vels.append(cam_vel)
 
-        detections      = self._yolo_detect(frame)
+        detections = self._yolo_detect(frame)
         self._last_yolo = detections
 
         frame_cands = []
@@ -897,7 +895,6 @@ class SiamRAMTracker:
         self._occ_phase += 1
 
         return self.held_box, 0.0
-
 
     def _occ_phase_final_drm(self, frame: np.ndarray) -> Tuple[np.ndarray, float]:
         """
@@ -938,9 +935,10 @@ class SiamRAMTracker:
             gets a boost; one moving the wrong way gets penalised, reducing
             false reacquisitions on distractors.
         """
+
         def _reset():
-            self._occ_phase    = 0
-            self._cand_frames  = []
+            self._occ_phase = 0
+            self._cand_frames = []
             self._occ_cam_vels = []
             self.tracker.tracking_state.bbox = self.held_box.copy()
 
@@ -952,7 +950,7 @@ class SiamRAMTracker:
 
         if last_idx == -1:
             print(f"[occ frame {self._occ_frames}] phase=final_drm  "
-                f"no candidates in any collection frame — resetting")
+                  f"no candidates in any collection frame — resetting")
             _reset()
             return self.held_box, 0.0
 
@@ -979,7 +977,7 @@ class SiamRAMTracker:
 
         if not fully_tracked_bboxes:
             print(f"[occ frame {self._occ_frames}] phase=final_drm  "
-                f"no fully-tracked candidates — resetting")
+                  f"no fully-tracked candidates — resetting")
             if last_cand_bboxes:
                 self.held_box = self._nudge_toward_nearest(frame, last_cand_bboxes)
                 self.ekf.nudge_position(self.held_box)
@@ -989,14 +987,14 @@ class SiamRAMTracker:
         dist_sigma = self._effective_dist_sigma(frame)
 
         drm_results = self.memory.drm_match(
-            frame           = frame,
-            candidates      = fully_tracked_bboxes,
-            ref_bbox        = self.held_box,
-            velocity        = self.velocity,
-            distractor_bank = self._distractor_bank,
-            search_cx       = self._search_cx,
-            search_cy       = self._search_cy,
-            dist_sigma      = dist_sigma,
+            frame=frame,
+            candidates=fully_tracked_bboxes,
+            ref_bbox=self.held_box,
+            velocity=self.velocity,
+            distractor_bank=self._distractor_bank,
+            search_cx=self._search_cx,
+            search_cy=self._search_cy,
+            dist_sigma=dist_sigma,
             **self._drm_kwargs,
         )
 
@@ -1007,7 +1005,7 @@ class SiamRAMTracker:
             _reset()
             return self.held_box, 0.0
 
-        lam_dir  = self._drm_lam_cand_dir
+        lam_dir = self._drm_lam_cand_dir
         if self._out_of_frame:
             lam_dir = 0.0
         elif self._is_long_distance(frame):
@@ -1025,27 +1023,27 @@ class SiamRAMTracker:
 
         final_scored = []
         for (drm_bbox, drm_score) in drm_results:
-            cand_idx  = _find_cand_idx(drm_bbox)
-            vel       = (cand_vels[cand_idx]
-                        if cand_idx is not None and cand_idx < len(cand_vels)
-                        else None)
+            cand_idx = _find_cand_idx(drm_bbox)
+            vel = (cand_vels[cand_idx]
+                   if cand_idx is not None and cand_idx < len(cand_vels)
+                   else None)
             dir_score = (self._compute_velocity_score(vel, expected_vel)
-                        if vel is not None else 0.5)
+                         if vel is not None else 0.5)
 
             augmented = drm_score + lam_dir * (2.0 * dir_score - 1.0)
             final_scored.append((drm_bbox, augmented, dir_score))
 
         final_scored.sort(key=lambda x: x[1], reverse=True)
 
-        vx    = float(self.velocity[0])
-        vy    = float(self.velocity[1])
+        vx = float(self.velocity[0])
+        vy = float(self.velocity[1])
         top_k = self._drm_kwargs.get('top_k', 3)
 
         for (match_bbox, match_score, vel_score) in final_scored[:top_k]:
-            adjusted    = match_bbox.astype(float).copy()
+            adjusted = match_bbox.astype(float).copy()
             adjusted[0] += vx
             adjusted[1] += vy
-            adjusted    = self._clamp_bbox_to_frame(
+            adjusted = self._clamp_bbox_to_frame(
                 np.array(adjusted, dtype=int), frame)
 
             self.tracker.dynamic_update = False
@@ -1063,7 +1061,7 @@ class SiamRAMTracker:
             if verify_score >= self.reacq_threshold:
                 self.recovered_early_occlusion = True
                 desc = _extract_descriptor(frame, verify_bbox)
-                self._cand_frames  = []
+                self._cand_frames = []
                 self._occ_cam_vels = []
                 return self._commit_reacquisition(
                     frame, verify_bbox, desc, verify_score)
@@ -1071,12 +1069,11 @@ class SiamRAMTracker:
         _reset()
         return self.held_box, 0.0
 
-
     def _commit_reacquisition(
         self,
         frame: np.ndarray,
-        bbox:  np.ndarray,
-        desc:  Optional[np.ndarray],
+        bbox: np.ndarray,
+        desc: Optional[np.ndarray],
         score: float,
     ) -> Tuple[np.ndarray, float]:
         """
@@ -1108,16 +1105,16 @@ class SiamRAMTracker:
             it easy to test and audit.
         """
         self.ekf.update(bbox)
-        ekf_bbox      = self.ekf.get_bbox()
+        ekf_bbox = self.ekf.get_bbox()
         self.velocity = self.ekf.get_velocity()
 
-        self.in_occlusion  = False
+        self.in_occlusion = False
         self._out_of_frame = False
-        self._exit_edge    = None
-        self._occ_frames   = 0
-        self._occ_phase    = 0
+        self._exit_edge = None
+        self._occ_frames = 0
+        self._occ_phase = 0
         self._pending_candidates = []
-        self._cand_frames  = []
+        self._cand_frames = []
         self._occ_cam_vels = []
         self._entry_streak = 0
         self.tracker.enable_tta()
@@ -1126,10 +1123,10 @@ class SiamRAMTracker:
         if desc is not None:
             self.memory.try_admit(ekf_bbox, desc, self.held_box)
         self.current_bbox = ekf_bbox.copy()
-        self.held_box     = ekf_bbox.copy()
+        self.held_box = ekf_bbox.copy()
         self.tracker.tracking_state.bbox = ekf_bbox.copy()
-        self._search_cx   = float(ekf_bbox[0] + ekf_bbox[2] / 2.0)
-        self._search_cy   = float(ekf_bbox[1] + ekf_bbox[3] / 2.0)
+        self._search_cx = float(ekf_bbox[0] + ekf_bbox[2] / 2.0)
+        self._search_cy = float(ekf_bbox[1] + ekf_bbox[3] / 2.0)
 
         cx = float(ekf_bbox[0] + ekf_bbox[2] / 2.0)
         cy = float(ekf_bbox[1] + ekf_bbox[3] / 2.0)
@@ -1139,12 +1136,12 @@ class SiamRAMTracker:
         if self._last_H is not None:
             h_fr, w_fr = frame.shape[:2]
             cx, cy = w_fr / 2.0, h_fr / 2.0
-            denom  = (self._last_H[2,0]*cx + self._last_H[2,1]*cy
-                      + self._last_H[2,2] + 1e-8)
-            ncx    = ((self._last_H[0,0]*cx + self._last_H[0,1]*cy
-                       + self._last_H[0,2]) / denom)
-            ncy    = ((self._last_H[1,0]*cx + self._last_H[1,1]*cy
-                       + self._last_H[1,2]) / denom)
+            denom = (self._last_H[2, 0] * cx + self._last_H[2, 1] * cy
+                     + self._last_H[2, 2] + 1e-8)
+            ncx = ((self._last_H[0, 0] * cx + self._last_H[0, 1] * cy
+                    + self._last_H[0, 2]) / denom)
+            ncy = ((self._last_H[1, 0] * cx + self._last_H[1, 1] * cy
+                    + self._last_H[1, 2]) / denom)
             cam_disp = np.array([ncx - cx, ncy - cy])
         self._cam_vel_history.append(cam_disp)
 
@@ -1155,7 +1152,6 @@ class SiamRAMTracker:
             self._last_H_reliable,
         ))
         return ekf_bbox, score
-
 
     def _get_median_size(self) -> Tuple[int, int]:
         """
@@ -1185,7 +1181,6 @@ class SiamRAMTracker:
             h = max(1, int(self.held_box[3]))
         return w, h
 
-
     def _cam_vel_from_H(self, frame: np.ndarray) -> np.ndarray:
         """
         Inputs:
@@ -1210,14 +1205,13 @@ class SiamRAMTracker:
             return np.zeros(2)
         h_fr, w_fr = frame.shape[:2]
         cx, cy = w_fr / 2.0, h_fr / 2.0
-        denom  = (self._last_H[2,0]*cx + self._last_H[2,1]*cy
-                  + self._last_H[2,2] + 1e-8)
-        ncx    = ((self._last_H[0,0]*cx + self._last_H[0,1]*cy
-                   + self._last_H[0,2]) / denom)
-        ncy    = ((self._last_H[1,0]*cx + self._last_H[1,1]*cy
-                   + self._last_H[1,2]) / denom)
+        denom = (self._last_H[2, 0] * cx + self._last_H[2, 1] * cy
+                 + self._last_H[2, 2] + 1e-8)
+        ncx = ((self._last_H[0, 0] * cx + self._last_H[0, 1] * cy
+                + self._last_H[0, 2]) / denom)
+        ncy = ((self._last_H[1, 0] * cx + self._last_H[1, 1] * cy
+                + self._last_H[1, 2]) / denom)
         return np.array([ncx - cx, ncy - cy])
-
 
     def _effective_dist_sigma(self, frame: np.ndarray) -> float:
         """
@@ -1246,10 +1240,9 @@ class SiamRAMTracker:
             automatically, without any manual tuning per sequence.
         """
         obj_w, obj_h = self._get_median_size()
-        size_sigma   = self._drm_dist_sigma_factor * float(max(obj_w, obj_h))
-        ekf_sigma    = self.ekf.get_uncertainty() * 1.5
+        size_sigma = self._drm_dist_sigma_factor * float(max(obj_w, obj_h))
+        ekf_sigma = self.ekf.get_uncertainty() * 1.5
         return max(size_sigma, ekf_sigma)
-
 
     def _build_candidate_velocities(
         self,
@@ -1313,17 +1306,17 @@ class SiamRAMTracker:
                     all_found = False
                     break
 
-                best_score  = 0.35
-                best_cx_e   = None
-                best_cy_e   = None
+                best_score = 0.35
+                best_cx_e = None
+                best_cy_e = None
 
                 for (bbox_e, desc_e) in early_frame:
                     match = (0.55 * _iou(bbox_last, bbox_e)
-                            + 0.45 * _cos_sim(desc_last, desc_e))
+                             + 0.45 * _cos_sim(desc_last, desc_e))
                     if match > best_score:
                         best_score = match
-                        best_cx_e  = float(bbox_e[0] + bbox_e[2] / 2.0)
-                        best_cy_e  = float(bbox_e[1] + bbox_e[3] / 2.0)
+                        best_cx_e = float(bbox_e[0] + bbox_e[2] / 2.0)
+                        best_cy_e = float(bbox_e[1] + bbox_e[3] / 2.0)
 
                 if best_cx_e is None:
                     all_found = False
@@ -1351,13 +1344,12 @@ class SiamRAMTracker:
                     cam = np.zeros(2)
 
                 step_vels.append(np.array([raw_dx - cam[0], raw_dy - cam[1]],
-                                        dtype=float))
+                                          dtype=float))
 
             found_vel = np.mean(step_vels, axis=0) if step_vels else np.zeros(2)
             results.append(found_vel)
 
         return results
-
 
     def _compute_velocity_score(self, cand_vel, expected_vel) -> float:
         """
@@ -1391,7 +1383,7 @@ class SiamRAMTracker:
             than just look like it.
         """
         expected_speed = float(np.linalg.norm(expected_vel))
-        cand_speed     = float(np.linalg.norm(cand_vel))
+        cand_speed = float(np.linalg.norm(cand_vel))
         if expected_speed < self._vel_score_min_speed:
             return 0.5
 
@@ -1411,7 +1403,6 @@ class SiamRAMTracker:
             raw = min(raw, 0.05)
 
         return float(np.clip(raw, 0.0, 1.0))
-
 
     def _estimate_homography(
         self, frame: np.ndarray
@@ -1446,9 +1437,9 @@ class SiamRAMTracker:
             to camera motion compensation depends on this being accurate.
         """
         _LK_PARAMS = dict(
-            winSize  = (20, 20),
-            maxLevel = 2,
-            criteria = (
+            winSize=(20, 20),
+            maxLevel=2,
+            criteria=(
                 cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 8, 0.04,
             ),
         )
@@ -1456,7 +1447,7 @@ class SiamRAMTracker:
 
         small = cv2.resize(frame, None, fx=SCALE, fy=SCALE,
                            interpolation=cv2.INTER_LINEAR)
-        gray  = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
 
         if self.prev_gray is None:
             return None, False, gray
@@ -1468,16 +1459,16 @@ class SiamRAMTracker:
         else:
             prev_gray_scaled = self.prev_gray
 
-        H        = None
+        H = None
         reliable = False
 
         if self._cached_shape != gray.shape:
             step = 50
             yg, xg = np.mgrid[
-                step // 2 : gray.shape[0] : step,
-                step // 2 : gray.shape[1] : step,
+                step // 2: gray.shape[0]: step,
+                step // 2: gray.shape[1]: step,
             ]
-            self._cached_pts   = np.column_stack(
+            self._cached_pts = np.column_stack(
                 (xg.ravel(), yg.ravel())).astype(np.float32)
             self._cached_shape = gray.shape
 
@@ -1504,7 +1495,7 @@ class SiamRAMTracker:
         if status is None:
             return H, reliable, gray
 
-        ok       = status.ravel() == 1
+        ok = status.ravel() == 1
         good_old = pts[ok]
         good_new = new_pts[ok]
 
@@ -1513,25 +1504,24 @@ class SiamRAMTracker:
 
         A, inliers = cv2.estimateAffinePartial2D(
             good_old, good_new,
-            method                = cv2.RANSAC,
-            ransacReprojThreshold = 3.0,
-            maxIters              = 500,
-            confidence            = 0.99,
+            method=cv2.RANSAC,
+            ransacReprojThreshold=3.0,
+            maxIters=500,
+            confidence=0.99,
         )
 
         if A is not None and inliers is not None:
             inlier_ratio = float(inliers.sum()) / len(good_old)
-            reliable     = inlier_ratio >= self.homo_inlier_threshold
-            H            = np.eye(3, dtype=np.float64)
-            H[:2, :]     = A
-            H[0, 2]     /= SCALE
-            H[1, 2]     /= SCALE
+            reliable = inlier_ratio >= self.homo_inlier_threshold
+            H = np.eye(3, dtype=np.float64)
+            H[:2, :] = A
+            H[0, 2] /= SCALE
+            H[1, 2] /= SCALE
 
         return H, reliable, gray
 
-
     def _nudge_toward_nearest(self, frame: np.ndarray,
-                               detections: List[np.ndarray]) -> np.ndarray:
+                              detections: List[np.ndarray]) -> np.ndarray:
         """
         Inputs:
             frame      - current video frame as a numpy BGR array
@@ -1556,18 +1546,18 @@ class SiamRAMTracker:
             direction while keeping the tracker conservative enough not to commit
             to an unverified candidate.
         """
-        ref  = self.memory.best_descriptor()
-        hcx  = self.held_box[0] + self.held_box[2] / 2.0
-        hcy  = self.held_box[1] + self.held_box[3] / 2.0
+        ref = self.memory.best_descriptor()
+        hcx = self.held_box[0] + self.held_box[2] / 2.0
+        hcy = self.held_box[1] + self.held_box[3] / 2.0
 
         best_det, best_rank = None, float('inf')
         for det in detections:
-            dcx  = det[0] + det[2] / 2.0
-            dcy  = det[1] + det[3] / 2.0
+            dcx = det[0] + det[2] / 2.0
+            dcy = det[1] + det[3] / 2.0
             dist = np.hypot(dcx - hcx, dcy - hcy)
             if ref is not None:
                 desc = _extract_descriptor(frame, det)
-                sim  = _cos_sim(ref, desc) if desc is not None else 0.0
+                sim = _cos_sim(ref, desc) if desc is not None else 0.0
                 rank = dist * (1.0 - 0.5 * sim)
             else:
                 rank = dist
@@ -1577,19 +1567,18 @@ class SiamRAMTracker:
         if best_det is None:
             return self.held_box.copy()
 
-        dcx    = best_det[0] + best_det[2] / 2.0
-        dcy    = best_det[1] + best_det[3] / 2.0
+        dcx = best_det[0] + best_det[2] / 2.0
+        dcy = best_det[1] + best_det[3] / 2.0
         new_cx = hcx + self.nudge_alpha * (dcx - hcx)
         new_cy = hcy + self.nudge_alpha * (dcy - hcy)
 
-        hw, hh     = self.held_box[2], self.held_box[3]
+        hw, hh = self.held_box[2], self.held_box[3]
         h_fr, w_fr = frame.shape[:2]
         nx = int(np.clip(new_cx - hw / 2.0, 0, w_fr - 1))
         ny = int(np.clip(new_cy - hh / 2.0, 0, h_fr - 1))
         return np.array([nx, ny,
                          int(np.clip(hw, 1, w_fr - nx)),
                          int(np.clip(hh, 1, h_fr - ny))], dtype=int)
-
 
     def _get_yolo_search_roi(self, frame: np.ndarray) -> Tuple[int, int, int, int]:
         """
@@ -1623,34 +1612,34 @@ class SiamRAMTracker:
             target can eventually fall back inside the search window.
         """
         h_fr, w_fr = frame.shape[:2]
-        max_side   = min(w_fr, h_fr)
+        max_side = min(w_fr, h_fr)
 
-        if self.frame_idx <= 30 or self.recovered_early_occlusion == False:
+        if self.frame_idx <= 30 or not self.recovered_early_occlusion:
             self.recovered_early_occlusion = False
             scale = 0.4
-            bw    = int(w_fr * scale)
-            bh    = int(h_fr * scale)
-            x     = (w_fr - bw) // 2
-            y     = (h_fr - bh) // 2
+            bw = int(w_fr * scale)
+            bh = int(h_fr * scale)
+            x = (w_fr - bw) // 2
+            y = (h_fr - bh) // 2
             return x, y, bw, bh
 
         is_tiny = (not self._out_of_frame) and self._is_long_distance(frame)
         if is_tiny:
-            _roi_start_expand            = self.tiny_roi_start_expand
-            _yolo_search_expand          = self.tiny_yolo_search_expand
+            _roi_start_expand = self.tiny_roi_start_expand
+            _yolo_search_expand = self.tiny_yolo_search_expand
             _search_expand_growth_factor = self.tiny_search_expand_growth_factor
-            _search_expand_growth_every  = self.tiny_search_expand_growth_every
+            _search_expand_growth_every = self.tiny_search_expand_growth_every
         else:
-            _roi_start_expand            = self.roi_start_expand
-            _yolo_search_expand          = self.yolo_search_expand
+            _roi_start_expand = self.roi_start_expand
+            _yolo_search_expand = self.yolo_search_expand
             _search_expand_growth_factor = self.search_expand_growth_factor
-            _search_expand_growth_every  = self.search_expand_growth_every
+            _search_expand_growth_every = self.search_expand_growth_every
 
         obj_w, obj_h = self._get_median_size()
-        obj_size     = (obj_w + obj_h) // 2
+        obj_size = (obj_w + obj_h) // 2
 
-        steps            = self._occ_frames // max(1, _search_expand_growth_every)
-        time_expand      = float(_search_expand_growth_factor ** steps)
+        steps = self._occ_frames // max(1, _search_expand_growth_every)
+        time_expand = float(_search_expand_growth_factor ** steps)
         effective_expand = min(_roi_start_expand * time_expand, _yolo_search_expand)
 
         if self._out_of_frame and self._exit_edge is not None:
@@ -1659,34 +1648,34 @@ class SiamRAMTracker:
             if self._exit_edge == 'right':
                 if (self._search_cx - w_fr) > obj_w * 2:
                     return 0, 0, 0, 0
-                scy    = float(np.clip(self._search_cy, side // 2, h_fr - side // 2))
+                scy = float(np.clip(self._search_cy, side // 2, h_fr - side // 2))
                 x1, y1 = w_fr - side, int(scy - side // 2)
-                rw, rh  = side, side
+                rw, rh = side, side
 
             elif self._exit_edge == 'left':
-                scy    = float(np.clip(self._search_cy, side // 2, h_fr - side // 2))
+                scy = float(np.clip(self._search_cy, side // 2, h_fr - side // 2))
                 x1, y1 = 0, int(scy - side // 2)
-                rw, rh  = side, side
+                rw, rh = side, side
 
             elif self._exit_edge == 'bottom':
-                scx    = float(np.clip(self._search_cx, side // 2, w_fr - side // 2))
+                scx = float(np.clip(self._search_cx, side // 2, w_fr - side // 2))
                 x1, y1 = int(scx - side // 2), h_fr - side
-                rw, rh  = side, side
+                rw, rh = side, side
 
             else:
-                scx    = float(np.clip(self._search_cx, side // 2, w_fr - side // 2))
+                scx = float(np.clip(self._search_cx, side // 2, w_fr - side // 2))
                 x1, y1 = int(scx - side // 2), 0
-                rw, rh  = side, side
+                rw, rh = side, side
 
         else:
-            half   = min((obj_size * effective_expand) / 2.0, max_side / 2.0)
-            cx_lo  = min(half, w_fr / 2.0)
-            cy_lo  = min(half, h_fr / 2.0)
-            scx    = float(np.clip(self._search_cx, cx_lo, w_fr - cx_lo))
-            scy    = float(np.clip(self._search_cy, cy_lo, h_fr - cy_lo))
-            side   = max(1, int(half * 2))
+            half = min((obj_size * effective_expand) / 2.0, max_side / 2.0)
+            cx_lo = min(half, w_fr / 2.0)
+            cy_lo = min(half, h_fr / 2.0)
+            scx = float(np.clip(self._search_cx, cx_lo, w_fr - cx_lo))
+            scy = float(np.clip(self._search_cy, cy_lo, h_fr - cy_lo))
+            side = max(1, int(half * 2))
             x1, y1 = int(scx - half), int(scy - half)
-            rw, rh  = side, side
+            rw, rh = side, side
 
         x1 = max(0, x1)
         y1 = max(0, y1)
@@ -1695,7 +1684,6 @@ class SiamRAMTracker:
         rw = max(1, rw)
         rh = max(1, rh)
         return x1, y1, rw, rh
-
 
     def _yolo_detect(self, frame: np.ndarray) -> List[np.ndarray]:
         """
@@ -1722,7 +1710,7 @@ class SiamRAMTracker:
             keeps YOLO inference fast enough to run on embedded/edge hardware.
         """
         rx, ry, rw, rh = self._get_yolo_search_roi(frame)
-        crop           = frame[ry:ry + rh, rx:rx + rw]
+        crop = frame[ry:ry + rh, rx:rx + rw]
         if crop.size == 0:
             self._yolo_cache = []
             return []
@@ -1732,18 +1720,17 @@ class SiamRAMTracker:
         boxes = []
         if results and results[0].boxes is not None:
             for box in results[0].boxes:
-                xyxy   = box.xyxy[0].cpu().numpy()
+                xyxy = box.xyxy[0].cpu().numpy()
                 cls_id = int(box.cls[0].cpu().numpy())
                 if (self._yolo_filter_class
-                        and self._target_class_id is not None
-                        and cls_id != self._target_class_id):
+                    and self._target_class_id is not None
+                    and cls_id != self._target_class_id):
                     continue
                 x1, y1, x2, y2 = xyxy
-                boxes.append(np.array([int(x1)+rx, int(y1)+ry,
-                                        int(x2-x1), int(y2-y1)], dtype=int))
+                boxes.append(np.array([int(x1) + rx, int(y1) + ry,
+                                       int(x2 - x1), int(y2 - y1)], dtype=int))
         self._yolo_cache = boxes
         return boxes
-
 
     def _yolo_detect_cached(self, frame: np.ndarray) -> List[np.ndarray]:
         """
@@ -1767,7 +1754,6 @@ class SiamRAMTracker:
         if self._yolo_cache:
             return self._yolo_cache
         return self._yolo_detect(frame)
-
 
     def _clamp_bbox_to_frame(self, bbox: np.ndarray, frame: np.ndarray) -> np.ndarray:
         """
@@ -1799,7 +1785,6 @@ class SiamRAMTracker:
         y = int(np.clip(y, -h, h_fr))
         return np.array([x, y, w, h], dtype=int)
 
-
     def _h_translation_magnitude(self, H, frame: np.ndarray) -> float:
         """
         Inputs:
@@ -1823,17 +1808,16 @@ class SiamRAMTracker:
         """
         if H is None:
             return 0.0
-        h, w   = frame.shape[:2]
+        h, w = frame.shape[:2]
         cx, cy = w / 2.0, h / 2.0
-        denom  = H[2, 0]*cx + H[2, 1]*cy + H[2, 2] + 1e-8
-        new_cx = (H[0, 0]*cx + H[0, 1]*cy + H[0, 2]) / denom
-        new_cy = (H[1, 0]*cx + H[1, 1]*cy + H[1, 2]) / denom
+        denom = H[2, 0] * cx + H[2, 1] * cy + H[2, 2] + 1e-8
+        new_cx = (H[0, 0] * cx + H[0, 1] * cy + H[0, 2]) / denom
+        new_cy = (H[1, 0] * cx + H[1, 1] * cy + H[1, 2]) / denom
         return float(np.hypot(new_cx - cx, new_cy - cy))
-
 
     def _classify_loss_cause(
         self,
-        cam_disp_threshold:    float = 18.0,
+        cam_disp_threshold: float = 18.0,
         area_shrink_threshold: float = -0.005,
     ) -> str:
         """
@@ -1863,23 +1847,23 @@ class SiamRAMTracker:
             history entries or retains corrupted ones, both of which hurt EKF
             reconstruction accuracy.
         """
-        history  = list(self._conf_history)
+        history = list(self._conf_history)
         cam_hist = list(self._cam_disp_history)
 
         area_vote = 'occlusion'
         if len(history) >= 3:
-            areas      = np.array([float(b[2] * b[3]) for b, _, _, _ in history])
-            med_area   = float(np.median(areas))
-            n          = len(areas)
-            t          = np.arange(n, dtype=float)
-            slope      = float(np.polyfit(t, areas, 1)[0])
+            areas = np.array([float(b[2] * b[3]) for b, _, _, _ in history])
+            med_area = float(np.median(areas))
+            n = len(areas)
+            t = np.arange(n, dtype=float)
+            slope = float(np.polyfit(t, areas, 1)[0])
             norm_slope = slope / (med_area + 1e-6)
             if norm_slope >= area_shrink_threshold:
                 area_vote = 'camera_motion'
 
         cam_vote = 'occlusion'
         if cam_hist:
-            weights  = np.exp(np.linspace(-1, 0, len(cam_hist)))
+            weights = np.exp(np.linspace(-1, 0, len(cam_hist)))
             weights /= weights.sum()
             mean_disp = float(np.dot(weights, cam_hist))
             if mean_disp >= cam_disp_threshold:
@@ -1888,7 +1872,6 @@ class SiamRAMTracker:
         if area_vote == 'camera_motion' and cam_vote == 'camera_motion':
             return 'camera_motion'
         return 'occlusion'
-
 
     def _is_long_distance(self, frame: np.ndarray) -> bool:
         """
@@ -1917,13 +1900,12 @@ class SiamRAMTracker:
             return True
         if not self._size_history:
             return False
-        h_fr, w_fr  = frame.shape[:2]
-        frame_area  = float(h_fr * w_fr)
-        obj_w       = float(np.median([s[0] for s in self._size_history]))
-        obj_h       = float(np.median([s[1] for s in self._size_history]))
-        obj_area    = obj_w * obj_h
+        h_fr, w_fr = frame.shape[:2]
+        frame_area = float(h_fr * w_fr)
+        obj_w = float(np.median([s[0] for s in self._size_history]))
+        obj_h = float(np.median([s[1] for s in self._size_history]))
+        obj_area = obj_w * obj_h
         return (obj_area / (frame_area + 1e-8)) < self.long_distance_area_fraction
-
 
     def _rebuild_ekf_from_clean_history(self, skip_override=None) -> BBoxEKF:
         """
@@ -1950,10 +1932,10 @@ class SiamRAMTracker:
             portion from scratch gives a much cleaner velocity estimate and
             eliminates EKF state contamination from bad tracker outputs.
         """
-        history  = list(self._conf_history)
+        history = list(self._conf_history)
         raw_skip = self.history_skip_last if skip_override is None else skip_override
-        skip     = min(raw_skip, max(0, len(history) - 2))
-        clean    = history[:len(history) - skip] if skip > 0 else history
+        skip = min(raw_skip, max(0, len(history) - 2))
+        clean = history[:len(history) - skip] if skip > 0 else history
 
         if len(clean) == 0:
             return self.ekf
@@ -1961,8 +1943,8 @@ class SiamRAMTracker:
         first_bbox, _, _, _ = clean[0]
         fresh_ekf = BBoxEKF(
             first_bbox,
-            process_noise = self.ekf_process_noise,
-            meas_noise    = self.ekf_meas_noise,
+            process_noise=self.ekf_process_noise,
+            meas_noise=self.ekf_meas_noise,
         )
 
         for (bbox, _vel, h, h_rel) in clean[1:]:
@@ -1972,19 +1954,18 @@ class SiamRAMTracker:
         robust_vel = self._robust_velocity_from_history(
             skip=skip, window=self.velocity_window_average,
             decay=0.97, clip_percentile=96.0)
-        fresh_ekf.x[2]     = float(robust_vel[0])
-        fresh_ekf.x[3]     = float(robust_vel[1])
-        fresh_ekf.P[2, 2]  = 40.0
-        fresh_ekf.P[3, 3]  = 40.0
+        fresh_ekf.x[2] = float(robust_vel[0])
+        fresh_ekf.x[3] = float(robust_vel[1])
+        fresh_ekf.P[2, 2] = 40.0
+        fresh_ekf.P[3, 3] = 40.0
 
         return fresh_ekf
 
-
     def _detect_shrinkage_onset(
         self,
-        max_lookback:  int   = 10,
+        max_lookback: int = 10,
         min_drop_frac: float = 0.002,
-        smooth_k:      int   = 3,
+        smooth_k: int = 3,
     ) -> int:
         """
         Inputs:
@@ -2019,28 +2000,28 @@ class SiamRAMTracker:
         if n < 4:
             return 0
 
-        areas    = np.array([float(b[2] * b[3]) for b, _, _, _ in history],
-                             dtype=float)
+        areas = np.array([float(b[2] * b[3]) for b, _, _, _ in history],
+                         dtype=float)
         smoothed = np.array([
             float(np.median(areas[max(0, i - smooth_k + 1): i + 1]))
             for i in range(n)
         ])
 
-        ref_area  = float(np.percentile(smoothed, 95))
+        ref_area = float(np.percentile(smoothed, 95))
         if ref_area <= 0:
             return 0
 
-        threshold  = ref_area * (1.0 - min_drop_frac)
-        skip       = 0
+        threshold = ref_area * (1.0 - min_drop_frac)
+        skip = 0
         gap_budget = 3
-        gaps_used  = 0
+        gaps_used = 0
 
         for i in range(n - 1, max(n - 1 - max_lookback, -1), -1):
             if smoothed[i] < threshold:
-                skip      += 1
-                gaps_used  = 0
+                skip += 1
+                gaps_used = 0
             elif skip > 0 and gaps_used < gap_budget:
-                skip      += 1
+                skip += 1
                 gaps_used += 1
             else:
                 break
@@ -2052,10 +2033,9 @@ class SiamRAMTracker:
 
         return max(skip, 5)
 
-
     def _detect_center_drift_skip(
         self,
-        max_lookback: int   = 20,
+        max_lookback: int = 20,
         spike_factor: float = 2.5,
     ) -> int:
         """
@@ -2088,36 +2068,35 @@ class SiamRAMTracker:
             return 0
 
         centers = np.stack(hist)
-        speeds  = np.linalg.norm(np.diff(centers, axis=0), axis=1)
-        n       = len(speeds)
+        speeds = np.linalg.norm(np.diff(centers, axis=0), axis=1)
+        n = len(speeds)
 
-        ref_n   = max(2, n * 2 // 3)
+        ref_n = max(2, n * 2 // 3)
         ref_mag = float(np.median(speeds[:ref_n])) + 1e-6
-        thresh  = ref_mag * spike_factor
+        thresh = ref_mag * spike_factor
 
-        skip       = 0
+        skip = 0
         gap_budget = 2
-        gaps_used  = 0
+        gaps_used = 0
 
         for i in range(n - 1, max(n - 1 - max_lookback, -1), -1):
             if speeds[i] > thresh:
-                skip      += 1
-                gaps_used  = 0
+                skip += 1
+                gaps_used = 0
             elif skip > 0 and gaps_used < gap_budget:
-                skip      += 1
+                skip += 1
                 gaps_used += 1
             else:
                 break
 
         return skip
 
-
     def _detect_exit_direction(
         self,
-        frame:            np.ndarray,
-        lookahead_frames: int   = 6,
-        trend_frames:     int   = 10,
-        margin_factor:    float = 0.5,
+        frame: np.ndarray,
+        lookahead_frames: int = 6,
+        trend_frames: int = 10,
+        margin_factor: float = 0.5,
     ) -> Tuple[bool, Optional[str]]:
         """
         Inputs:
@@ -2150,66 +2129,69 @@ class SiamRAMTracker:
         """
         h_fr, w_fr = frame.shape[:2]
 
-        last_bbox        = self.current_bbox.astype(float)
+        last_bbox = self.current_bbox.astype(float)
         lx1, ly1, lw, lh = last_bbox
-        lx2, ly2         = lx1 + lw, ly1 + lh
-        lcx              = lx1 + lw / 2.0
-        lcy              = ly1 + lh / 2.0
+        lx2, ly2 = lx1 + lw, ly1 + lh
+        lcx = lx1 + lw / 2.0
+        lcy = ly1 + lh / 2.0
 
         vx = float(self.velocity[0])
         vy = float(self.velocity[1])
 
-        margin      = max(lw, lh) * margin_factor
-        prox_right  = lx2 > w_fr - margin and vx > 0
-        prox_left   = lx1 < margin         and vx < 0
-        prox_bottom = ly2 > h_fr - margin  and vy > 0
-        prox_top    = ly1 < margin         and vy < 0
+        margin = max(lw, lh) * margin_factor
+        prox_right = lx2 > w_fr - margin and vx > 0
+        prox_left = lx1 < margin and vx < 0
+        prox_bottom = ly2 > h_fr - margin and vy > 0
+        prox_top = ly1 < margin and vy < 0
 
-        fut_cx         = lcx + vx * lookahead_frames
-        fut_cy         = lcy + vy * lookahead_frames
-        extrap_right   = fut_cx >= w_fr
-        extrap_left    = fut_cx < 0
-        extrap_bottom  = fut_cy >= h_fr
-        extrap_top     = fut_cy < 0
+        fut_cx = lcx + vx * lookahead_frames
+        fut_cy = lcy + vy * lookahead_frames
+        extrap_right = fut_cx >= w_fr
+        extrap_left = fut_cx < 0
+        extrap_bottom = fut_cy >= h_fr
+        extrap_top = fut_cy < 0
 
-        history  = list(self._conf_history)
-        n_use    = min(trend_frames, len(history))
+        history = list(self._conf_history)
+        n_use = min(trend_frames, len(history))
         trend_right = trend_left = trend_bottom = trend_top = False
 
         if n_use >= 3:
-            recent   = history[-n_use:]
+            recent = history[-n_use:]
             xs = np.array([float(b[0] + b[2] / 2) for b, *_ in recent])
             ys = np.array([float(b[1] + b[3] / 2) for b, *_ in recent])
-            t  = np.arange(n_use, dtype=float)
+            t = np.arange(n_use, dtype=float)
 
             vx_trend = float(np.polyfit(t, xs, 1)[0])
             vy_trend = float(np.polyfit(t, ys, 1)[0])
 
-            fut_tx       = lcx + vx_trend * lookahead_frames
-            fut_ty       = lcy + vy_trend * lookahead_frames
-            trend_right  = fut_tx >= w_fr  and vx_trend > 0
-            trend_left   = fut_tx < 0      and vx_trend < 0
-            trend_bottom = fut_ty >= h_fr  and vy_trend > 0
-            trend_top    = fut_ty < 0      and vy_trend < 0
+            fut_tx = lcx + vx_trend * lookahead_frames
+            fut_ty = lcy + vy_trend * lookahead_frames
+            trend_right = fut_tx >= w_fr and vx_trend > 0
+            trend_left = fut_tx < 0 and vx_trend < 0
+            trend_bottom = fut_ty >= h_fr and vy_trend > 0
+            trend_top = fut_ty < 0 and vy_trend < 0
 
         def _votes(right, left, bottom, top):
             return {'right': right, 'left': left, 'bottom': bottom, 'top': top}
 
-        e1 = _votes(prox_right,   prox_left,   prox_bottom,   prox_top)
+        e1 = _votes(prox_right, prox_left, prox_bottom, prox_top)
         e2 = _votes(extrap_right, extrap_left, extrap_bottom, extrap_top)
-        e3 = _votes(trend_right,  trend_left,  trend_bottom,  trend_top)
+        e3 = _votes(trend_right, trend_left, trend_bottom, trend_top)
 
         for edge in ('right', 'left', 'bottom', 'top'):
             if sum([e1[edge], e2[edge], e3[edge]]) >= 2:
                 return True, edge
 
-        if lx2 >= w_fr: return True, 'right'
-        if lx1 <= 0:    return True, 'left'
-        if ly2 >= h_fr: return True, 'bottom'
-        if ly1 <= 0:    return True, 'top'
+        if lx2 >= w_fr:
+            return True, 'right'
+        if lx1 <= 0:
+            return True, 'left'
+        if ly2 >= h_fr:
+            return True, 'bottom'
+        if ly1 <= 0:
+            return True, 'top'
 
         return False, None
-
 
     def _robust_velocity_from_history(
         self, skip=0, window=80, decay=0.97, clip_percentile=80.0
@@ -2241,12 +2223,12 @@ class SiamRAMTracker:
             The decay weighting and magnitude clipping together produce a velocity
             that reflects stable long-term motion rather than the last noisy frame.
         """
-        hist     = list(self._center_history)
+        hist = list(self._center_history)
         if len(hist) < 2:
             return self.velocity.copy()
 
         conf_len = len(list(self._conf_history))
-        hist     = hist[-conf_len:] if len(hist) > conf_len else hist
+        hist = hist[-conf_len:] if len(hist) > conf_len else hist
 
         if skip > 0:
             hist = hist[:max(2, len(hist) - skip)]
@@ -2255,12 +2237,12 @@ class SiamRAMTracker:
         if len(hist) < 2:
             return self.velocity.copy()
 
-        centers    = np.stack(hist)
+        centers = np.stack(hist)
         frame_vels = np.diff(centers, axis=0)
-        n          = len(frame_vels)
+        n = len(frame_vels)
 
-        weights    = np.array([decay ** (n - 1 - i) for i in range(n)], dtype=float)
-        weights   /= weights.sum()
+        weights = np.array([decay ** (n - 1 - i) for i in range(n)], dtype=float)
+        weights /= weights.sum()
 
         avg = (weights[:, None] * frame_vels).sum(axis=0)
 
@@ -2272,17 +2254,16 @@ class SiamRAMTracker:
 
         if len(cam_hist) >= n:
             cam_vels = np.stack(cam_hist[-n:])
-            avg_cam  = (weights[:, None] * cam_vels).sum(axis=0)
-            avg     -= avg_cam
+            avg_cam = (weights[:, None] * cam_vels).sum(axis=0)
+            avg -= avg_cam
 
         magnitudes = np.linalg.norm(frame_vels, axis=1)
-        mag_cap    = float(np.percentile(magnitudes, clip_percentile))
-        avg_mag    = float(np.linalg.norm(avg))
+        mag_cap = float(np.percentile(magnitudes, clip_percentile))
+        avg_mag = float(np.linalg.norm(avg))
         if avg_mag > mag_cap and avg_mag > 0:
             avg = avg * (mag_cap / avg_mag)
 
         return avg
-
 
     def _try_detect_target_class(self, frame: np.ndarray) -> None:
         """
@@ -2312,8 +2293,10 @@ class SiamRAMTracker:
         x, y, w, h = self.current_bbox
         pad = max(10, int(max(w, h) * 0.2))
         h_fr, w_fr = frame.shape[:2]
-        x1 = max(0, x - pad);  y1 = max(0, y - pad)
-        x2 = min(w_fr, x + w + pad);  y2 = min(h_fr, y + h + pad)
+        x1 = max(0, x - pad)
+        y1 = max(0, y - pad)
+        x2 = min(w_fr, x + w + pad)
+        y2 = min(h_fr, y + h + pad)
         crop = frame[y1:y2, x1:x2]
         if crop.size == 0:
             return
@@ -2328,8 +2311,8 @@ class SiamRAMTracker:
         for box in results[0].boxes:
             bx1, by1, bx2, by2 = box.xyxy[0].cpu().numpy()
             cls_id = int(box.cls[0].cpu().numpy())
-            det = np.array([int(bx1)+x1, int(by1)+y1,
-                            int(bx2-bx1), int(by2-by1)], dtype=int)
+            det = np.array([int(bx1) + x1, int(by1) + y1,
+                            int(bx2 - bx1), int(by2 - by1)], dtype=int)
             iou = _iou(det, self.current_bbox)
             if iou > best_iou:
                 best_iou, best_cls = iou, cls_id
@@ -2338,7 +2321,6 @@ class SiamRAMTracker:
             if not hasattr(self, '_class_votes'):
                 self._class_votes: dict = {}
             self._class_votes[best_cls] = self._class_votes.get(best_cls, 0) + 1
-
 
     def _maybe_commit_target_class(self) -> None:
         """
@@ -2366,13 +2348,12 @@ class SiamRAMTracker:
         if not votes:
             return
         best_cls = max(votes, key=votes.get)
-        total    = sum(votes.values())
+        total = sum(votes.values())
         if votes[best_cls] / total >= 0.6:
-            self._target_class_id  = best_cls
+            self._target_class_id = best_cls
             self._class_warmup_done = True
             print(f"[class filter] target class locked: {best_cls}  "
-                f"(votes={votes})")
-
+                  f"(votes={votes})")
 
     @property
     def running_dynamic_bbox(self):

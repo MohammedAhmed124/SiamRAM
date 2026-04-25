@@ -1,15 +1,15 @@
 
 
-import numpy as np
-import torch.nn as nn
-import torch
-from tqdm import tqdm
-from hydra.utils import instantiate
 from typing import Optional, Union
+
+import torch
+import torch.nn as nn
+from hydra.utils import instantiate
 from pytorch_toolbelt.utils import transfer_weights
+
 from ..model.custom_bn import replace_layers_adaptive_bn
 from .SiamABC_Tracker import SiamABCTracker
- 
+
 
 def load_model(
     model: nn.Module, checkpoint_path: str, map_location: Optional[Union[int, str]] = None, strict: bool = True

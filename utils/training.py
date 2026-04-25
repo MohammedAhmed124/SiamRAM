@@ -20,18 +20,16 @@ Usage
     )
 """
 
-import os
 import time
 from collections import defaultdict
-from typing import Dict, List, Optional
+from typing import Dict
 
+import external.SiamABC.core.constants as constants
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader
 
-from .dataset import UAV123TrackingDataset
-from .losses  import TrackingHeadLoss
-import external.SiamABC.core.constants as constants
+from .losses import TrackingHeadLoss
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -64,11 +62,11 @@ def freeze_backbone_only(model, verbose: bool = True) -> None:
             param.requires_grad = True
 
     if verbose:
-        frozen     = sum(p.numel() for p in model.parameters() if not p.requires_grad)
-        trainable  = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        total      = frozen + trainable
-        print(f"Frozen    : {frozen:,}  ({100*frozen/total:.1f}%)")
-        print(f"Trainable : {trainable:,}  ({100*trainable/total:.1f}%)")
+        frozen = sum(p.numel() for p in model.parameters() if not p.requires_grad)
+        trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        total = frozen + trainable
+        print(f"Frozen    : {frozen:,}  ({100 * frozen / total:.1f}%)")
+        print(f"Trainable : {trainable:,}  ({100 * trainable / total:.1f}%)")
         print(f"Total     : {total:,}")
         print("\nTrainable modules:")
         for m in trainable_modules:
@@ -77,8 +75,8 @@ def freeze_backbone_only(model, verbose: bool = True) -> None:
             print(f"  {name:<40} {params:>10,} params")
 
 
-def get_trainable_optimizer(model, lr: float = 1e-4, 
-                             weight_decay: float = 1e-4):
+def get_trainable_optimizer(model, lr: float = 1e-4,
+                            weight_decay: float = 1e-4):
     """
     Build an optimizer that only touches the unfrozen parameters.
     Optionally use different LRs per group (neck vs heads).
@@ -127,11 +125,13 @@ def set_reg_bn_train(model):
             if isinstance(m, nn.BatchNorm2d):
                 m.train()
 
+
 # After model.train(), also freeze ALL BN outside cls branch:
 def set_bn_eval(model):
     for name, m in model.named_modules():
         if isinstance(m, (nn.BatchNorm2d, nn.BatchNorm1d)):
             m.eval()
+
 
 def set_cls_bn_train(model):
     for module in [
@@ -143,18 +143,20 @@ def set_cls_bn_train(model):
         for m in module.modules():
             if isinstance(m, nn.BatchNorm2d):
                 m.train()
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Single epoch helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _train_one_epoch(
-    model:      nn.Module,
-    loader:     DataLoader,
-    optimizer:  torch.optim.Optimizer,
-    criterion:  TrackingHeadLoss,
-    device:     torch.device,
-    epoch:      int,
-    log_every:  int = 20,
+    model: nn.Module,
+    loader: DataLoader,
+    optimizer: torch.optim.Optimizer,
+    criterion: TrackingHeadLoss,
+    device: torch.device,
+    epoch: int,
+    log_every: int = 20,
 ) -> Dict[str, float]:
     """
     Run one training epoch.
@@ -163,27 +165,27 @@ def _train_one_epoch(
         dict with average 'total', 'cls_loss', 'bbox_loss' over the epoch.
     """
     model.train()
-    # set_bn_eval(model)         
+    # set_bn_eval(model)
     # set_cls_bn_train(model)  # Only unfreeze cls BN if we're fine-tuning the cls branch; otherwise keep all BN frozen to preserve pre-trained stats.
     # set_reg_bn_train(model)
-    running  = defaultdict(float)
-    t_start  = time.time()
-    n_steps  = len(loader)
+    running = defaultdict(float)
+    t_start = time.time()
+    n_steps = len(loader)
 
     for step, batch in enumerate(loader, start=1):
-        template         = batch["template"].to(device)
+        template = batch["template"].to(device)
         dynamic_template = batch["dynamic_template"].to(device)
-        search           = batch["search"].to(device)
-        dynamic_search   = batch["dynamic_search"].to(device)
-        cls_label        = batch["cls_label"].to(device)
-        bbox_label       = batch["bbox_label"].to(device)
+        search = batch["search"].to(device)
+        dynamic_search = batch["dynamic_search"].to(device)
+        cls_label = batch["cls_label"].to(device)
+        bbox_label = batch["bbox_label"].to(device)
 
         # ── forward ──────────────────────────────────────────────────────────
         # model.forward() returns a dict; we only use cls + bbox keys.
         # SimSiam outputs are computed inside forward() but we don't add their
         # loss here — gradients only flow through our criterion.
         out = model((template, dynamic_template, search, dynamic_search))
-        cls_pred  = out[constants.TARGET_CLASSIFICATION_KEY]    # (B, 1, S, S)
+        cls_pred = out[constants.TARGET_CLASSIFICATION_KEY]  # (B, 1, S, S)
         bbox_pred = out[constants.TARGET_REGRESSION_LABEL_KEY]  # (B, 4, S, S)
 
         reg_weight = batch["reg_weight"].to(device)
@@ -193,9 +195,9 @@ def _train_one_epoch(
         losses["total"].backward()
         # Clip gradients to prevent exploding updates in early fine-tuning
         nn.utils.clip_grad_norm_(
-        [p for p in model.connect_model.parameters() if p.requires_grad],
-        max_norm=5.0
-)
+            [p for p in model.connect_model.parameters() if p.requires_grad],
+            max_norm=5.0
+        )
         optimizer.step()
 
         for k, v in losses.items():
@@ -219,10 +221,10 @@ def _train_one_epoch(
 
 @torch.no_grad()
 def _validate_one_epoch(
-    model:     nn.Module,
-    loader:    DataLoader,
+    model: nn.Module,
+    loader: DataLoader,
     criterion: TrackingHeadLoss,
-    device:    torch.device,
+    device: torch.device,
 ) -> Dict[str, float]:
     """
     Run one validation epoch (no gradients).
@@ -235,16 +237,16 @@ def _validate_one_epoch(
     n_steps = len(loader)
 
     for batch in loader:
-        template         = batch["template"].to(device)
+        template = batch["template"].to(device)
         dynamic_template = batch["dynamic_template"].to(device)
-        search           = batch["search"].to(device)
-        dynamic_search   = batch["dynamic_search"].to(device)
-        cls_label        = batch["cls_label"].to(device)
-        bbox_label       = batch["bbox_label"].to(device)
-        reg_weight     = batch["reg_weight"].to(device)
+        search = batch["search"].to(device)
+        dynamic_search = batch["dynamic_search"].to(device)
+        cls_label = batch["cls_label"].to(device)
+        bbox_label = batch["bbox_label"].to(device)
+        reg_weight = batch["reg_weight"].to(device)
 
         out = model((template, dynamic_template, search, dynamic_search))
-        cls_pred  = out[constants.TARGET_CLASSIFICATION_KEY]
+        cls_pred = out[constants.TARGET_CLASSIFICATION_KEY]
         bbox_pred = out[constants.TARGET_REGRESSION_LABEL_KEY]
 
         losses = criterion(cls_pred, bbox_pred, cls_label, bbox_label, reg_weight)
@@ -252,4 +254,3 @@ def _validate_one_epoch(
             running[k] += v.item()
 
     return {k: v / n_steps for k, v in running.items()}
-

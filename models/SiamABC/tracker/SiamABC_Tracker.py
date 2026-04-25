@@ -1,22 +1,18 @@
 
 from collections import deque
-from abc import ABC, abstractmethod
-from typing import Dict, Any, Tuple, Callable, Union, Optional
 from statistics import mean
-import albumentations as albu
+from typing import Dict, Tuple
+
 import numpy as np
 import torch
-import torch.nn as nn
-import cv2
-
-
-
 
 from utils.box_coder import SiamABCBoxCoder, TrackerDecodeResult
 from utils.utils import clamp_bbox, extend_bbox, get_extended_crop
-from ..model.custom_bn import AdaptiveBatchNorm
+
 from ..model import constants
+from ..model.custom_bn import AdaptiveBatchNorm
 from .base_tracker import Tracker
+
 
 class SiamABCTracker(Tracker):
     def get_box_coder(self, tracking_config, cuda_id: int = 0):

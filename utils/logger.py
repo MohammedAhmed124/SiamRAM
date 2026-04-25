@@ -3,7 +3,6 @@ import os
 
 import coloredlogs
 
-
 COLOREDLOGS_FIELD_STYLES = coloredlogs.DEFAULT_FIELD_STYLES
 COLOREDLOGS_FIELD_STYLES.update(
     {

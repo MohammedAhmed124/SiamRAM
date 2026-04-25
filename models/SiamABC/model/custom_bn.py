@@ -2,9 +2,8 @@
 https://github.com/ptrblck/pytorch_misc/blob/master/batch_norm_manual.py
 """
 
-import torch 
+import torch
 from torch import nn
-
 
 
 class AdaptiveBatchNorm(nn.BatchNorm2d):

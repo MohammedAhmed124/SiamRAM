@@ -1,14 +1,13 @@
 import os
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
 
 import yaml
-from hydra.utils import get_original_cwd
-from hydra.initialize import initialize
 from hydra.compose import compose
-from omegaconf import OmegaConf, DictConfig
-from .logger import create_logger
-from pathlib import Path
+from hydra.initialize import initialize
+from hydra.utils import get_original_cwd
+from omegaconf import DictConfig, OmegaConf
 
+from .logger import create_logger
 
 logger = create_logger(__name__)
 

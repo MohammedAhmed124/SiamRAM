@@ -37,33 +37,31 @@ as a sampling bias AND always validates with the explicit geometry check.
 
 import os
 import random
-import numpy as np
-import cv2
-import torch
-from torch.utils.data import Dataset
-import albumentations as albu
-from typing import Callable, Dict, List, Optional, Tuple, Any
-import pandas as pd
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
+import albumentations as albu
+import cv2
+import numpy as np
+import pandas as pd
+import torch
 from external.SiamABC.core.utils.box_coder import SiamABCBoxCoder
+from torch.utils.data import Dataset
+
 from utils.utils import (
     clamp_bbox,
-    ensure_bbox_boundaries,
-    handle_empty_bbox,
     extend_bbox,
     get_extended_crop,
 )
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Frame-naming patterns tried in order during auto-detection
 # Add new patterns here to support additional datasets without touching logic.
 # ─────────────────────────────────────────────────────────────────────────────
 _FRAME_PATTERNS = [
-    "{:06d}.jpg",        # UAV123, UAVTrack112
-    "img/{:04d}.jpg",    # DTB70
-    "{:04d}.jpg",        # some custom datasets
-    "img/{:06d}.jpg",    # rare variant
+    "{:06d}.jpg",  # UAV123, UAVTrack112
+    "img/{:04d}.jpg",  # DTB70
+    "{:04d}.jpg",  # some custom datasets
+    "img/{:06d}.jpg",  # rare variant
     "{:06d}.png",
     "img/{:04d}.png",
 ]
@@ -94,7 +92,7 @@ def _regression_weight_label(
     r_pos: int = 2,
     r_neg: int = 0,
 ) -> torch.Tensor:
-    bbox_c_x = bbox[0] + bbox[2] / 2.0   # float division — no floor bias
+    bbox_c_x = bbox[0] + bbox[2] / 2.0  # float division — no floor bias
     bbox_c_y = bbox[1] + bbox[3] / 2.0
 
     sz_x = np.floor(float(bbox_c_x / image_size * map_size))
@@ -136,13 +134,13 @@ class TrackingSequence:
     """
 
     def __init__(self, row: Dict):
-        self.seq_path   = row["seq_path"]
+        self.seq_path = row["seq_path"]
         self.annot_path = row["annot_path"]
-        self.start_idx  = int(row["start_idx"])
-        self.end_idx    = int(row["end_idx"])
-        self.n_frames   = int(row["n_frames"])
-        self.cls        = row["class"]
-        self.dataset    = row["dataset"]
+        self.start_idx = int(row["start_idx"])
+        self.end_idx = int(row["end_idx"])
+        self.n_frames = int(row["n_frames"])
+        self.cls = row["class"]
+        self.dataset = row["dataset"]
 
         # Allow the dataframe to pin a pattern; otherwise auto-detect lazily.
         self._frame_pattern: Optional[str] = row.get("frame_pattern") or None
@@ -243,7 +241,7 @@ class TrackingSequence:
         upper_end: Optional[int] = None,
     ) -> Optional[int]:
         lower_end = max(lower_end, self.start_idx) if lower_end is not None else self.start_idx
-        upper_end = min(upper_end, self.end_idx)   if upper_end is not None else self.end_idx
+        upper_end = min(upper_end, self.end_idx) if upper_end is not None else self.end_idx
         self._load_bboxes()
         indices = list(range(lower_end, upper_end + 1))
         rng.shuffle(indices)
@@ -261,7 +259,7 @@ class TrackingSequence:
         upper_end: Optional[int] = None,
     ) -> Tuple[Optional[int], Optional[int], Optional[np.ndarray]]:
         lower_end = max(lower_end, self.start_idx) if lower_end is not None else self.start_idx
-        upper_end = min(upper_end, self.end_idx)   if upper_end is not None else self.end_idx
+        upper_end = min(upper_end, self.end_idx) if upper_end is not None else self.end_idx
 
         failure = (None, None, None)
 
@@ -275,7 +273,7 @@ class TrackingSequence:
         if not candidates:
             return failure
 
-        s_idx  = rng.choice(candidates)
+        s_idx = rng.choice(candidates)
         s_bbox = self.get_bbox(s_idx)
         if not self.is_valid_bbox(s_bbox):
             return failure
@@ -297,38 +295,38 @@ class UAVTrackingDataset(Dataset):
     """
 
     TEMPLATE_CONTEXT = 0.5
-    SEARCH_CONTEXT   = 2.0
+    SEARCH_CONTEXT = 2.0
 
     def __init__(
         self,
-        dataframe:       pd.DataFrame,
+        dataframe: pd.DataFrame,
         tracking_config: Dict[str, Any],
-        num_samples:     int   = 10_000,
-        neg_ratio:       float = 0.5,
-        seed:            int   = 42,
+        num_samples: int = 10_000,
+        neg_ratio: float = 0.5,
+        seed: int = 42,
     ):
         super().__init__()
 
-        self.template_size        = tracking_config["template_size"]
-        self.instance_size        = tracking_config["instance_size"]
-        self.score_size           = tracking_config["score_size"]
-        self.max_frame_gap        = tracking_config.get("max_frame_gap", 50)
-        self.gaussian_sigma       = tracking_config.get("gaussian_sigma", 0.125)
+        self.template_size = tracking_config["template_size"]
+        self.instance_size = tracking_config["instance_size"]
+        self.score_size = tracking_config["score_size"]
+        self.max_frame_gap = tracking_config.get("max_frame_gap", 50)
+        self.gaussian_sigma = tracking_config.get("gaussian_sigma", 0.125)
         self.template_bbox_offset = tracking_config["template_bbox_offset"]
-        self.search_context       = tracking_config["search_context"]
-        self.search_image_shift   = tracking_config["search_image_shift"]
-        self.search_image_scale   = tracking_config["search_image_scale"]
+        self.search_context = tracking_config["search_context"]
+        self.search_image_shift = tracking_config["search_image_shift"]
+        self.search_image_scale = tracking_config["search_image_scale"]
         self.template_image_shift = tracking_config["template_image_shift"]
         self.template_image_scale = tracking_config["template_image_scale"]
-        self.cuda_id              = 0
+        self.cuda_id = 0
 
-        self._template_transform       = self._get_default_transform(tracking_config["template_size"])
-        self._search_transform         = self._get_default_transform(tracking_config["instance_size"])
+        self._template_transform = self._get_default_transform(tracking_config["template_size"])
+        self._search_transform = self._get_default_transform(tracking_config["instance_size"])
         self._dynamic_search_transform = self._get_default_transform(tracking_config["instance_size"])
 
-        self.neg_ratio   = neg_ratio
+        self.neg_ratio = neg_ratio
         self.num_samples = num_samples
-        self.rng         = random.Random(seed)
+        self.rng = random.Random(seed)
 
         self.box_coder = SiamABCBoxCoder(tracking_config)
 
@@ -395,8 +393,8 @@ class UAVTrackingDataset(Dataset):
             if (x + w) > self.instance_size or (y + h) > self.instance_size:
                 continue
 
-            encoded    = self.box_coder.encode(torch.from_numpy(bbox_in_c).reshape(1, 4))
-            cls_label  = encoded.classification_label[0].numpy()
+            encoded = self.box_coder.encode(torch.from_numpy(bbox_in_c).reshape(1, 4))
+            cls_label = encoded.classification_label[0].numpy()
             bbox_label = encoded.regression_map[0].numpy()
 
             reg_weight = _regression_weight_label(
@@ -429,11 +427,11 @@ class UAVTrackingDataset(Dataset):
             return failure
 
         t_bbox = seq.get_bbox(t_idx)
-        t_img  = self._load_image(seq.frame_path(t_idx))
-        s_img  = self._load_image(seq.frame_path(s_idx))
+        t_img = self._load_image(seq.frame_path(t_idx))
+        s_img = self._load_image(seq.frame_path(s_idx))
 
         t_crop, template_bbox = self.get_template_crop(t_img, t_bbox)
-        s_crop, bbox_in_c, _  = self.get_search_crop(s_img, s_bbox)
+        s_crop, bbox_in_c, _ = self.get_search_crop(s_img, s_bbox)
 
         return t_crop, t_idx, template_bbox, s_crop, s_idx, bbox_in_c, True
 
@@ -511,7 +509,7 @@ class UAVTrackingDataset(Dataset):
             if not seq.is_valid_bbox(t_bbox):
                 continue
 
-            t_img  = self._load_image(seq.frame_path(t_idx))
+            t_img = self._load_image(seq.frame_path(t_idx))
 
             # template: positive crop of the actual target from frame t_idx
             t_crop, _ = self.get_template_crop(t_img, t_bbox)
@@ -524,11 +522,11 @@ class UAVTrackingDataset(Dataset):
             )
             if dyn_idx is None:
                 # Fallback: reuse the template frame.  Still between t and s.
-                dyn_idx  = t_idx
-                dyn_img  = t_img
+                dyn_idx = t_idx
+                dyn_img = t_img
                 dyn_bbox = t_bbox.copy()
             else:
-                dyn_img  = self._load_image(seq.frame_path(dyn_idx))
+                dyn_img = self._load_image(seq.frame_path(dyn_idx))
                 dyn_bbox = seq.get_bbox(dyn_idx)
 
             if not seq.is_valid_bbox(dyn_bbox):
@@ -553,9 +551,9 @@ class UAVTrackingDataset(Dataset):
                 continue  # all retries failed; try a different sequence
 
             S = self.score_size
-            cls_label  = np.zeros((1, S, S), dtype=np.float32)
+            cls_label = np.zeros((1, S, S), dtype=np.float32)
             bbox_label = np.zeros((4, S, S), dtype=np.float32)
-            reg_weight = np.zeros((S, S),    dtype=np.float32)
+            reg_weight = np.zeros((S, S), dtype=np.float32)
 
             return self._pack(
                 t_crop, dynamic_template, s_crop, dynamic_search,
@@ -581,10 +579,10 @@ class UAVTrackingDataset(Dataset):
           x-overlap: a.x1 < b.x2  AND  a.x2 > b.x1
           y-overlap: a.y1 < b.y2  AND  a.y2 > b.y1
         """
-        ax1, ay1 = float(a[0]),           float(a[1])
-        ax2, ay2 = ax1 + float(a[2]),     ay1 + float(a[3])
-        bx1, by1 = float(b[0]),           float(b[1])
-        bx2, by2 = bx1 + float(b[2]),     by1 + float(b[3])
+        ax1, ay1 = float(a[0]), float(a[1])
+        ax2, ay2 = ax1 + float(a[2]), ay1 + float(a[3])
+        bx1, by1 = float(b[0]), float(b[1])
+        bx2, by2 = bx1 + float(b[2]), by1 + float(b[3])
         return ax1 < bx2 and ax2 > bx1 and ay1 < by2 and ay2 > by1
 
     def _build_shifted_negative_search(
@@ -810,36 +808,36 @@ class UAVTrackingDataset(Dataset):
         dynamic_template,
         search,
         dynamic_search,
-        cls_label:   np.ndarray,
-        bbox_label:  np.ndarray,
-        reg_weight:  np.ndarray,
+        cls_label: np.ndarray,
+        bbox_label: np.ndarray,
+        reg_weight: np.ndarray,
         is_positive: bool,
-        path:        Optional[str] = None,
+        path: Optional[str] = None,
     ) -> Dict[str, torch.Tensor]:
         return {
-            "template":         self._to_tensor(template),
+            "template": self._to_tensor(template),
             "dynamic_template": self._to_tensor(dynamic_template),
-            "search":           self._to_tensor(search),
-            "dynamic_search":   self._to_tensor(dynamic_search),
-            "cls_label":        torch.from_numpy(cls_label),
-            "bbox_label":       torch.from_numpy(bbox_label),
-            "reg_weight":       torch.from_numpy(reg_weight),
-            "is_positive":      torch.tensor(is_positive, dtype=torch.bool),
-            "path":             path if path is not None else "None",
+            "search": self._to_tensor(search),
+            "dynamic_search": self._to_tensor(dynamic_search),
+            "cls_label": torch.from_numpy(cls_label),
+            "bbox_label": torch.from_numpy(bbox_label),
+            "reg_weight": torch.from_numpy(reg_weight),
+            "is_positive": torch.tensor(is_positive, dtype=torch.bool),
+            "path": path if path is not None else "None",
         }
 
     def _dummy_negative(self) -> Dict[str, torch.Tensor]:
-        S, T, I = self.score_size, self.template_size, self.instance_size
+        S, T, i = self.score_size, self.template_size, self.instance_size
         return {
-            "template":         torch.zeros(3, T, T),
+            "template": torch.zeros(3, T, T),
             "dynamic_template": torch.zeros(3, T, T),
-            "search":           torch.zeros(3, I, I),
-            "dynamic_search":   torch.zeros(3, I, I),
-            "cls_label":        torch.zeros(1, S, S),
-            "bbox_label":       torch.zeros(4, S, S),
-            "reg_weight":       torch.zeros(S, S),
-            "is_positive":      torch.tensor(False, dtype=torch.bool),
-            "path":             "None",
+            "search": torch.zeros(3, i, i),
+            "dynamic_search": torch.zeros(3, i, i),
+            "cls_label": torch.zeros(1, S, S),
+            "bbox_label": torch.zeros(4, S, S),
+            "reg_weight": torch.zeros(S, S),
+            "is_positive": torch.tensor(False, dtype=torch.bool),
+            "path": "None",
         }
 
     # ── utilities ─────────────────────────────────────────────────────────────
@@ -880,7 +878,7 @@ class UAVTrackingDataset(Dataset):
         cx, cy = x + w / 2.0, y + h / 2.0
         shift_x = np.random.uniform(-shift_factor, shift_factor) * w
         shift_y = np.random.uniform(-shift_factor, shift_factor) * h
-        scale   = np.random.uniform(1 - scale_factor, 1 + scale_factor)
+        scale = np.random.uniform(1 - scale_factor, 1 + scale_factor)
         new_w, new_h = w * scale, h * scale
         new_bbox = np.array(
             [cx + shift_x - new_w / 2, cy + shift_y - new_h / 2, new_w, new_h],

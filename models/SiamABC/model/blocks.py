@@ -7,17 +7,15 @@ File: https://github.com/PinataFarms/FEARTracker/blob/main/model_training/model/
 
 """
 
-from typing import Any, Union, Tuple, List
+from typing import Any, List, Tuple, Union
 
 import torch
 import torch.nn as nn
-from mobile_cv.model_zoo.models.fbnet_v2 import fbnet
-from einops import rearrange
-from torch.nn import init
-from torchvision.models.resnet import resnet50
-from torchvision.models import regnet_x_8gf
+
 # from models import neuron
-import torch.nn.functional as F
+from mobile_cv.model_zoo.models.fbnet_v2 import fbnet
+from torchvision.models.resnet import resnet50
+
 
 def conv_2d(inp, oup, kernel_size=3, stride=1, padding=0, groups=1, bias=False, norm=True, act=True):
     conv = nn.Sequential()
@@ -32,10 +30,10 @@ class FastParallelPolarizedSelfAttention(nn.Module):
 
     def __init__(self, channel=256, squeeze=2):
         super().__init__()
-        
+
         self.squeeze=squeeze
         self.wv=nn.Conv2d(channel,channel//self.squeeze,kernel_size=(1,1))
-        
+
         self.ch_wq=nn.Conv2d(channel,1,kernel_size=(1,1))
         self.softmax_channel=nn.Softmax(1)
         self.softmax_spatial=nn.Softmax(-1)
@@ -45,15 +43,15 @@ class FastParallelPolarizedSelfAttention(nn.Module):
         self.sp_wq=nn.Conv2d(channel,channel//self.squeeze,kernel_size=(1,1))
         # self.sp_wz=nn.Conv2d(1,1,kernel_size=(1,1))
         self.agp=nn.AdaptiveAvgPool2d((1,1))
-        
+
     def forward(self, x1):
         b, c, h, w = x1.size()
-        
-        
-        
+
+
+
         wv=self.wv(x1) #bs,c//2,h,w
         wv=wv.reshape(b,c//self.squeeze,-1) #bs,c//2,h*w
-        
+
         #Channel-only Self-Attention
         channel_wq=self.ch_wq(x1) #bs,1,h,w
         channel_wq=channel_wq.reshape(b,-1,1) #bs,h*w,1
@@ -69,11 +67,11 @@ class FastParallelPolarizedSelfAttention(nn.Module):
         spatial_wz=torch.sum(spatial_wq.permute(0,2,1)*wv,dim=1).unsqueeze(1)
         spatial_weight=spatial_wz.reshape(b,1,h,w) #bs,1,h,w
         # spatial_weight=self.sp_wz(spatial_weight)
-        
+
         out=(self.sigmoid(channel_weight)+self.sigmoid(spatial_weight))*x1
-        
+
         return out
-    
+
 class EncoderResNet(nn.Module):
     def __init__(self, pretrained: bool = True) -> None:
         super().__init__()
@@ -81,7 +79,7 @@ class EncoderResNet(nn.Module):
         self.last_layer_channels = 1024
         self.model = self._load_model()
         self.layers = self._get_layers()
-        
+
 
     def _load_model(self) -> Any:
         model = resnet50(pretrained=self.pretrained)
@@ -90,8 +88,8 @@ class EncoderResNet(nn.Module):
     def _get_layers(self) -> List[Any]:
         layers = [
             self.model.conv1,
-            self.model.bn1, 
-            self.model.relu, 
+            self.model.bn1,
+            self.model.relu,
             self.model.maxpool,
             self.model.layer1,
             self.model.layer2,
@@ -106,7 +104,7 @@ class EncoderResNet(nn.Module):
             x = layer(x)
             encoder_maps.append(x)
         return encoder_maps
-    
+
 class Encoder(nn.Module):
     def __init__(self, pretrained: bool = True) -> None:
         super().__init__()
@@ -207,13 +205,13 @@ class BoxTower(nn.Module):
         # encode backbone
         self.cls_encode = EncodeBackbone(in_channels=inchannels, out_channels=outchannels, conv_block=conv_block)
         self.reg_encode = EncodeBackbone(in_channels=inchannels, out_channels=outchannels, conv_block=conv_block)
-        
+
         # self.cls_dw = Correlation2xConcat(num_channels=outchannels, conv_block=conv_block)
         # self.reg_dw = Correlation2xConcat(num_channels=outchannels, conv_block=conv_block)
-        
-        self.cls_dw = CorrelationConcat(num_channels=outchannels)
-        self.reg_dw = CorrelationConcat(num_channels=outchannels)
-        
+
+        self.cls_dw = CorrelationConcatAtt(num_channels=outchannels)
+        self.reg_dw = CorrelationConcatAtt(num_channels=outchannels)
+
         # box pred head
         for i in range(4):
             tower.append(ConvBlock(outchannels, outchannels, kernel_size=3, stride=1, padding=1))
@@ -237,19 +235,19 @@ class BoxTower(nn.Module):
         self.bias = nn.Parameter(torch.Tensor(1.0 * torch.ones(1, 4, 1, 1)))
 
     def forward(self, search_org, search, kernel): #forward(self, search, dynamic, kernel):
-        
+
         # encode first
         cls_z = kernel.reshape(kernel.size(0), kernel.size(1), -1)
         cls_x = self.cls_encode(search)
-        
+
         reg_z = kernel.reshape(kernel.size(0), kernel.size(1), -1)
-        reg_x = self.reg_encode(search) 
-        
+        reg_x = self.reg_encode(search)
+
         # cls and reg DW
         cls_dw = self.cls_dw(cls_z, cls_x, search_org )
-        reg_dw = self.reg_dw(reg_z, reg_x, search_org) 
+        reg_dw = self.reg_dw(reg_z, reg_x, search_org)
 
-        
+
         x_reg = self.bbox_tower(reg_dw)
         x = self.adjust * self.bbox_pred(x_reg) + self.bias
         x = torch.exp(x)
@@ -275,8 +273,8 @@ class EncodeBackbone(nn.Module):
 
     def forward(self, x):
         return self.matrix11_s(x)
-    
-    
+
+
 class CorrelationConcat(nn.Module):
     """
     Correlation module
@@ -284,34 +282,34 @@ class CorrelationConcat(nn.Module):
 
     def __init__(self, num_channels: int, num_corr_channels: int = 64):
         super().__init__()
-        
 
-        in_size = num_channels + num_corr_channels             
+
+        in_size = num_channels + num_corr_channels
         self.enc = nn.Sequential(
             ConvBlock(in_size, num_channels, kernel_size=3, padding=1),
             nn.BatchNorm2d(num_channels),
             nn.ReLU(inplace=True),
         )
-        
+
     def forward(self, z, x, d):
-        
+
         b, c, w, h = x.size()
         s = torch.matmul(z.permute(0, 2, 1), x.view(b, c, -1)).view(b, -1, w, h)
         s = torch.cat([s, d], dim=1)
         s = self.enc(s)
-        return s   
-    
+        return s
 
-class CorrelationConcat(nn.Module):
+
+class CorrelationConcatAtt(nn.Module):
     """
     Correlation module
     """
 
     def __init__(self, num_channels: int, num_corr_channels: int = 64):
         super().__init__()
-        
 
-        in_size = num_channels + num_corr_channels             
+
+        in_size = num_channels + num_corr_channels
         self.enc = nn.Sequential(
             ConvBlock(in_size, num_channels, kernel_size=3, padding=1),
             nn.BatchNorm2d(num_channels),
@@ -319,12 +317,12 @@ class CorrelationConcat(nn.Module):
         )
         # self.att = ParallelPolarizedSelfAttention(num_channels)
         self.att = FastParallelPolarizedSelfAttention(num_channels, 1)
-        
+
     def forward(self, z, x, d):
-        
+
         b, c, w, h = x.size()
         s = torch.matmul(z.permute(0, 2, 1), x.view(b, c, -1)).view(b, -1, w, h)
         s = torch.cat([s, d], dim=1)
         s = self.enc(s)
         s = self.att(s)
-        return s   
+        return s

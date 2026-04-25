@@ -1,10 +1,8 @@
-from typing import Dict, Any, Optional
-
-import torch
-import torch.nn as nn
+from typing import Any, Dict, Optional
 
 import constants as constants
-
+import torch
+import torch.nn as nn
 
 
 def calc_iou(reg_target: torch.Tensor, pred: torch.Tensor, smooth: float = 1.0) -> torch.Tensor:

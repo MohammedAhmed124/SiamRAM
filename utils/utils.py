@@ -1,20 +1,24 @@
+from typing import Any, Optional, Tuple, Union, cast
+
+import cv2
 import numpy as np
-from typing import Tuple
-import cv2 
-import torch 
-from typing import Optional , Union , Any
+import torch
+from numpy._typing import NDArray
+from torch import Tensor
+from torch.nn import Module
+
 
 def _extract_descriptor(frame: np.ndarray, bbox, size=16) -> Optional[np.ndarray]:
     """phi(I_t, b) = normalised concat of grayscale patch + HSV histogram."""
     x, y, w, h = map(int, bbox)
     x, y = max(0, x), max(0, y)
     w, h = max(1, w), max(1, h)
-    patch = frame[y:y+h, x:x+w]
+    patch = frame[y:y + h, x:x + w]
     if patch.size == 0:
         return None
-    gray   = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
-    p      = cv2.resize(gray, (size, size)).flatten().astype(np.float32)
-    hsv    = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)
+    gray = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
+    p = cv2.resize(gray, (size, size)).flatten().astype(np.float32)
+    hsv = cast(cv2.Mat, cv2.cvtColor(patch, cv2.COLOR_BGR2HSV))
     h_hist = cv2.calcHist([hsv], [0, 1, 2], None, [8, 4, 4],
                           [0, 180, 0, 256, 0, 256]).flatten().astype(np.float32)
     desc = np.concatenate([p, h_hist])
@@ -25,8 +29,10 @@ def _extract_descriptor(frame: np.ndarray, bbox, size=16) -> Optional[np.ndarray
 def _iou(a, b) -> float:
     ax2, ay2 = a[0] + a[2], a[1] + a[3]
     bx2, by2 = b[0] + b[2], b[1] + b[3]
-    ix1 = max(a[0], b[0]);  iy1 = max(a[1], b[1])
-    ix2 = min(ax2,  bx2);   iy2 = min(ay2,  by2)
+    ix1 = max(a[0], b[0])
+    iy1 = max(a[1], b[1])
+    ix2 = min(ax2, bx2)
+    iy2 = min(ay2, by2)
     inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
     union = a[2] * a[3] + b[2] * b[3] - inter
     return inter / (union + 1e-8)
@@ -36,39 +42,39 @@ def _cos_sim(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-8))
 
 
-
 def xyxy_to_xywh(boxes):
     x1, y1, x2, y2 = boxes
     return [x1, y1, x2 - x1, y2 - y1]
 
 
-def convert_xywh_to_xyxy(bbox: np.array) -> np.array:
-    return np.array([bbox[0], bbox[1], bbox[2]+bbox[0], bbox[3]+bbox[1]])
+def convert_xywh_to_xyxy(bbox: NDArray) -> NDArray:
+    return np.array([bbox[0], bbox[1], bbox[2] + bbox[0], bbox[3] + bbox[1]])
 
-def to_device(x: Union[torch.Tensor, torch.nn.Module], cuda_id: int = 0) -> torch.Tensor:
+
+def to_device(x: Union[torch.Tensor, torch.nn.Module], cuda_id: int = 0) -> Tensor | Module:
     return x.cuda(cuda_id) if torch.cuda.is_available() else x
 
+
 def extend_bbox(
-    bbox: np.array,
+    bbox: NDArray,
     image_width: int,
     image_height: int,
     offset: float = 1.1
-    ) -> np.array:
-
+) -> NDArray:
     """
     Expands a bounding box outward by a given percentage to include surrounding context.
-    
-    Why we need this: 
-    In object tracking, we rarely just want the tight crop of the object. We need to see the 
-    area around the object (the context) to help predict where it might move in the next frame 
+
+    Why we need this:
+    In object tracking, we rarely just want the tight crop of the object. We need to see the
+    area around the object (the context) to help predict where it might move in the next frame
     or to give the neural network background information to distinguish the object from its surroundings.
 
     How it works:
-    The offset acts as a multiplier. An offset of 0.1 means "add 10% of the box's width/height 
-    to the edges". You can pass a single float (applies to all sides), a tuple of 2 (width_offset, 
+    The offset acts as a multiplier. An offset of 0.1 means "add 10% of the box's width/height
+    to the edges". You can pass a single float (applies to all sides), a tuple of 2 (width_offset,
     height_offset), or a tuple of 4 (left, right, top, bottom).
-    
-    Note: The `image_width` and `image_height` parameters are not actually used in the function body, 
+
+    Note: The `image_width` and `image_height` parameters are not actually used in the function body,
     but are kept in the signature. To safely bound the box to the image size, use `ensure_bbox_boundaries` afterward.
 
     Args:
@@ -99,26 +105,25 @@ def extend_bbox(
     else:
         left = right = top = bottom = offset
 
-    return np.array([x - w * left, y - h * top, w * (1.0 + right + left), h * (1.0 + top + bottom)]).astype("int32")        
+    return np.array([x - w * left, y - h * top, w * (1.0 + right + left), h * (1.0 + top + bottom)]).astype("int32")
 
 
 def ensure_bbox_boundaries(
-    bbox: np.array,
+    bbox: NDArray,
     img_shape: Tuple[int, int]
-    ) -> np.array:
-
+) -> NDArray:
     """
     Trims a bounding box so it does not spill over the edges of the image.
-    
+
     Why we need this:
-    When you expand a bounding box (like we do in `extend_bbox`) near the edge of an image, 
-    the coordinates might become negative, or the width/height might push the box outside the 
-    image boundaries. If you try to slice an image array with these out-of-bounds coordinates, 
+    When you expand a bounding box (like we do in `extend_bbox`) near the edge of an image,
+    the coordinates might become negative, or the width/height might push the box outside the
+    image boundaries. If you try to slice an image array with these out-of-bounds coordinates,
     your code will crash or return an empty array.
 
     How it works:
-    It checks the top-left corner (x1, y1) and the bottom-right corner (x2, y2). It forces 
-    them to be at least 0, and at most the width or height of the image. It then recalculates 
+    It checks the top-left corner (x1, y1) and the bottom-right corner (x2, y2). It forces
+    them to be at least 0, and at most the width or height of the image. It then recalculates
     the width and height based on these safe coordinates.
 
     Args:
@@ -135,37 +140,34 @@ def ensure_bbox_boundaries(
         array([0, 500, 90, 100]) # Trimmed at x=0, making the width 90 instead of 100
     """
     x1, y1, w, h = bbox
-    x2_raw = x1 + w          # ← compute BEFORE any clamping
+    x2_raw = x1 + w  # ← compute BEFORE any clamping
     y2_raw = y1 + h
     x1 = min(max(0, x1), img_shape[1])
     y1 = min(max(0, y1), img_shape[0])
-    x2 = min(max(0, x2_raw), img_shape[1])   # ← uses raw, not clamped x1
+    x2 = min(max(0, x2_raw), img_shape[1])  # ← uses raw, not clamped x1
     y2 = min(max(0, y2_raw), img_shape[0])
-    w  = x2 - x1
-    h  = y2 - y1
+    w = x2 - x1
+    h = y2 - y1
     return np.array([x1, y1, w, h]).astype("int32")
 
 
-
-
 def clamp_bbox(
-    bbox: np.array,
+    bbox: NDArray,
     shape: Tuple[int, int],
     min_side: int = 3
-    ) -> np.array:
-
+) -> NDArray:
     """
     Ensures a bounding box is within image bounds AND forces it to have a minimum width and height.
-    
+
     Why we need this:
-    If an object is just barely peeking onto the screen (e.g., 1 pixel wide), trimming it with 
-    `ensure_bbox_boundaries` might result in a 0-width or 1-width box. Deep learning trackers 
-    often break or divide by zero when dealing with boxes that are effectively flat lines. This 
+    If an object is just barely peeking onto the screen (e.g., 1 pixel wide), trimming it with
+    `ensure_bbox_boundaries` might result in a 0-width or 1-width box. Deep learning trackers
+    often break or divide by zero when dealing with boxes that are effectively flat lines. This
     guarantees the box is mathematically usable.
 
     How it works:
-    First, it safely trims the box to the image. Then, if the width or height is less than 
-    `min_side`, it forces it to be `min_side`. If forcing it to be bigger pushes it off the 
+    First, it safely trims the box to the image. Then, if the width or height is less than
+    `min_side`, it forces it to be `min_side`. If forcing it to be bigger pushes it off the
     right/bottom edge of the image, it shifts the entire box slightly to the left/up so it fits.
 
     Args:
@@ -194,24 +196,23 @@ def clamp_bbox(
     return np.array([x, y, w, h])
 
 
-
 def get_extended_crop(image, bbox, crop_size, context, padding_value=None):
     if padding_value is None:
         padding_value = np.mean(image, axis=(0, 1))
 
-    pad_left   = max(-context[0], 0)
-    pad_top    = max(-context[1], 0)
-    pad_right  = max(context[0] + context[2] - image.shape[1], 0)
+    pad_left = max(-context[0], 0)
+    pad_top = max(-context[1], 0)
+    pad_right = max(context[0] + context[2] - image.shape[1], 0)
     pad_bottom = max(context[1] + context[3] - image.shape[0], 0)
 
     crop = image[
-        context[1] + pad_top  : context[1] + context[3] - pad_bottom,
-        context[0] + pad_left : context[0] + context[2] - pad_right,
+        context[1] + pad_top: context[1] + context[3] - pad_bottom,
+        context[0] + pad_left: context[0] + context[2] - pad_right,
     ]
 
     if pad_top or pad_bottom or pad_left or pad_right:
         crop = cv2.copyMakeBorder(crop, pad_top, pad_bottom, pad_left, pad_right,
-                                   cv2.BORDER_CONSTANT, value=padding_value)
+                                  cv2.BORDER_CONSTANT, value=padding_value)
 
     # Scale bbox manually — 4 multiplications vs full albumentations pipeline
     sx = crop_size / crop.shape[1]
@@ -228,7 +229,7 @@ def get_extended_crop(image, bbox, crop_size, context, padding_value=None):
     return resized, padded_bbox, context
 
 
-def handle_empty_bbox(bbox: np.array, min_bbox: int = 3) -> np.array:
+def handle_empty_bbox(bbox: NDArray, min_bbox: int = 3) -> NDArray:
     bbox[2] = max(bbox[2], min_bbox)
     bbox[3] = max(bbox[3], min_bbox)
     return bbox
@@ -250,7 +251,6 @@ def get_regression_weight_label(
     return torch.from_numpy(label)
 
 
-
 @torch.no_grad()
 def make_grid(score_size: int, total_stride: int, instance_size: int) -> Tuple[torch.Tensor, torch.Tensor]:
     """
@@ -268,7 +268,6 @@ def make_grid(score_size: int, total_stride: int, instance_size: int) -> Tuple[t
     grid_x = torch.from_numpy(grid_x[np.newaxis, :, :])
     grid_y = torch.from_numpy(grid_y[np.newaxis, :, :])
     return grid_x, grid_y
-
 
 
 def limit(radius: Union[torch.Tensor, float]) -> Union[torch.Tensor, float]:

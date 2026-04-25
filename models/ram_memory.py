@@ -1,9 +1,11 @@
-import numpy as np
-import cv2
 from collections import deque
-from typing import List, Optional, Tuple, Dict, Union
+from typing import List, Optional, Tuple
 
-from utils.utils import _iou , _cos_sim , _extract_descriptor
+import numpy as np
+
+from utils.utils import _cos_sim, _extract_descriptor, _iou
+
+
 class AppearanceMemory:
     def __init__(
         self,

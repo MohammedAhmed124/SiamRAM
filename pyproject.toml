@@ -20,6 +20,7 @@ dependencies = [
   "jpeg4py>=0.1.4",
   "lmdb>=2.2.0",
   "matplotlib>=3.10.9",
+  #TODO: remove mobile cv
   "mobile-cv>=0.1",
   "numpy>=2.2.6",
   "opencv-python>=4.13.0.92",

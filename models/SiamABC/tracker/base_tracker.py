@@ -1,11 +1,11 @@
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Dict, Optional, Tuple, Union
+from collections import deque
+from typing import Any, Callable, Deque, Optional, Tuple, Union
 
 import albumentations as albu
 import numpy as np
 import torch
 import torch.nn as nn
-from numpy import ndarray
 from numpy._typing import NDArray
 from torch import Tensor
 
@@ -21,8 +21,9 @@ class TrackingState:
         self.bbox: Optional[NDArray] = None
         self.pred_score = None
         self.mapping: Optional[NDArray] = None
-        self.prev_size = None
+        self.prev_size: Optional[NDArray] = None
         self.mean_color = None
+        self.paths: Deque[NDArray] = deque(maxlen=70)
 
     def save_frame_shape(self, frame: np.ndarray) -> None:
         self.frame_h = frame.shape[0]
@@ -62,7 +63,7 @@ class Tracker(ABC):
         return torch.from_numpy(x)
 
     @abstractmethod
-    def get_box_coder(self, tracking_config, cuda_id: int = 0):
+    def get_box_coder(self, tracking_config, cuda_id: str | int = 0):
         pass
 
     def to_device(self, cuda_id):
@@ -105,7 +106,11 @@ class Tracker(ABC):
         bbox[3] = max(3, round(bbox[3] * h_scale))
         return list(map(int, bbox))
 
-    def _preprocess_image(self, image: np.ndarray, transform: Callable = None) -> torch.Tensor:
+    def _preprocess_image(
+        self,
+        image: np.ndarray,
+        transform: Optional[Callable[..., Any]] = None,
+    ) -> torch.Tensor:
         # Non-blocking CPU→GPU transfer
         x = torch.from_numpy(
             np.ascontiguousarray(image[:, :, :3].transpose(2, 0, 1))
@@ -117,7 +122,7 @@ class Tracker(ABC):
     def reset(self) -> None:
         self._template_features = None
 
-    def initialize(self, image: np.ndarray, rect: np.array, **kwargs) -> None:
+    def initialize(self, image: NDArray, rect: NDArray, **kwargs) -> None:
         """
         args:
             img(np.ndarray): RGB image
@@ -126,7 +131,7 @@ class Tracker(ABC):
         """
         pass
 
-    def update(self, image: np.ndarray, *kw) -> Dict[str, Any]:
+    def update(self, search: NDArray, *kw):
         """
         args:
             img(np.ndarray): RGB image
@@ -135,7 +140,7 @@ class Tracker(ABC):
         """
         return {"bbox": self.tracking_state.bbox}
 
-    def _smooth_size(self, size: np.array, prev_size: np.array, lr: float) -> Tuple[float, float]:
+    def _smooth_size(self, size: NDArray, prev_size: NDArray, lr: float) -> Tuple[float, float]:
         """
         Tracking smoothing logic matches the code of Siamese Tracking
         https://www.robots.ox.ac.uk/~luca/siamese-fc.html
@@ -150,7 +155,7 @@ class Tracker(ABC):
         h = prev_size[1] + lr * (size[1] + prev_size[1])
         return w, h
 
-    def _get_point_offset(self, pred_bbox: np.array) -> Tuple[float, float]:
+    def _get_point_offset(self, pred_bbox: NDArray) -> Tuple[float, float]:
         pred_xs = pred_bbox[0] + (pred_bbox[2] / 2)
         pred_ys = pred_bbox[1] + (pred_bbox[3] / 2)
 
@@ -159,13 +164,14 @@ class Tracker(ABC):
         return diff_xs, diff_ys
 
     def _postprocess_bbox(
-        self, decoded_info: TrackerDecodeResult, cls_score: np.array, penalty: Any = None
-    ) -> np.array:
+        self, decoded_info: TrackerDecodeResult, cls_score: NDArray, penalty: Any = None
+    ) -> NDArray:
         pred_bbox = np.squeeze(decoded_info.bbox.cpu().numpy())
         if not self.tracking_config.get("smooth", False):
             return pred_bbox
 
         prev_size = self.tracking_state.prev_size
+        assert prev_size is not None
         r_max, c_max = decoded_info.pred_coords[0]
         # size learning rate
         lr = (penalty[r_max, c_max] * cls_score[r_max, c_max] * self.tracking_config["lr"]).item()
@@ -176,8 +182,8 @@ class Tracker(ABC):
         return predicted_bbox
 
     def _confidence_postprocess(
-        self, cls_score: np.ndarray, regression_map: torch.Tensor
-    ) -> tuple[ndarray, None, None] | tuple[Any, ndarray, Tensor]:
+        self, cls_score: NDArray, regression_map: torch.Tensor
+    ) -> tuple[NDArray, None, None] | tuple[Any, NDArray, Tensor]:
         """
 
         :param cls_score: torch.Tensor - classification score
@@ -188,6 +194,7 @@ class Tracker(ABC):
         if not self.tracking_config.get("smooth", False):
             return cls_score, None, None
         prev_size = self.tracking_state.prev_size
+        assert prev_size is not None
 
         pred_location_ = torch.stack([
             self.box_coder.grid_x - regression_map[:, 0],

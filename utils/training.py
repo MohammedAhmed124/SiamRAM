@@ -24,7 +24,7 @@ import time
 from collections import defaultdict
 from typing import Dict
 
-import external.SiamABC.core.constants as constants
+import models.SiamABC.model.constants as constants
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader

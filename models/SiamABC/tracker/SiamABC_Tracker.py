@@ -1,24 +1,23 @@
-
 from collections import deque
 from statistics import mean
 from typing import Dict, Tuple
 
 import numpy as np
 import torch
+from numpy._typing import NDArray
 
 from utils.box_coder import SiamABCBoxCoder, TrackerDecodeResult
 from utils.utils import clamp_bbox, extend_bbox, get_extended_crop
-
+from .base_tracker import Tracker
 from ..model import constants
 from ..model.adaptive_batch_norm import AdaptiveBatchNorm
-from .base_tracker import Tracker
 
 
 class SiamABCTracker(Tracker):
     def get_box_coder(self, tracking_config, cuda_id: int = 0):
         return SiamABCBoxCoder(tracking_config)
 
-    def initialize(self, image: np.ndarray, rect: np.array) -> None:
+    def initialize(self, image: NDArray, rect: NDArray) -> None:
 
         """
         args:
@@ -34,11 +33,9 @@ class SiamABCTracker(Tracker):
         self.similarity_score = self.tracking_config["similarity_score"]
         self.dynamic_update_threshold = self.tracking_config["dynamic_update_threshold"]
 
-
         rect = clamp_bbox(rect, image.shape)
         self.tracking_state.bbox = rect
-        self._init_rect = rect.copy()   # ← add this
-
+        self._init_rect = rect.copy()  # ← add this
 
         self.tracking_state.pred_score = 1.0
         self.prev_good_bbox = rect
@@ -48,16 +45,13 @@ class SiamABCTracker(Tracker):
 
         self._template_features = self.get_template_features(image, rect)
         self.dynamic_template_features = self._template_features.clone()
-        self.dynamic_search_features,_,_ = self.get_search_features(image, rect)
+        self.dynamic_search_features, _, _ = self.get_search_features(image, rect)
 
-
-
-        self.all_memory_imgs = deque([[image,rect]], maxlen=self.memory_window_size)
-        self.classification_scores= deque([0.5], maxlen=self.memory_window_size)
+        self.all_memory_imgs = deque([[image, rect]], maxlen=self.memory_window_size)
+        self.classification_scores = deque([0.5], maxlen=self.memory_window_size)
 
         self.running_dynamic_image = image
         self.running_dynamic_bbox = rect
-
 
         self.offset = self.tracking_config["search_context"]
         self.cls_threshold = 0.9
@@ -69,11 +63,9 @@ class SiamABCTracker(Tracker):
         self.update_lambda = 0.1
         self.running_confidence = 0.5
 
-
         self._best_idx = 0
         self._best_score = 0.5
         self._is_full = False  # tracks whether deque has started evicti
-
 
     @torch.no_grad()
     def get_template_features(self, image, rect):
@@ -99,7 +91,7 @@ class SiamABCTracker(Tracker):
             offset=self.tracking_config["search_context"],
             image_width=image.shape[1],
             image_height=image.shape[0]
-            )
+        )
 
         search_crop, search_bbox, search_context = get_extended_crop(
             image=image,
@@ -111,15 +103,17 @@ class SiamABCTracker(Tracker):
         search_crop = self._preprocess_image(search_crop, self._search_transform)
         return self.net.get_features(search_crop), search_bbox, search_context
 
-
     def check_validity(self, bbox_window, bbox):
-        return bbox[0]>=bbox_window[0] and bbox[1]>=bbox_window[1] and bbox[2]<=bbox_window[2] and bbox[3]<=bbox_window[3]
+        return bbox[0] >= bbox_window[0] and bbox[1] >= bbox_window[1] and bbox[2] <= bbox_window[2] and bbox[3] <= \
+            bbox_window[3]
 
     def select_representatives_from_all(self):
-        for num in range(len(self.classification_scores)-1, -1, -1):
-            if self.classification_scores[num]>mean(self.classification_scores):
-                self.dynamic_template_features = self.get_template_features(self.all_memory_imgs[num][0], self.all_memory_imgs[num][1])
-                self.dynamic_search_features, _, _ = self.get_search_features(self.all_memory_imgs[num][0], self.all_memory_imgs[num][1])
+        for num in range(len(self.classification_scores) - 1, -1, -1):
+            if self.classification_scores[num] > mean(self.classification_scores):
+                self.dynamic_template_features = self.get_template_features(self.all_memory_imgs[num][0],
+                                                                            self.all_memory_imgs[num][1])
+                self.dynamic_search_features, _, _ = self.get_search_features(self.all_memory_imgs[num][0],
+                                                                              self.all_memory_imgs[num][1])
                 return
 
     def _update_best_index(self, pred_score: float, evicting: bool) -> None:
@@ -132,7 +126,7 @@ class SiamABCTracker(Tracker):
             if self._best_idx == 0:
                 # Best was just dropped — rescan (new element already in deque)
                 scores = np.array(self.classification_scores, dtype=np.float16)
-                self._best_idx  = int(np.argmax(scores))
+                self._best_idx = int(np.argmax(scores))
                 self._best_score = float(scores[self._best_idx])
             else:
                 # Best survived — shift index left to account for eviction
@@ -140,12 +134,12 @@ class SiamABCTracker(Tracker):
                 # Still check if new element beats it
                 if pred_score > self._best_score:
                     self._best_score = pred_score
-                    self._best_idx   = len(self.classification_scores) - 1
+                    self._best_idx = len(self.classification_scores) - 1
         else:
             # No eviction — just check new element
             if pred_score > self._best_score:
                 self._best_score = pred_score
-                self._best_idx   = len(self.classification_scores) - 1
+                self._best_idx = len(self.classification_scores) - 1
 
     def _maybe_store_frame(self, search: np.ndarray, pred_bbox: np.ndarray, pred_score: float) -> None:
         """Append to memory and keep best-index consistent. Single responsibility."""
@@ -161,10 +155,10 @@ class SiamABCTracker(Tracker):
             return
 
         best_img, best_bbox = self.all_memory_imgs[self._best_idx]
-        self.dynamic_template_features          = self.get_template_features(best_img, best_bbox)
-        self.dynamic_search_features, _, _      = self.get_search_features(best_img, best_bbox)
-        self.running_dynamic_image              = best_img.copy()
-        self.running_dynamic_bbox               = best_bbox.copy()
+        self.dynamic_template_features = self.get_template_features(best_img, best_bbox)
+        self.dynamic_search_features, _, _ = self.get_search_features(best_img, best_bbox)
+        self.running_dynamic_image = best_img.copy()
+        self.running_dynamic_bbox = best_bbox.copy()
 
         if hasattr(self.net, "invalidate_template_cache"):
             self.net.invalidate_template_cache()
@@ -173,13 +167,13 @@ class SiamABCTracker(Tracker):
         pred_bbox, pred_score, sim_score = self.run_track(search)
 
         # Always update state
-        self.tracking_state.bbox       = pred_bbox
+        self.tracking_state.bbox = pred_bbox
         self.tracking_state.pred_score = pred_score
         self.tracking_state.paths.append(pred_bbox)
 
         if self.dynamic_update:
             score_ok = (
-                pred_score >  self.running_confidence or
+                pred_score > self.running_confidence or
                 pred_score >= self.dynamic_update_threshold
             )
             if score_ok:
@@ -209,7 +203,8 @@ class SiamABCTracker(Tracker):
         search_features, search_bbox, search_context = self.get_search_features(search, self.tracking_state.bbox)
         self.tracking_state.mapping = search_context
         self.tracking_state.prev_size = search_bbox[2:]
-        pred_bbox, pred_score, sim_score, _ = self.track(search_features, self.dynamic_search_features, self.dynamic_template_features)
+        pred_bbox, pred_score, sim_score, _ = self.track(search_features, self.dynamic_search_features,
+                                                         self.dynamic_template_features)
         pred_bbox = self._rescale_bbox(pred_bbox, self.tracking_state.mapping)
         pred_bbox = clamp_bbox(pred_bbox, search.shape)
         return pred_bbox, pred_score, sim_score
@@ -221,17 +216,17 @@ class SiamABCTracker(Tracker):
             dynamic_search_features=dynamic_search_features,
             template_features=self._template_features,
             dynamic_template_features=dynamic_template_features
-            )
+        )
 
         return self._postprocess(track_result=track_result)
 
-    def _postprocess(self, track_result: Dict[str, torch.Tensor]) -> Tuple[np.array, float]:
+    def _postprocess(self, track_result: Dict[str, torch.Tensor]) -> Tuple[NDArray, float]:
         cls_score = track_result[constants.TARGET_CLASSIFICATION_KEY].float().sigmoid()
         regression_map = track_result[constants.TARGET_REGRESSION_LABEL_KEY].detach().float()
-        classification_map, penalty , pred_location = self._confidence_postprocess(
+        classification_map, penalty, pred_location = self._confidence_postprocess(
             cls_score=cls_score,
             regression_map=regression_map
-            )
+        )
 
         decoded_info: TrackerDecodeResult = self.box_coder.decode(
             classification_map=classification_map,
@@ -245,9 +240,7 @@ class SiamABCTracker(Tracker):
         r_max, c_max = decoded_info.pred_coords[0]
         sim_score_raw = track_result[constants.TRACKER_TARGET_SEARCH_SIM_SCORE]
         sim_score = sim_score_raw.item() if sim_score_raw is not None else 0.0
-        return pred_bbox, cls_score[r_max, c_max].item(), sim_score,  track_result[constants.TRACKER_ATTENTION_MAP]
-
-
+        return pred_bbox, cls_score[r_max, c_max].item(), sim_score, track_result[constants.TRACKER_ATTENTION_MAP]
 
     def run_track_for_candidate(self, search: np.ndarray, candidate_bbox: np.ndarray):
         cand_x, cand_y, cand_w, cand_h = [float(v) for v in candidate_bbox]
@@ -261,8 +254,8 @@ class SiamABCTracker(Tracker):
         pad_w = cand_w * context_ratio
         pad_h = cand_h * context_ratio
 
-        px1 = max(0,    int(cand_x - pad_w))
-        py1 = max(0,    int(cand_y - pad_h))
+        px1 = max(0, int(cand_x - pad_w))
+        py1 = max(0, int(cand_y - pad_h))
         px2 = min(w_fr, int(cand_x + cand_w + pad_w))
         py2 = min(h_fr, int(cand_y + cand_h + pad_h))
 
@@ -271,14 +264,12 @@ class SiamABCTracker(Tracker):
         saved_bbox = self.tracking_state.bbox
 
         try:
-            self.tracking_state.bbox    = candidate_bbox.copy()
+            self.tracking_state.bbox = candidate_bbox.copy()
             self.tracking_state.mapping = padded_context.copy()
             # search_context stays UNCHANGED — already the right ratio
             return self.run_track(search)
         finally:
             self.tracking_state.bbox = saved_bbox
-
-
 
     def set_tta(self, enabled: bool) -> None:
         for module in self.net.modules():
@@ -294,7 +285,6 @@ class SiamABCTracker(Tracker):
     def disable_tta(self) -> None:
         self.set_tta(False)
 
-
     @staticmethod
     def _compute_iou(boxA, boxB) -> float:
         ix1 = max(boxA[0], boxB[0])
@@ -302,6 +292,5 @@ class SiamABCTracker(Tracker):
         ix2 = min(boxA[0] + boxA[2], boxB[0] + boxB[2])
         iy2 = min(boxA[1] + boxA[3], boxB[1] + boxB[3])
         inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
-        union = boxA[2]*boxA[3] + boxB[2]*boxB[3] - inter
+        union = boxA[2] * boxA[3] + boxB[2] * boxB[3] - inter
         return inter / union if union > 0 else 0.0
-

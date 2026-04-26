@@ -44,7 +44,7 @@ import cv2
 import numpy as np
 import pandas as pd
 import torch
-from external.SiamABC.core.utils.box_coder import SiamABCBoxCoder
+from utils.box_coder import SiamABCBoxCoder
 from torch.utils.data import Dataset
 
 from utils.utils import (

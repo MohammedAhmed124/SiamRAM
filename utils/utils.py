@@ -8,20 +8,52 @@ from torch import Tensor
 from torch.nn import Module
 
 
-def _extract_descriptor(frame: np.ndarray, bbox, size=16) -> Optional[np.ndarray]:
-    """phi(I_t, b) = normalised concat of grayscale patch + HSV histogram."""
+# def _extract_descriptor(frame: np.ndarray, bbox, size=16) -> Optional[np.ndarray]:
+#     """phi(I_t, b) = normalised concat of grayscale patch + HSV histogram."""
+#     x, y, w, h = map(int, bbox)
+#     x, y = max(0, x), max(0, y)
+#     w, h = max(1, w), max(1, h)
+#     patch = frame[y:y + h, x:x + w]
+#     if patch.size == 0:
+#         return None
+#     gray = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
+#     p = cv2.resize(gray, (size, size)).flatten().astype(np.float32)
+#     hsv = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)
+#     h_hist = cv2.calcHist([hsv], [0, 1, 2], None, [8, 4, 4],
+#                           [0, 180, 0, 256, 0, 256]).flatten().astype(np.float32)
+#     desc = np.concatenate([p, h_hist])
+#     norm = np.linalg.norm(desc)
+#     return desc / (norm + 1e-8)
+
+
+
+def _extract_descriptor(
+    frame: np.ndarray,
+    bbox,
+    size: int = 16,
+    w_gray: float = 0.4,
+    w_color: float = 0.6,
+) -> Optional[np.ndarray]:
     x, y, w, h = map(int, bbox)
     x, y = max(0, x), max(0, y)
     w, h = max(1, w), max(1, h)
     patch = frame[y:y + h, x:x + w]
     if patch.size == 0:
         return None
+
+    # --- grayscale texture part ---
     gray = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
     p = cv2.resize(gray, (size, size)).flatten().astype(np.float32)
+    p = p / (np.linalg.norm(p) + 1e-8)          # unit-normalize independently
+
+    # --- color histogram part ---
     hsv = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)
     h_hist = cv2.calcHist([hsv], [0, 1, 2], None, [8, 4, 4],
                           [0, 180, 0, 256, 0, 256]).flatten().astype(np.float32)
-    desc = np.concatenate([p, h_hist])
+    h_hist = h_hist / (np.linalg.norm(h_hist) + 1e-8)  # unit-normalize independently
+
+    # --- weighted concat, then final joint normalization ---
+    desc = np.concatenate([w_gray * p, w_color * h_hist])
     norm = np.linalg.norm(desc)
     return desc / (norm + 1e-8)
 

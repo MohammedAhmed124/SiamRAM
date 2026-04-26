@@ -22,14 +22,22 @@ Usage
 
 import time
 from collections import defaultdict
-from typing import Dict
+from typing import Dict, TypedDict
 
-import models.SiamABC.model.constants as constants
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
+import models.SiamABC.model.constants as constants
+
 from .losses import TrackingHeadLoss
+
+
+class OptimizerParamGroup(TypedDict):
+    params: list[nn.Parameter]
+    lr: float
+    name: str
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Model setup
@@ -80,7 +88,7 @@ def get_trainable_optimizer(model, lr: float = 1e-4,
     Build an optimizer that only touches the unfrozen parameters.
     Optionally use different LRs per group (neck vs heads).
     """
-    param_groups = [
+    param_groups: list[OptimizerParamGroup] = [
         # Neck + attention: lower LR (closer to backbone, more sensitive)
         {
             "params": list(model.neck.parameters()) +
@@ -91,7 +99,7 @@ def get_trainable_optimizer(model, lr: float = 1e-4,
         },
         # Box head: normal LR
         {
-            "params": model.connect_model.parameters(),
+            "params": list(model.connect_model.parameters()),
             "lr": lr,
             "name": "box_head",
         },

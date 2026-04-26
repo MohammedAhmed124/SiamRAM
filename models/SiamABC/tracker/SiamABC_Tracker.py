@@ -1,6 +1,6 @@
 from collections import deque
 from statistics import mean
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Union
 
 import numpy as np
 import torch
@@ -8,16 +8,17 @@ from numpy._typing import NDArray
 
 from utils.box_coder import SiamABCBoxCoder, TrackerDecodeResult
 from utils.utils import clamp_bbox, extend_bbox, get_extended_crop
-from .base_tracker import Tracker
+
 from ..model import constants
 from ..model.adaptive_batch_norm import AdaptiveBatchNorm
+from .base_tracker import Tracker
 
 
 class SiamABCTracker(Tracker):
-    def get_box_coder(self, tracking_config, cuda_id: int = 0):
+    def get_box_coder(self, tracking_config, cuda_id: str | int = 0):
         return SiamABCBoxCoder(tracking_config)
 
-    def initialize(self, image: NDArray, rect: NDArray) -> None:
+    def initialize(self, image: NDArray, rect: NDArray, **kwargs) -> None:
 
         """
         args:
@@ -39,7 +40,7 @@ class SiamABCTracker(Tracker):
 
         self.tracking_state.pred_score = 1.0
         self.prev_good_bbox = rect
-        self.tracking_state.paths = deque([], maxlen=70)
+        self.tracking_state.paths.clear()
 
         self.tracking_state.mean_color = np.mean(image, axis=(0, 1))
 
@@ -47,16 +48,8 @@ class SiamABCTracker(Tracker):
         self.dynamic_template_features = self._template_features.clone()
         self.dynamic_search_features, _, _ = self.get_search_features(image, rect)
 
-        # self.all_memory_imgs = deque([[image, rect]], maxlen=self.memory_window_size)
-        # self.classification_scores = deque([0.5], maxlen=self.memory_window_size)
-
-
-        self.warmup_frames = self.tracking_config.get("warmup_frames", 0)
-        warmup_window = self.tracking_config.get("warmup_window_size", self.memory_window_size)
-        init_window = warmup_window if self.warmup_frames > 0 else self.memory_window_size
-
-        self.all_memory_imgs = deque([[image, rect]], maxlen=init_window)
-        self.classification_scores = deque([0.5], maxlen=init_window)
+        self.all_memory_imgs = deque([[image, rect]], maxlen=self.memory_window_size)
+        self.classification_scores = deque([0.5], maxlen=self.memory_window_size)
 
         self.running_dynamic_image = image
         self.running_dynamic_bbox = rect
@@ -115,6 +108,14 @@ class SiamABCTracker(Tracker):
         return bbox[0] >= bbox_window[0] and bbox[1] >= bbox_window[1] and bbox[2] <= bbox_window[2] and bbox[3] <= \
             bbox_window[3]
 
+    def select_representatives_from_all(self):
+        for num in range(len(self.classification_scores) - 1, -1, -1):
+            if self.classification_scores[num] > mean(self.classification_scores):
+                self.dynamic_template_features = self.get_template_features(self.all_memory_imgs[num][0],
+                                                                            self.all_memory_imgs[num][1])
+                self.dynamic_search_features, _, _ = self.get_search_features(self.all_memory_imgs[num][0],
+                                                                              self.all_memory_imgs[num][1])
+                return
 
     def _update_best_index(self, pred_score: float, evicting: bool) -> None:
         """
@@ -163,8 +164,7 @@ class SiamABCTracker(Tracker):
         if hasattr(self.net, "invalidate_template_cache"):
             self.net.invalidate_template_cache()
 
-
-    def update(self, search: np.ndarray):
+    def update(self, search: NDArray, *kw):
         pred_bbox, pred_score, sim_score = self.run_track(search)
 
         # Always update state
@@ -186,16 +186,6 @@ class SiamABCTracker(Tracker):
                     self._maybe_store_frame(search, pred_bbox, pred_score)
 
             self._prev_bbox = pred_bbox.copy()
-
-
-            if self.warmup_frames > 0 and self.idx == self.warmup_frames - 1:
-                full_imgs   = deque(self.all_memory_imgs,        maxlen=self.memory_window_size)
-                full_scores = deque(self.classification_scores,  maxlen=self.memory_window_size)
-                self.all_memory_imgs        = full_imgs
-                self.classification_scores  = full_scores
-                scores = np.array(self.classification_scores, dtype=np.float16)
-                self._best_idx   = int(np.argmax(scores))
-                self._best_score = float(scores[self._best_idx])
             self.idx += 1
 
             if self.idx % self.N == 0:
@@ -209,8 +199,7 @@ class SiamABCTracker(Tracker):
             self.running_confidence = min(self.running_confidence, self.running_confidence_floor_value)
 
         return pred_bbox, pred_score, sim_score
-    
-    
+
     def run_track(self, search):
         search_features, search_bbox, search_context = self.get_search_features(search, self.tracking_state.bbox)
         self.tracking_state.mapping = search_context
@@ -232,7 +221,10 @@ class SiamABCTracker(Tracker):
 
         return self._postprocess(track_result=track_result)
 
-    def _postprocess(self, track_result: Dict[str, torch.Tensor]) -> Tuple[NDArray, float]:
+    def _postprocess(
+        self,
+        track_result: Dict[str, torch.Tensor]
+    ) -> Tuple[NDArray, float, Union[int, float, bool], torch.Tensor]:
         cls_score = track_result[constants.TARGET_CLASSIFICATION_KEY].float().sigmoid()
         regression_map = track_result[constants.TARGET_REGRESSION_LABEL_KEY].detach().float()
         classification_map, penalty, pred_location = self._confidence_postprocess(
@@ -306,31 +298,3 @@ class SiamABCTracker(Tracker):
         inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
         union = boxA[2] * boxA[3] + boxB[2] * boxB[3] - inter
         return inter / union if union > 0 else 0.0
-    
-
-    @staticmethod
-    def _is_violent_jump(prev_bbox, new_bbox,
-                        max_center_shift: float = 1.0,
-                        max_size_ratio: float = 2.0) -> bool:
-        """
-        Returns True if the new bbox represents an implausibly large jump.
-        max_center_shift: max allowed center displacement as a multiple of the mean prev dimension.
-        max_size_ratio:   max allowed ratio of new/old (or old/new) w or h.
-        """
-        px, py, pw, ph = prev_bbox
-        nx, ny, nw, nh = new_bbox
-
-        prev_cx, prev_cy = px + pw / 2, py + ph / 2
-        new_cx,  new_cy  = nx + nw / 2, ny + nh / 2
-
-        ref = (pw + ph) / 2  # mean spatial extent of previous box
-        if ref <= 0:
-            return False
-
-        center_shift = np.hypot(new_cx - prev_cx, new_cy - prev_cy) / ref
-
-        w_ratio = max(nw / pw, pw / nw) if pw > 0 and nw > 0 else max_size_ratio + 1
-        h_ratio = max(nh / ph, ph / nh) if ph > 0 and nh > 0 else max_size_ratio + 1
-
-        return center_shift > max_center_shift or w_ratio > max_size_ratio or h_ratio > max_size_ratio
-

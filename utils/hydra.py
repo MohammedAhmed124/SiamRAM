@@ -1,5 +1,5 @@
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import yaml
 from hydra.compose import compose
@@ -29,8 +29,8 @@ def load_hydra_config(hydra_config: DictConfig) -> Dict[str, Any]:
     return yaml.load(OmegaConf.to_yaml(hydra_config, resolve=True), Loader=yaml.FullLoader)
 
 
-def load_hydra_config_from_path(config_path: str, config_name: str, overrides: Optional[Dict[str, Any]] = None)\
-        -> Dict[str, Any]:
+def load_hydra_config_from_path(config_path: str, config_name: str, overrides: Optional[List[str]] = None) \
+    -> Dict[str, Any]:
     if overrides is None:
         overrides = list()
     rel_module_path = os.path.relpath(os.getcwd(), os.path.dirname(__file__))

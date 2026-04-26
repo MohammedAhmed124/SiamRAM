@@ -11,9 +11,8 @@ class AdaptiveBatchNorm(nn.BatchNorm2d):
                  affine=True, track_running_stats=True,
                  contineous=False, norm_lambda=0.1):
         super().__init__(num_features, eps, momentum, affine, track_running_stats)
-        self.contineous  = contineous
+        self.contineous = contineous
         self._norm_lambda = norm_lambda
-
 
         self.register_buffer('_lam', torch.tensor(norm_lambda, dtype=torch.float32))
 
@@ -22,9 +21,11 @@ class AdaptiveBatchNorm(nn.BatchNorm2d):
 
     def disable_tta(self):
         self._lam.fill_(0.0)
+
     @property
     def tta_enabled(self) -> bool:
         return self._lam.item() > 0.0
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         self._check_input_dim(x)
 
@@ -44,10 +45,10 @@ class AdaptiveBatchNorm(nn.BatchNorm2d):
         # When _lam > 0.0  → blended stats                           (TTA on)
         # The compiler sees ONE graph for both modes.
         batch_mean = x.mean([0, 2, 3])
-        batch_var  = x.var([0, 2, 3], unbiased=False)
+        batch_var = x.var([0, 2, 3], unbiased=False)
 
         mean = self._lam * batch_mean + (1.0 - self._lam) * self.running_mean
-        var  = self._lam * batch_var  + (1.0 - self._lam) * self.running_var
+        var = self._lam * batch_var + (1.0 - self._lam) * self.running_var
 
         x = (x - mean[None, :, None, None]) \
             / torch.sqrt(var[None, :, None, None] + self.eps)
@@ -57,17 +58,15 @@ class AdaptiveBatchNorm(nn.BatchNorm2d):
         return x
 
 
-def replace_layers_adaptive_bn(model, norm_lambda, contineous ):
-    for n, module in model.named_children():
+def replace_layers_adaptive_bn(model, norm_lambda, continuous):
+    for name, module in model.named_children():
 
         if len(list(module.children())) > 0:
-            replace_layers_adaptive_bn(module, norm_lambda, contineous)
-            
+            replace_layers_adaptive_bn(module, norm_lambda, continuous)
+
         if isinstance(module, nn.BatchNorm2d):
             mybatch_norm = AdaptiveBatchNorm(module.num_features, norm_lambda=norm_lambda)
-            try:
-                n = int(n)
-                model[n] = mybatch_norm
-            except:
-                setattr(model, n, mybatch_norm)
-
+            if isinstance(model, (nn.Sequential, nn.ModuleList)) and name.isdigit():
+                model[int(name)] = mybatch_norm
+            else:
+                setattr(model, name, mybatch_norm)

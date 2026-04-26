@@ -3,10 +3,11 @@ from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
+from numpy._typing import NDArray
 from ultralytics import YOLO
 
 from utils.utils import _cos_sim, _extract_descriptor, _iou
-
+from .SiamABC.tracker.SiamABC_Tracker import SiamABCTracker
 from .motion_model import BBoxEKF
 from .ram_memory import AppearanceMemory
 
@@ -15,7 +16,7 @@ class SiamRAMTracker:
 
     def __init__(
         self,
-        siam_tracker: object,
+        siam_tracker: SiamABCTracker,
         yolo_weights: str = "yolo11n.pt",
         conf_threshold: float = 0.60,
         reacq_threshold: float = 0.55,
@@ -162,7 +163,7 @@ class SiamRAMTracker:
             touching the implementation. Keeping all defaults sane means it works
             out of the box for most scenarios while still being fully adjustable.
         """
-        self.tracker = siam_tracker
+        self.tracker: SiamABCTracker = siam_tracker
         self.yolo = YOLO(yolo_weights)
         self.conf_threshold = conf_threshold
         self.reacq_threshold = reacq_threshold
@@ -1122,7 +1123,7 @@ class SiamRAMTracker:
 
         if desc is not None:
             self.memory.try_admit(ekf_bbox, desc, self.held_box)
-        self.current_bbox = ekf_bbox.copy()
+        self.current_bbox: NDArray = ekf_bbox.copy()
         self.held_box = ekf_bbox.copy()
         self.tracker.tracking_state.bbox = ekf_bbox.copy()
         self._search_cx = float(ekf_bbox[0] + ekf_bbox[2] / 2.0)

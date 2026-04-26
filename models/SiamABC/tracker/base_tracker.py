@@ -1,4 +1,3 @@
-
 from abc import ABC, abstractmethod
 from typing import Any, Callable, Dict, Optional, Tuple, Union
 
@@ -6,6 +5,9 @@ import albumentations as albu
 import numpy as np
 import torch
 import torch.nn as nn
+from numpy import ndarray
+from numpy._typing import NDArray
+from torch import Tensor
 
 from utils.box_coder import TrackerDecodeResult
 from utils.utils import limit, squared_size, to_device
@@ -16,9 +18,9 @@ class TrackingState:
         super().__init__()
         self.frame_h = 0
         self.frame_w = 0
-        self.bbox: Optional[np.array] = None
+        self.bbox: Optional[NDArray] = None
         self.pred_score = None
-        self.mapping: Optional[np.array] = None
+        self.mapping: Optional[NDArray] = None
         self.prev_size = None
         self.mean_color = None
 
@@ -32,12 +34,13 @@ class Tracker(ABC):
         super().__init__()
 
         _mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
-        _std  = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
+        _std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
         self._norm_mean = _mean.cuda(cuda_id)
-        self._norm_std  = _std.cuda(cuda_id)
-        
+        self._norm_std = _std.cuda(cuda_id)
+
         self.cuda_id = cuda_id
-        tracking_config = tracking_config if 'tracking_config' not in tracking_config.keys() else  tracking_config['tracking_config']
+        tracking_config = tracking_config if 'tracking_config' not in tracking_config.keys() else tracking_config[
+            'tracking_config']
         print(tracking_config)
         self.tracking_config = tracking_config
         self.tracking_state = TrackingState()
@@ -102,17 +105,14 @@ class Tracker(ABC):
         bbox[3] = max(3, round(bbox[3] * h_scale))
         return list(map(int, bbox))
 
-
-    
-    def _preprocess_image(self, image: np.ndarray , transform: Callable = None) -> torch.Tensor:
-    # Non-blocking CPU→GPU transfer
+    def _preprocess_image(self, image: np.ndarray, transform: Callable = None) -> torch.Tensor:
+        # Non-blocking CPU→GPU transfer
         x = torch.from_numpy(
             np.ascontiguousarray(image[:, :, :3].transpose(2, 0, 1))
         ).unsqueeze(0).float()
         x = x.to(self.cuda_id, non_blocking=True) / 255.0
         # return (x - self._norm_mean) / self._norm_std
         return x.sub_(self._norm_mean).div_(self._norm_std)
-
 
     def reset(self) -> None:
         self._template_features = None
@@ -159,7 +159,7 @@ class Tracker(ABC):
         return diff_xs, diff_ys
 
     def _postprocess_bbox(
-            self, decoded_info: TrackerDecodeResult, cls_score: np.array, penalty: Any = None
+        self, decoded_info: TrackerDecodeResult, cls_score: np.array, penalty: Any = None
     ) -> np.array:
         pred_bbox = np.squeeze(decoded_info.bbox.cpu().numpy())
         if not self.tracking_config.get("smooth", False):
@@ -176,8 +176,8 @@ class Tracker(ABC):
         return predicted_bbox
 
     def _confidence_postprocess(
-            self, cls_score: np.ndarray, regression_map: torch.Tensor
-    ) -> Tuple[torch.Tensor, np.ndarray]:
+        self, cls_score: np.ndarray, regression_map: torch.Tensor
+    ) -> tuple[ndarray, None, None] | tuple[Any, ndarray, Tensor]:
         """
 
         :param cls_score: torch.Tensor - classification score
@@ -186,35 +186,33 @@ class Tracker(ABC):
         :return: penalty_score: np.ndarray - updated cls_score
         """
         if not self.tracking_config.get("smooth", False):
-            return cls_score, None , None
+            return cls_score, None, None
         prev_size = self.tracking_state.prev_size
 
         pred_location_ = torch.stack([
-        self.box_coder.grid_x - regression_map[:, 0],
-        self.box_coder.grid_y - regression_map[:, 1],
-        self.box_coder.grid_x + regression_map[:, 2],
-        self.box_coder.grid_y + regression_map[:, 3],
-    ], dim=1)  # shape [1,4,H,W]
-    
+            self.box_coder.grid_x - regression_map[:, 0],
+            self.box_coder.grid_y - regression_map[:, 1],
+            self.box_coder.grid_x + regression_map[:, 2],
+            self.box_coder.grid_y + regression_map[:, 3],
+        ], dim=1)  # shape [1,4,H,W]
+
         pred_location = pred_location_[0]  # [4,H,W]
-        
+
         s_c = limit(
             squared_size(pred_location[2] - pred_location[0], pred_location[3] - pred_location[1])
             / (squared_size(prev_size[0], prev_size[1]))
-        )  
+        )
 
         r_c = limit(
             (prev_size[0] / prev_size[1])
             / ((pred_location[2] - pred_location[0]) / (pred_location[3] - pred_location[1]))
-        )  
-        
+        )
 
         penalty = torch.exp(-(r_c * s_c - 1) * self.tracking_config["penalty_k"])
         pscore = penalty * cls_score
 
         pscore = (
-                pscore * (1 - self.tracking_config["window_influence"])
-                + self.window * self.tracking_config["window_influence"]
+            pscore * (1 - self.tracking_config["window_influence"])
+            + self.window * self.tracking_config["window_influence"]
         )
-        return pscore, penalty.cpu().numpy() , pred_location_
-
+        return pscore, penalty.cpu().numpy(), pred_location_

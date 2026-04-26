@@ -872,13 +872,13 @@ class UAVTrackingDataset(Dataset):
         return lambda a: pipeline(image=a)["image"]
 
     def apply_shift_scale(
-        self, bbox: np.ndarray, img_shape, shift_factor=None, scale_factor=None
+        self, bbox: np.ndarray, img_shape, shift_factor=0.0, scale_factor=0.0
     ) -> np.ndarray:
         x, y, w, h = bbox
         cx, cy = x + w / 2.0, y + h / 2.0
         shift_x = np.random.uniform(-shift_factor, shift_factor) * w
         shift_y = np.random.uniform(-shift_factor, shift_factor) * h
-        scale = np.random.uniform(1 - scale_factor, 1 + scale_factor)
+        scale = np.random.uniform(1.0 - scale_factor, 1.0 + scale_factor)
         new_w, new_h = w * scale, h * scale
         new_bbox = np.array(
             [cx + shift_x - new_w / 2, cy + shift_y - new_h / 2, new_w, new_h],

@@ -18,7 +18,7 @@ def _extract_descriptor(frame: np.ndarray, bbox, size=16) -> Optional[np.ndarray
         return None
     gray = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
     p = cv2.resize(gray, (size, size)).flatten().astype(np.float32)
-    hsv = cast(cv2.Mat, cv2.cvtColor(patch, cv2.COLOR_BGR2HSV))
+    hsv = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)
     h_hist = cv2.calcHist([hsv], [0, 1, 2], None, [8, 4, 4],
                           [0, 180, 0, 256, 0, 256]).flatten().astype(np.float32)
     desc = np.concatenate([p, h_hist])

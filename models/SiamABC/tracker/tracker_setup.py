@@ -7,7 +7,7 @@ import torch.nn as nn
 from hydra.utils import instantiate
 from pytorch_toolbelt.utils import transfer_weights
 
-from ..model.custom_bn import replace_layers_adaptive_bn
+from ..model.adaptive_batch_norm import replace_layers_adaptive_bn
 from .SiamABC_Tracker import SiamABCTracker
 
 
@@ -32,15 +32,15 @@ def load_model(
 
 
 
-def get_tracker(config, weights_path: str, lambda_tta: int = 0.1 , continuous = False) -> SiamABCTracker:
-    
+def get_tracker(config, weights_path: str, lambda_tta: float = 0.1 , continuous = False) -> SiamABCTracker:
+
     model = instantiate(config["model"])
-        
+
     replace_layers_adaptive_bn(model.connect_model.cls_dw, lambda_tta, continuous)
     replace_layers_adaptive_bn(model.connect_model.reg_dw,  lambda_tta, continuous)
     replace_layers_adaptive_bn(model.connect_model.bbox_tower,  lambda_tta, continuous)
     replace_layers_adaptive_bn(model.connect_model.cls_tower,  lambda_tta, continuous)
-    
+
     model = load_model(model, weights_path, strict=False).cuda().eval()
     tracker: SiamABCTracker = instantiate(config["tracker"], model=model)
     return tracker

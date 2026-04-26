@@ -4,8 +4,10 @@ on:
   push:
     paths:
       - "**"
+    branches:
+      - master
   pull_request:
-    branches: [ master, dev ] # Always run on PRs (any files changed)
+    branches: [ master] # Always run on PRs (any files changed)
 
 jobs:
   lint-and-type-check:

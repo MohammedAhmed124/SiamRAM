@@ -20,10 +20,12 @@ class SiamRAMTracker:
         siam_tracker: SiamABCTracker,
         yolo_weights: str = "yolo11n.pt",
         conf_threshold: float = 0.60,
+        occ_siam_reacq_threshold = 0.8,
         reacq_threshold: float = 0.55,
         yolo_conf: float = 0.30,
         yolo_iou: float = 0.45,
         app_match_threshold: float = 0.72,
+        occ_siam_margin = 0.2,
         nudge_alpha: float = 0.30,
         tau_occ: float = 0.40,
         beta: float = 0.06,
@@ -197,11 +199,14 @@ class SiamRAMTracker:
         self._distractor_bank_maxlen = distractor_bank_maxlen
         self.velocity_window_average = velocity_window_average
 
+
+        self.occ_siam_margin = occ_siam_margin
+
         self.search_expand_growth_factor = search_expand_growth_factor
         self.search_expand_growth_every = search_expand_growth_every
         self.search_expand_max = search_expand_max
         self._occ_frames: int = 0
-
+        self.occ_siam_reacq_threshold = occ_siam_reacq_threshold
         self._drm_dist_sigma_factor = drm_dist_sigma_factor
         self._size_history: deque = deque(maxlen=size_history_len)
         self._cam_disp_history: deque = deque(maxlen=conf_history_len)
@@ -472,14 +477,14 @@ class SiamRAMTracker:
             effective_threshold = 0.0
 
         if (score < effective_threshold
-            and self.frame_idx >= 30
+            and self.frame_idx >= 0
             and self.enter_occlusion_on_loss):
             self._entry_streak += 1
         else:
             self._entry_streak = 0
 
         if (self._entry_streak >= self._entry_patience
-            and self.frame_idx >= 30
+            and self.frame_idx >= 0
             and self.enter_occlusion_on_loss):
 
             entry_streak_val = self._entry_streak
@@ -730,14 +735,29 @@ class SiamRAMTracker:
             if ekf_inside and vel_inward:
                 self._out_of_frame = False
                 self._exit_edge = None
+        # else:
+        #     if (self._search_cx < 0 or self._search_cx >= w_fr or
+        #         self._search_cy < 0 or self._search_cy >= h_fr):
+        #         if self._search_cx >= w_fr:
+        #             self._exit_edge = 'right'
+        #         elif self._search_cx < 0:
+        #             self._exit_edge = 'left'
+        #         elif self._search_cy >= h_fr:
+        #             self._exit_edge = 'bottom'
+        #         else:
+        #             self._exit_edge = 'top'
+        #         self._out_of_frame = True
+
         else:
-            if (self._search_cx < 0 or self._search_cx >= w_fr or
-                self._search_cy < 0 or self._search_cy >= h_fr):
-                if self._search_cx >= w_fr:
+            obj_w, obj_h = self._get_median_size()
+            oof_margin = float(max(obj_w, obj_h)) * 0.5  # must be half an object-width outside
+            if (self._search_cx < -oof_margin or self._search_cx >= w_fr + oof_margin or
+                self._search_cy < -oof_margin or self._search_cy >= h_fr + oof_margin):
+                if self._search_cx >= w_fr + oof_margin:
                     self._exit_edge = 'right'
-                elif self._search_cx < 0:
+                elif self._search_cx < -oof_margin:
                     self._exit_edge = 'left'
-                elif self._search_cy >= h_fr:
+                elif self._search_cy >= h_fr + oof_margin:
                     self._exit_edge = 'bottom'
                 else:
                     self._exit_edge = 'top'
@@ -794,7 +814,19 @@ class SiamRAMTracker:
         pred_bbox, score, _ = self.tracker.update(frame)
         pred_bbox = np.array(pred_bbox, dtype=int)
 
-        if score >= self.reacq_threshold:
+        if score >= self.occ_siam_reacq_threshold:
+
+            if not self._is_near_exit_edge(pred_bbox, frame, fraction=0.50) and self.recovered_early_occlusion:
+                print(
+                    f"[occ frame {self._occ_frames}] phase=siam  "
+                    f"score={score:.3f}  REJECTED — too far from exit edge "
+                    f"({self._exit_edge})"
+                )
+                self.tracker.tracking_state.bbox = self.held_box.copy()
+                self._cand_frames = []
+                self._occ_cam_vels = []
+                self._occ_phase = 1
+                return self.held_box, score
             pred_desc = _extract_descriptor(frame, pred_bbox)
 
             cand_vel_phase0 = None
@@ -814,7 +846,7 @@ class SiamRAMTracker:
                 search_cx=self._search_cx,
                 search_cy=self._search_cy,
                 dist_sigma=self._effective_dist_sigma(frame),
-                **self._drm_kwargs,
+                **{**self._drm_kwargs, "margin": self.occ_siam_margin},
             )
 
             drm_score = drm_results[0][1] if drm_results else -1.0
@@ -966,8 +998,15 @@ class SiamRAMTracker:
         fully_tracked_bboxes = [
             bbox
             for bbox, vel in zip(last_cand_bboxes, cand_vels)
-            if vel is not None or single_frame_mode
+            if (vel is not None or single_frame_mode)
+            and self._is_near_exit_edge(bbox, frame, fraction=0.50)
         ]
+
+        _n_edge_rejected = sum(
+            1 for bbox, vel in zip(last_cand_bboxes, cand_vels)
+            if (vel is not None or single_frame_mode)
+            and not self._is_near_exit_edge(bbox, frame, fraction=0.50)
+        )
 
         print(
             f"[occ frame {self._occ_frames}] phase=final_drm  "
@@ -1026,6 +1065,11 @@ class SiamRAMTracker:
         final_scored = []
         for (drm_bbox, drm_score) in drm_results:
             cand_idx = _find_cand_idx(drm_bbox)
+            # vel = (cand_vels[cand_idx]
+            #        if cand_idx is not None and cand_idx < len(cand_vels)
+            #        else None)
+
+
             vel = (cand_vels[cand_idx]
                    if cand_idx is not None and cand_idx < len(cand_vels)
                    else None)
@@ -1616,7 +1660,7 @@ class SiamRAMTracker:
         h_fr, w_fr = frame.shape[:2]
         max_side = min(w_fr, h_fr)
 
-        if self.frame_idx <= 30 or not self.recovered_early_occlusion:
+        if self.frame_idx <= 60 or not self.recovered_early_occlusion:
             self.recovered_early_occlusion = False
             scale = 0.4
             bw = int(w_fr * scale)
@@ -2184,6 +2228,12 @@ class SiamRAMTracker:
             if sum([e1[edge], e2[edge], e3[edge]]) >= 2:
                 return True, edge
 
+        # for edge in ('right', 'left', 'bottom', 'top'):
+        #     # Proximity (e1) must be one of the agreeing votes.
+        #     # Tests 2+3 alone are unreliable during entry-streak drift.
+        #     if e1[edge] and (e2[edge] or e3[edge]):
+        #         return True, edge
+
         if lx2 >= w_fr:
             return True, 'right'
         if lx1 <= 0:
@@ -2356,6 +2406,38 @@ class SiamRAMTracker:
             self._class_warmup_done = True
             print(f"[class filter] target class locked: {best_cls}  "
                   f"(votes={votes})")
+            
+    def _is_near_exit_edge(
+    self,
+    bbox: np.ndarray,
+    frame: np.ndarray,
+    fraction: float = 0.5,
+) -> bool:
+        """
+        During out-of-frame occlusion, returns True only when the candidate's
+        centre lies within `fraction` of the frame dimension measured from the
+        exit edge.  Always returns True when not in out-of-frame mode.
+
+        fraction=0.5  →  only the half of the frame nearest the exit edge is valid.
+        fraction=0.33 →  only the nearest third.
+        """
+        if not self._out_of_frame or self._exit_edge is None:
+            return True
+
+        h_fr, w_fr = frame.shape[:2]
+        cx = float(bbox[0] + bbox[2] / 2.0)
+        cy = float(bbox[1] + bbox[3] / 2.0)
+
+        if self._exit_edge == 'right':
+            return cx >= w_fr * (1.0 - fraction)
+        elif self._exit_edge == 'left':
+            return cx <= w_fr * fraction
+        elif self._exit_edge == 'bottom':
+            return cy >= h_fr * (1.0 - fraction)
+        elif self._exit_edge == 'top':
+            return cy <= h_fr * fraction
+
+        return True
 
     @property
     def running_dynamic_bbox(self):

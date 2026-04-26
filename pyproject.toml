@@ -20,6 +20,7 @@ dependencies = [
   "jpeg4py>=0.1.4",
   "lmdb>=2.2.0",
   "matplotlib>=3.10.9",
+  "mobile-cv>=0.1",
   "numpy>=2.2.6",
   "opencv-python>=4.13.0.92",
   "pandas>=2.3.3",
@@ -52,7 +53,9 @@ dev = [
   "ty>=0.0.32",
 ]
 
+
 [tool.uv.sources]
+mobile_cv = { git = "https://github.com/facebookresearch/mobile-vision.git"}
 torch = [{ index = "pytorch-cu130" }]
 torchvision = [{ index = "pytorch-cu130" }]
 torchaudio = [{ index = "pytorch-cu130" }]

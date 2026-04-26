@@ -1,4 +1,4 @@
-from typing import Any, Optional, Tuple, Union, cast
+from typing import Any, Optional, Tuple, Union
 
 import cv2
 import numpy as np
@@ -290,3 +290,14 @@ def unravel_index(index: Any, shape: Tuple[int, int]) -> Tuple[int, ...]:
         out.append(index % dim)
         index = index // dim
     return tuple(reversed(out))
+
+def calc_iou(reg_target: torch.Tensor, pred: torch.Tensor, smooth: float = 1.0) -> torch.Tensor:
+    target_area = (reg_target[..., 0] + reg_target[..., 2]) * (reg_target[..., 1] + reg_target[..., 3])
+    pred_area = (pred[..., 0] + pred[..., 2]) * (pred[..., 1] + pred[..., 3])
+
+    w_intersect = torch.min(pred[..., 0], reg_target[..., 0]) + torch.min(pred[..., 2], reg_target[..., 2])
+    h_intersect = torch.min(pred[..., 3], reg_target[..., 3]) + torch.min(pred[..., 1], reg_target[..., 1])
+
+    area_intersect = w_intersect * h_intersect
+    area_union = target_area + pred_area - area_intersect
+    return (area_intersect + smooth) / (area_union + smooth)

@@ -44,9 +44,9 @@ import cv2
 import numpy as np
 import pandas as pd
 import torch
-from utils.box_coder import SiamABCBoxCoder
 from torch.utils.data import Dataset
 
+from utils.box_coder import SiamABCBoxCoder
 from utils.utils import (
     clamp_bbox,
     extend_bbox,
@@ -216,6 +216,7 @@ class TrackingSequence:
 
     def get_bbox(self, frame_idx: int) -> np.ndarray:
         self._load_bboxes()
+        assert self._bboxes is not None
         local = frame_idx - self.start_idx
         if local < 0 or local >= len(self._bboxes):
             return np.full(4, np.nan, dtype=np.float32)
@@ -418,12 +419,13 @@ class UAVTrackingDataset(Dataset):
         max_frame_gap=None,
     ):
         failure = (None, None, None, None, None, None, False)
+        frame_gap = self.max_frame_gap if max_frame_gap is None else max_frame_gap
 
         t_idx, s_idx, s_bbox = seq.sample_search_template_idx_pair(
-            rng, max_frame_gap=max_frame_gap,
+            rng, max_frame_gap=frame_gap,
             lower_end=lower_end, upper_end=upper_end,
         )
-        if t_idx is None:
+        if t_idx is None or s_idx is None or s_bbox is None:
             return failure
 
         t_bbox = seq.get_bbox(t_idx)

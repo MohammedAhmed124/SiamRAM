@@ -7,7 +7,6 @@ from numpy._typing import NDArray
 from torch import Tensor
 from torch.nn import Module
 
-
 # def _extract_descriptor(frame: np.ndarray, bbox, size=16) -> Optional[np.ndarray]:
 #     """phi(I_t, b) = normalised concat of grayscale patch + HSV histogram."""
 #     x, y, w, h = map(int, bbox)

@@ -5,8 +5,6 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.10, <3.11"
 dependencies = [
-  "torch==2.11.0",
-  "torchvision==0.26.0",
   "albumentations>=2.0.8",
   "coloredlogs>=15.0.1",
   "easydict>=1.13",
@@ -48,10 +46,12 @@ dependencies = [
 [tool.uv.sources]
 mobile_cv = { git = "https://github.com/facebookresearch/mobile-vision.git" }
 torch = [
-  { index = "pytorch-cu128", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+  { index = "pytorch-cu128", marker = "'gpu' in dependency_groups" },
+  { index = "pytorch-cpu", marker = "'cpu' in dependency_groups and 'gpu' not in dependency_groups" },
 ]
 torchvision = [
-  { index = "pytorch-cu128", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+  { index = "pytorch-cu128", marker = "'gpu' in dependency_groups" },
+  { index = "pytorch-cpu", marker = "'cpu' in dependency_groups and 'gpu' not in dependency_groups" },
 ]
 
 [[tool.uv.index]]
@@ -65,6 +65,14 @@ url = "https://download.pytorch.org/whl/cpu"
 explicit = true
 
 [dependency-groups]
+gpu = [
+  "torch==2.11.0",
+  "torchvision==0.26.0",
+]
+cpu = [
+  "torch==2.11.0",
+  "torchvision==0.26.0",
+]
 dev = [
   "poethepoet>=0.44.0",
   "opencv-stubs>=0.1.3",

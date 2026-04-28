@@ -15,6 +15,18 @@ from .base_tracker import Tracker
 
 
 class SiamABCTracker(Tracker):
+    def __init__(self, model, cuda_id=0, **tracking_config):
+        super().__init__(model, cuda_id, **tracking_config)
+
+        # Discover norm_lambda from the first AdaptiveBatchNorm in the net so
+        # enable_tta() knows what blending weight to restore.
+        self._norm_lambda_tta: float = next(
+            (m._norm_lambda for m in self.net.modules() if isinstance(m, AdaptiveBatchNorm)),
+            0.1,
+        )
+        # Scalar tensor passed to net.track / net.forward each call.
+        # 0.0 = TTA off (default); self._norm_lambda_tta = TTA on.
+        self._tta_lam: torch.Tensor = torch.zeros(1, device=f"cuda:{cuda_id}")
     def get_box_coder(self, tracking_config, cuda_id: str | int = 0):
         return SiamABCBoxCoder(tracking_config)
 
@@ -40,7 +52,7 @@ class SiamABCTracker(Tracker):
 
         self.tracking_state.pred_score = 1.0
         self.prev_good_bbox = rect
-        self.tracking_state.paths.clear()
+        self.tracking_state.paths = deque([], maxlen=70)
 
         self.tracking_state.mean_color = np.mean(image, axis=(0, 1))
 
@@ -48,9 +60,16 @@ class SiamABCTracker(Tracker):
         self.dynamic_template_features = self._template_features.clone()
         self.dynamic_search_features, _, _ = self.get_search_features(image, rect)
 
-        self.all_memory_imgs = deque([[image, rect]], maxlen=self.memory_window_size)
-        self.classification_scores = deque([0.5], maxlen=self.memory_window_size)
+        # self.all_memory_imgs = deque([[image, rect]], maxlen=self.memory_window_size)
+        # self.classification_scores = deque([0.5], maxlen=self.memory_window_size)
 
+
+        self.warmup_frames = self.tracking_config.get("warmup_frames", 0)
+        warmup_window = self.tracking_config.get("warmup_window_size", self.memory_window_size)
+        init_window = warmup_window if self.warmup_frames > 0 else self.memory_window_size
+
+        self.all_memory_imgs = deque([[image, rect]], maxlen=init_window)
+        self.classification_scores = deque([0.5], maxlen=init_window)
         self.running_dynamic_image = image
         self.running_dynamic_bbox = rect
 
@@ -108,14 +127,6 @@ class SiamABCTracker(Tracker):
         return bbox[0] >= bbox_window[0] and bbox[1] >= bbox_window[1] and bbox[2] <= bbox_window[2] and bbox[3] <= \
             bbox_window[3]
 
-    def select_representatives_from_all(self):
-        for num in range(len(self.classification_scores) - 1, -1, -1):
-            if self.classification_scores[num] > mean(self.classification_scores):
-                self.dynamic_template_features = self.get_template_features(self.all_memory_imgs[num][0],
-                                                                            self.all_memory_imgs[num][1])
-                self.dynamic_search_features, _, _ = self.get_search_features(self.all_memory_imgs[num][0],
-                                                                              self.all_memory_imgs[num][1])
-                return
 
     def _update_best_index(self, pred_score: float, evicting: bool) -> None:
         """
@@ -186,6 +197,17 @@ class SiamABCTracker(Tracker):
                     self._maybe_store_frame(search, pred_bbox, pred_score)
 
             self._prev_bbox = pred_bbox.copy()
+
+
+            if self.warmup_frames > 0 and self.idx == self.warmup_frames - 1:
+                full_imgs   = deque(self.all_memory_imgs,        maxlen=self.memory_window_size)
+                full_scores = deque(self.classification_scores,  maxlen=self.memory_window_size)
+                self.all_memory_imgs        = full_imgs
+                self.classification_scores  = full_scores
+                scores = np.array(self.classification_scores, dtype=np.float16)
+                self._best_idx   = int(np.argmax(scores))
+                self._best_score = float(scores[self._best_idx])
+
             self.idx += 1
 
             if self.idx % self.N == 0:
@@ -216,7 +238,8 @@ class SiamABCTracker(Tracker):
             search_features=search_features,
             dynamic_search_features=dynamic_search_features,
             template_features=self._template_features,
-            dynamic_template_features=dynamic_template_features
+            dynamic_template_features=dynamic_template_features,
+            lam=self._tta_lam,
         )
 
         return self._postprocess(track_result=track_result)
@@ -276,12 +299,9 @@ class SiamABCTracker(Tracker):
             self.tracking_state.bbox = saved_bbox
 
     def set_tta(self, enabled: bool) -> None:
-        for module in self.net.modules():
-            if isinstance(module, (AdaptiveBatchNorm)):
-                if enabled:
-                    module.enable_tta()
-                else:
-                    module.disable_tta()
+        """Enable or disable TTA by updating the lam tensor passed to the net."""
+        val = self._norm_lambda_tta if enabled else 0.0
+        self._tta_lam.fill_(val)
 
     def enable_tta(self) -> None:
         self.set_tta(True)

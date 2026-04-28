@@ -16,6 +16,34 @@ import torch.nn as nn
 from mobile_cv.model_zoo.models.fbnet_v2 import fbnet
 from torchvision.models.resnet import resnet50
 
+from .adaptive_batch_norm import AdaptiveBatchNorm
+
+
+def _make_norm(num_features: int, inference_mode: bool, norm_lambda: float = 0.1) -> nn.Module:
+    """Return AdaptiveBatchNorm when building for inference, plain BatchNorm2d otherwise."""
+    if inference_mode:
+        return AdaptiveBatchNorm(num_features, norm_lambda=norm_lambda)
+    return nn.BatchNorm2d(num_features)
+
+
+class AdaptiveSequential(nn.Sequential):
+    """``nn.Sequential`` that forwards the ``lam`` tensor to any
+    ``AdaptiveBatchNorm`` children and calls every other layer normally.
+
+    Using a subclass (rather than a plain loop) means the module tree is
+    identical to what ``torch.compile`` / TensorRT see — there is no
+    Python-level branching on the *value* of ``lam``, only on its *type*
+    at graph-build time (``isinstance`` is resolved at compile time).
+    """
+
+    def forward(self, x: torch.Tensor, lam: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
+        for module in self:
+            if isinstance(module, AdaptiveBatchNorm):
+                x = module(x, lam)
+            else:
+                x = module(x)
+        return x
+
 
 def conv_2d(inp, oup, kernel_size=3, stride=1, padding=0, groups=1, bias=False, norm=True, act=True):
     conv = nn.Sequential()
@@ -199,7 +227,9 @@ class BoxTower(nn.Module):
         conv_block: str = "regular",
         inchannels: int = 512,
         outchannels: int = 256,
-        gaussian_map=False
+        gaussian_map=False,
+        inference_mode: bool = False,
+        norm_lambda: float = 0.1,
     ):
         super().__init__()
         tower = []
@@ -211,22 +241,24 @@ class BoxTower(nn.Module):
         # self.cls_dw = Correlation2xConcat(num_channels=outchannels, conv_block=conv_block)
         # self.reg_dw = Correlation2xConcat(num_channels=outchannels, conv_block=conv_block)
 
-        self.cls_dw = CorrelationConcatAtt(num_channels=outchannels)
-        self.reg_dw = CorrelationConcatAtt(num_channels=outchannels)
+        self.cls_dw = CorrelationConcatAtt(num_channels=outchannels,
+                                           inference_mode=inference_mode, norm_lambda=norm_lambda)
+        self.reg_dw = CorrelationConcatAtt(num_channels=outchannels,
+                                           inference_mode=inference_mode, norm_lambda=norm_lambda)
 
         # box pred head
         for i in range(4):
             tower.append(ConvBlock(outchannels, outchannels, kernel_size=3, stride=1, padding=1))
-            tower.append(nn.BatchNorm2d(outchannels))
+            tower.append(_make_norm(outchannels, inference_mode, norm_lambda))
             tower.append(nn.ReLU())
         # cls tower
         for i in range(towernum):
             cls_tower.append(ConvBlock(outchannels, outchannels, kernel_size=3, stride=1, padding=1))
-            cls_tower.append(nn.BatchNorm2d(outchannels))
+            cls_tower.append(_make_norm(outchannels, inference_mode, norm_lambda))
             cls_tower.append(nn.ReLU())
 
-        self.add_module("bbox_tower", nn.Sequential(*tower))
-        self.add_module("cls_tower", nn.Sequential(*cls_tower))
+        self.add_module("bbox_tower", AdaptiveSequential(*tower))
+        self.add_module("cls_tower", AdaptiveSequential(*cls_tower))
 
         # reg head
         self.bbox_pred = ConvBlock(outchannels, 4, kernel_size=3, stride=1, padding=1)
@@ -236,7 +268,7 @@ class BoxTower(nn.Module):
         self.adjust = nn.Parameter(0.1 * torch.ones(1))
         self.bias = nn.Parameter(torch.Tensor(1.0 * torch.ones(1, 4, 1, 1)))
 
-    def forward(self, search_org, search, kernel): #forward(self, search, dynamic, kernel):
+    def forward(self, search_org, search, kernel, lam: torch.Tensor): #forward(self, search, dynamic, kernel):
 
         # encode first
         cls_z = kernel.reshape(kernel.size(0), kernel.size(1), -1)
@@ -246,16 +278,15 @@ class BoxTower(nn.Module):
         reg_x = self.reg_encode(search)
 
         # cls and reg DW
-        cls_dw = self.cls_dw(cls_z, cls_x, search_org )
-        reg_dw = self.reg_dw(reg_z, reg_x, search_org)
+        cls_dw = self.cls_dw(cls_z, cls_x, search_org, lam)
+        reg_dw = self.reg_dw(reg_z, reg_x, search_org, lam)
 
-
-        x_reg = self.bbox_tower(reg_dw)
+        x_reg = self.bbox_tower(reg_dw, lam)
         x = self.adjust * self.bbox_pred(x_reg) + self.bias
         x = torch.exp(x)
 
         # cls tower
-        c = self.cls_tower(cls_dw)
+        c = self.cls_tower(cls_dw, lam)
         cls = 0.1 * self.cls_pred(c)
 
         return x, cls, cls_dw, x_reg
@@ -307,24 +338,24 @@ class CorrelationConcatAtt(nn.Module):
     Correlation module
     """
 
-    def __init__(self, num_channels: int, num_corr_channels: int = 64):
+    def __init__(self, num_channels: int, num_corr_channels: int = 64,
+                 inference_mode: bool = False, norm_lambda: float = 0.1):
         super().__init__()
 
-
         in_size = num_channels + num_corr_channels
-        self.enc = nn.Sequential(
+        self.enc = AdaptiveSequential(
             ConvBlock(in_size, num_channels, kernel_size=3, padding=1),
-            nn.BatchNorm2d(num_channels),
+            _make_norm(num_channels, inference_mode, norm_lambda),
             nn.ReLU(inplace=True),
         )
         # self.att = ParallelPolarizedSelfAttention(num_channels)
         self.att = FastParallelPolarizedSelfAttention(num_channels, 1)
 
-    def forward(self, z, x, d):
+    def forward(self, z, x, d, lam: torch.Tensor):
 
         b, c, w, h = x.size()
         s = torch.matmul(z.permute(0, 2, 1), x.view(b, c, -1)).view(b, -1, w, h)
         s = torch.cat([s, d], dim=1)
-        s = self.enc(s)
+        s = self.enc(s, lam)
         s = self.att(s)
         return s

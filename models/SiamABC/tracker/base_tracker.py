@@ -54,6 +54,8 @@ class Tracker(ABC):
         self.window = self._get_tracking_window(tracking_config["windowing"], tracking_config["score_size"])
         self.memory_window_size = tracking_config["memory_window_size"] if tracking_config["memory_window_size"] else 50
         self.running_confidence_floor_value = tracking_config["running_confidence_floor_value"]
+        self.warmup_frames = tracking_config["warmup_frames"]
+        self.warmup_window_size = tracking_config["warmup_window_size"]
         self.to_device(cuda_id)
 
     @staticmethod

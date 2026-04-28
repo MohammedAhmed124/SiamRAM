@@ -7,29 +7,40 @@ from torch import nn
 
 
 class AdaptiveBatchNorm(nn.BatchNorm2d):
+    """BatchNorm2d whose TTA blending weight is supplied at forward-time.
+
+    ``lam`` is the actual blending coefficient passed in by the caller:
+      - ``lam = 0.0``           → pure running statistics  (TTA off)
+      - ``lam = norm_lambda``   → blended batch + running  (TTA on)
+
+    Keeping ``lam`` as a tensor *input* (rather than a stored buffer) means
+    there are no side-effecting mutations between forward calls, so the module
+    is fully compatible with ``torch.compile`` / TensorRT.
+
+    During *training* the standard batch-normalisation update is used and
+    ``lam`` is ignored, so training behaviour is unchanged.
+    """
+
     def __init__(self, num_features, eps=1e-5, momentum=0.1,
                  affine=True, track_running_stats=True,
                  contineous=False, norm_lambda=0.1):
         super().__init__(num_features, eps, momentum, affine, track_running_stats)
         self.contineous = contineous
+        # Stored so the tracker can recover the configured strength when
+        # enabling TTA; not used inside forward().
         self._norm_lambda = norm_lambda
 
-        self.register_buffer('_lam', torch.tensor(norm_lambda, dtype=torch.float32))
-
-    def enable_tta(self):
-        self._lam.fill_(self._norm_lambda)
-
-    def disable_tta(self):
-        self._lam.fill_(0.0)
-
-    @property
-    def tta_enabled(self) -> bool:
-        return self._lam.item() > 0.0
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, lam: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x:   input feature map  [B, C, H, W]
+            lam: scalar tensor — blending weight for batch statistics.
+                 0.0 → TTA off (use running stats only).
+                 norm_lambda → TTA on (blend batch and running stats).
+        """
         self._check_input_dim(x)
 
-        # Training path — standard BN, untouched
+        # Training path — standard BN; lam is intentionally ignored.
         if self.training:
             return torch.nn.functional.batch_norm(
                 x,
@@ -40,15 +51,15 @@ class AdaptiveBatchNorm(nn.BatchNorm2d):
                 self.eps,
             )
 
-        # ── Single eval path — no Python branch on tta_enabled ───────────
-        # When _lam = 0.0  → mean = running_mean, var = running_var  (TTA off)
-        # When _lam > 0.0  → blended stats                           (TTA on)
-        # The compiler sees ONE graph for both modes.
+        # ── Single eval path — branch-free, TRT-safe ──────────────────────
+        # lam = 0.0 → mean/var collapse to running_mean/var  (TTA off)
+        # lam > 0.0 → blended statistics                     (TTA on)
+        # The compiler sees ONE static graph regardless of the lam value.
         batch_mean = x.mean([0, 2, 3])
         batch_var = x.var([0, 2, 3], unbiased=False)
 
-        mean = self._lam * batch_mean + (1.0 - self._lam) * self.running_mean
-        var = self._lam * batch_var + (1.0 - self._lam) * self.running_var
+        mean = lam * batch_mean + (1.0 - lam) * self.running_mean
+        var  = lam * batch_var  + (1.0 - lam) * self.running_var
 
         x = (x - mean[None, :, None, None]) \
             / torch.sqrt(var[None, :, None, None] + self.eps)

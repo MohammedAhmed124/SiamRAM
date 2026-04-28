@@ -8,7 +8,7 @@ File: https://github.com/PinataFarms/FEARTracker/blob/main/model_training/model/
 """
 
 import collections.abc
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -52,6 +52,8 @@ class SiamABCNet(nn.Module):
         conv_block: str = "regular",
         model_size='S',
         build_simsiam_heads=True,
+        inference_mode: bool = False,
+        norm_lambda: float = 0.1,
         **kwargs,
     ):
         max_layer2name = {3: "layer2", 4: "layer1"}
@@ -82,7 +84,9 @@ class SiamABCNet(nn.Module):
             inchannels=adjust_channels,
             outchannels=adjust_channels,
             towernum=towernum,
-            conv_block=conv_block
+            conv_block=conv_block,
+            inference_mode=inference_mode,
+            norm_lambda=norm_lambda,
         )
 
         self.similarity = nn.CosineSimilarity(dim=1)
@@ -97,14 +101,18 @@ class SiamABCNet(nn.Module):
         return features
 
     def connector(self, template_mixed_attention: torch.Tensor, search_mixed_attention: torch.Tensor,
-                  search: torch.Tensor) -> Tuple[str, torch.Tensor]:
+                  search: torch.Tensor, lam: torch.Tensor) -> Tuple[str, torch.Tensor]:
         bbox_pred, cls_pred, _, _ = self.connect_model(search_org=search, search=search_mixed_attention,
-                                                       kernel=template_mixed_attention)
+                                                       kernel=template_mixed_attention, lam=lam)
         return bbox_pred, cls_pred
 
-    def forward(self, x: Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]) -> Dict[
-        str, torch.Tensor | List[torch.Tensor]]:
+    def forward(self, x: Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+                lam: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor | List[torch.Tensor]]:
         template, dynamic_template, search, dynamic_search = x
+
+        # lam defaults to 0 (TTA off) when not supplied, e.g. during training.
+        if lam is None:
+            lam = torch.zeros(1, device=template.device)
 
         template_features = self.get_features(template)
         dynamic_template_features = self.get_features(dynamic_template)
@@ -121,7 +129,8 @@ class SiamABCNet(nn.Module):
         search_mixed_attention = self.attention_neck(search_attention)
 
         bbox_pred, cls_pred = self.connector(template_mixed_attention=template_mixed_attention,
-                                             search_mixed_attention=search_mixed_attention, search=search_features)
+                                             search_mixed_attention=search_mixed_attention,
+                                             search=search_features, lam=lam)
 
         simsiam_out_search = None
         simsiam_out_dynamic = None
@@ -140,7 +149,8 @@ class SiamABCNet(nn.Module):
         search_features: torch.Tensor,
         dynamic_search_features: torch.Tensor,
         template_features: torch.Tensor,
-        dynamic_template_features: torch.Tensor
+        dynamic_template_features: torch.Tensor,
+        lam: torch.Tensor,
     ) -> Dict[str, torch.Tensor]:
 
         template_combined_features = torch.concat([template_features, dynamic_template_features], dim=1)
@@ -152,7 +162,8 @@ class SiamABCNet(nn.Module):
         search_mixed_attention = self.attention_neck(search_attention)
 
         bbox_pred, cls_pred = self.connector(template_mixed_attention=template_mixed_attention,
-                                             search_mixed_attention=search_mixed_attention, search=search_features)
+                                             search_mixed_attention=search_mixed_attention,
+                                             search=search_features, lam=lam)
         return {
             constants.TARGET_REGRESSION_LABEL_KEY: bbox_pred,
             constants.TARGET_CLASSIFICATION_KEY: cls_pred,

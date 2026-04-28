@@ -97,7 +97,7 @@ class SiamABCNet(nn.Module):
         return features
 
     def connector(self, template_mixed_attention: torch.Tensor, search_mixed_attention: torch.Tensor,
-                  search: torch.Tensor) -> Dict[str, torch.Tensor]:
+                  search: torch.Tensor) -> Tuple[str, torch.Tensor]:
         bbox_pred, cls_pred, _, _ = self.connect_model(search_org=search, search=search_mixed_attention,
                                                        kernel=template_mixed_attention)
         return bbox_pred, cls_pred

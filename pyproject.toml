@@ -20,6 +20,7 @@ dependencies = [
   "jpeg4py>=0.1.4",
   "lmdb>=2.2.0",
   "matplotlib>=3.10.9",
+  #TODO: remove mobile cv
   "mobile-cv>=0.1",
   "numpy>=2.2.6",
   "opencv-python>=4.13.0.92",
@@ -130,6 +131,7 @@ target-version = "py310"
 [tool.ruff.lint]
 # Enable Pyflakes (`F`) and a subset of the pycodestyle (`E`)  codes by default.
 select = ["E4", "E7", "E9", "F", "I"]
+extend-select = ["D100", "D101", "D102", "D103", "D104", "D107"]
 ignore = ["E722"]
 
 # Allow fix for all enabled rules (when `--fix`) is provided.
@@ -138,6 +140,9 @@ unfixable = []
 
 # Allow unused variables when underscore-prefixed.
 dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
 
 [tool.ruff.format]
 # Like Black, use double quotes for strings.

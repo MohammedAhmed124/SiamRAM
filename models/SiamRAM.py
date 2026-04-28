@@ -1,5 +1,5 @@
 from collections import deque
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, TypedDict, cast
 
 import cv2
 import numpy as np
@@ -11,6 +11,20 @@ from utils.utils import _cos_sim, _extract_descriptor, _iou
 from .SiamABC.tracker.SiamABC_Tracker import SiamABCTracker
 from .motion_model import BBoxEKF
 from .ram_memory import AppearanceMemory
+
+
+class DRMKwargs(TypedDict):
+    lam_iou: float
+    lam_app: float
+    lam_mot: float
+    lam_time: float
+    alpha: float
+    gamma: float
+    margin: float
+    top_k: int
+    skip_threshold: float
+    lam_dist: float
+    lam_cand_dir: float
 
 
 class SiamRAMTracker:
@@ -217,19 +231,19 @@ class SiamRAMTracker:
         self.long_distance_mode = long_distance_mode
         self.recovered_early_occlusion = True
         self.enter_occlusion_on_loss = enter_occlusion_on_loss
-        self._drm_kwargs = dict(
-            lam_iou=drm_lam_iou,
-            lam_app=drm_lam_app,
-            lam_mot=drm_lam_mot,
-            lam_time=drm_lam_time,
-            alpha=drm_alpha,
-            gamma=drm_gamma,
-            margin=drm_margin,
-            top_k=drm_top_k,
-            skip_threshold=drm_skip_threshold,
-            lam_dist=drm_lam_dist,
-            lam_cand_dir=drm_lam_cand_dir,
-        )
+        self._drm_kwargs: DRMKwargs = {
+            "lam_iou": drm_lam_iou,
+            "lam_app": drm_lam_app,
+            "lam_mot": drm_lam_mot,
+            "lam_time": drm_lam_time,
+            "alpha": drm_alpha,
+            "gamma": drm_gamma,
+            "margin": drm_margin,
+            "top_k": drm_top_k,
+            "skip_threshold": drm_skip_threshold,
+            "lam_dist": drm_lam_dist,
+            "lam_cand_dir": drm_lam_cand_dir,
+        }
 
         self._drm_lam_cand_dir = drm_lam_cand_dir
         self._vel_score_min_speed = vel_score_min_speed
@@ -276,6 +290,7 @@ class SiamRAMTracker:
         self._yolo_class_detect_frames = yolo_class_detect_frames
         self._target_class_id: Optional[int] = None
         self._class_warmup_done: bool = False
+        self._class_votes: dict[int, int] = {}
 
         self._occ_phase: int = 0
         self._pending_candidates: List = []
@@ -290,8 +305,8 @@ class SiamRAMTracker:
         self._last_H_reliable: bool = False
 
         self._flow_scale = 0.5
-        self._cached_pts = None
-        self._cached_shape = None
+        self._cached_pts: Optional[np.ndarray] = None
+        self._cached_shape: Optional[tuple[int, int]] = None
 
         self._low_score_streak = 0
         self._occlusion_patience = occlusion_patience
@@ -398,15 +413,17 @@ class SiamRAMTracker:
         self.frame_idx += 1
         self._last_yolo = []
         self._yolo_cache = []
+        ekf = self.ekf
+        assert ekf is not None
 
         H, H_reliable, current_gray = self._estimate_homography(frame)
         self._last_H = H
         self._last_H_reliable = H_reliable
 
         if self.in_occlusion and self._out_of_frame:
-            self.ekf.P = self.ekf.P + self.ekf.Q
+            ekf.P = ekf.P + ekf.Q
         else:
-            self.ekf.predict(H=H, H_reliable=H_reliable)
+            ekf.predict(H=H, H_reliable=H_reliable)
 
         if self.in_occlusion:
             bbox, score = self._occlusion_update(frame)
@@ -534,8 +551,8 @@ class SiamRAMTracker:
 
             self.ekf = self._rebuild_ekf_from_clean_history(
                 skip_override=effective_skip)
-            self.ekf.predict(H=self._last_H,
-                             H_reliable=self._last_H_reliable)
+            ekf = self.ekf
+            ekf.predict(H=self._last_H, H_reliable=self._last_H_reliable)
             self._init_search_centre_from_history(
                 skip_override=effective_skip)
             self.tracker.dynamic_update = False
@@ -543,7 +560,9 @@ class SiamRAMTracker:
             self.tracker.disable_tta()
             return self._occlusion_update(frame)
 
-        self.ekf.update(pred_bbox)
+        ekf = self.ekf
+        assert ekf is not None
+        ekf.update(pred_bbox)
 
         cam_disp = self._h_translation_magnitude(self._last_H, frame)
         self._cam_disp_history.append(cam_disp)
@@ -670,10 +689,10 @@ class SiamRAMTracker:
             self._search_cx = last_clean_bbox[0] + last_clean_bbox[2] / 2.0
             self._search_cy = last_clean_bbox[1] + last_clean_bbox[3] / 2.0
         else:
-            self._search_cx = float(self.current_bbox[0]
-                                    + self.current_bbox[2] / 2.0)
-            self._search_cy = float(self.current_bbox[1]
-                                    + self.current_bbox[3] / 2.0)
+            current_bbox = self.current_bbox
+            assert current_bbox is not None
+            self._search_cx = float(current_bbox[0] + current_bbox[2] / 2.0)
+            self._search_cy = float(current_bbox[1] + current_bbox[3] / 2.0)
 
     def _occlusion_update(self, frame: np.ndarray) -> Tuple[np.ndarray, float]:
         """
@@ -703,12 +722,14 @@ class SiamRAMTracker:
             and return.
         """
         h_fr, w_fr = frame.shape[:2]
+        ekf = self.ekf
+        assert ekf is not None
 
-        ekf_raw = self.ekf.get_bbox()
+        ekf_raw = ekf.get_bbox()
         self._search_cx = float(ekf_raw[0] + ekf_raw[2] / 2.0)
         self._search_cy = float(ekf_raw[1] + ekf_raw[3] / 2.0)
         self.held_box = self._clamp_bbox_to_frame(ekf_raw, frame)
-        self.velocity = self.ekf.get_velocity()
+        self.velocity = ekf.get_velocity()
         self._occ_frames += 1
 
         if self._out_of_frame and self._exit_edge is not None:
@@ -797,6 +818,9 @@ class SiamRAMTracker:
             keeping latency low. Only if this fails do we pay the cost of YOLO
             candidate collection.
         """
+        held_box = self.held_box
+        assert held_box is not None
+
         rx, ry, rw, rh = self._get_yolo_search_roi(frame=frame)
 
         obj_w, obj_h = self._get_median_size()
@@ -822,7 +846,7 @@ class SiamRAMTracker:
                     f"score={score:.3f}  REJECTED — too far from exit edge "
                     f"({self._exit_edge})"
                 )
-                self.tracker.tracking_state.bbox = self.held_box.copy()
+                self.tracker.tracking_state.bbox = held_box.copy()
                 self._cand_frames = []
                 self._occ_cam_vels = []
                 self._occ_phase = 1
@@ -840,13 +864,23 @@ class SiamRAMTracker:
             drm_results = self.memory.drm_match(
                 frame=frame,
                 candidates=[pred_bbox],
-                ref_bbox=self.held_box,
+                ref_bbox=held_box,
                 velocity=self.velocity,
                 distractor_bank=self._distractor_bank,
                 search_cx=self._search_cx,
                 search_cy=self._search_cy,
                 dist_sigma=self._effective_dist_sigma(frame),
-                **{**self._drm_kwargs, "margin": self.occ_siam_margin},
+                lam_iou=self._drm_kwargs["lam_iou"],
+                lam_app=self._drm_kwargs["lam_app"],
+                lam_mot=self._drm_kwargs["lam_mot"],
+                lam_time=self._drm_kwargs["lam_time"],
+                alpha=self._drm_kwargs["alpha"],
+                gamma=self._drm_kwargs["gamma"],
+                margin=self.occ_siam_margin,
+                top_k=self._drm_kwargs["top_k"],
+                skip_threshold=self._drm_kwargs["skip_threshold"],
+                lam_dist=self._drm_kwargs["lam_dist"],
+                lam_cand_dir=self._drm_kwargs["lam_cand_dir"],
             )
 
             drm_score = drm_results[0][1] if drm_results else -1.0
@@ -866,7 +900,9 @@ class SiamRAMTracker:
                 return self._commit_reacquisition(
                     frame, pred_bbox, pred_desc, score)
 
-            self.tracker.tracking_state.bbox = self.held_box.copy()
+            held_box = self.held_box
+            assert held_box is not None
+            self.tracker.tracking_state.bbox = held_box.copy()
 
         self._cand_frames = []
         self._occ_cam_vels = []
@@ -914,7 +950,9 @@ class SiamRAMTracker:
         self._cand_frames.append(frame_cands)
 
         for det in detections:
-            if _iou(det, self.held_box) >= self.tau_occ:
+            held_box = self.held_box
+            assert held_box is not None
+            if _iou(det, held_box) >= self.tau_occ:
                 det_desc = _extract_descriptor(frame, det)
                 if det_desc is not None:
                     self._distractor_bank.append(det_desc)
@@ -974,7 +1012,9 @@ class SiamRAMTracker:
             self._occ_phase = 0
             self._cand_frames = []
             self._occ_cam_vels = []
-            self.tracker.tracking_state.bbox = self.held_box.copy()
+            held_box = self.held_box
+            assert held_box is not None
+            self.tracker.tracking_state.bbox = held_box.copy()
 
         last_idx = -1
         for i in range(len(self._cand_frames) - 1, -1, -1):
@@ -1013,7 +1053,7 @@ class SiamRAMTracker:
             f"last_cands={len(last_cand_bboxes)}  "
             f"fully_tracked={len(fully_tracked_bboxes)}  "
             f"drm_size={self.memory.drm_size()}  ram={len(self.memory)}  "
-            f"ekf_unc={self.ekf.get_uncertainty():.1f}px"
+            f"ekf_unc={cast(BBoxEKF, self.ekf).get_uncertainty():.1f}px"
         )
 
         if not fully_tracked_bboxes:
@@ -1021,7 +1061,9 @@ class SiamRAMTracker:
                   f"no fully-tracked candidates — resetting")
             if last_cand_bboxes:
                 self.held_box = self._nudge_toward_nearest(frame, last_cand_bboxes)
-                self.ekf.nudge_position(self.held_box)
+                ekf = self.ekf
+                assert ekf is not None
+                ekf.nudge_position(self.held_box)
             _reset()
             return self.held_box, 0.0
 
@@ -1042,7 +1084,9 @@ class SiamRAMTracker:
         if not drm_results:
             if last_cand_bboxes:
                 self.held_box = self._nudge_toward_nearest(frame, last_cand_bboxes)
-                self.ekf.nudge_position(self.held_box)
+                ekf = self.ekf
+                assert ekf is not None
+                ekf.nudge_position(self.held_box)
             _reset()
             return self.held_box, 0.0
 
@@ -1150,9 +1194,11 @@ class SiamRAMTracker:
             bug in the reset logic would affect all three phases equally, making
             it easy to test and audit.
         """
-        self.ekf.update(bbox)
-        ekf_bbox = self.ekf.get_bbox()
-        self.velocity = self.ekf.get_velocity()
+        ekf = self.ekf
+        assert ekf is not None
+        ekf.update(bbox)
+        ekf_bbox = ekf.get_bbox()
+        self.velocity = ekf.get_velocity()
 
         self.in_occlusion = False
         self._out_of_frame = False
@@ -1223,8 +1269,10 @@ class SiamRAMTracker:
             w = max(1, int(np.median([s[0] for s in self._size_history])))
             h = max(1, int(np.median([s[1] for s in self._size_history])))
         else:
-            w = max(1, int(self.held_box[2]))
-            h = max(1, int(self.held_box[3]))
+            held_box = self.held_box
+            assert held_box is not None
+            w = max(1, int(held_box[2]))
+            h = max(1, int(held_box[3]))
         return w, h
 
     def _cam_vel_from_H(self, frame: np.ndarray) -> np.ndarray:
@@ -1287,7 +1335,9 @@ class SiamRAMTracker:
         """
         obj_w, obj_h = self._get_median_size()
         size_sigma = self._drm_dist_sigma_factor * float(max(obj_w, obj_h))
-        ekf_sigma = self.ekf.get_uncertainty() * 1.5
+        ekf = self.ekf
+        assert ekf is not None
+        ekf_sigma = ekf.get_uncertainty() * 1.5
         return max(size_sigma, ekf_sigma)
 
     def _build_candidate_velocities(
@@ -1519,6 +1569,7 @@ class SiamRAMTracker:
             self._cached_shape = gray.shape
 
         grid = self._cached_pts
+        assert grid is not None
 
         ref_box = self.held_box if self.held_box is not None else self.current_bbox
         if ref_box is not None:
@@ -1593,8 +1644,10 @@ class SiamRAMTracker:
             to an unverified candidate.
         """
         ref = self.memory.best_descriptor()
-        hcx = self.held_box[0] + self.held_box[2] / 2.0
-        hcy = self.held_box[1] + self.held_box[3] / 2.0
+        held_box = self.held_box
+        assert held_box is not None
+        hcx = held_box[0] + held_box[2] / 2.0
+        hcy = held_box[1] + held_box[3] / 2.0
 
         best_det, best_rank = None, float('inf')
         for det in detections:
@@ -1611,14 +1664,14 @@ class SiamRAMTracker:
                 best_rank, best_det = rank, det
 
         if best_det is None:
-            return self.held_box.copy()
+            return held_box.copy()
 
         dcx = best_det[0] + best_det[2] / 2.0
         dcy = best_det[1] + best_det[3] / 2.0
         new_cx = hcx + self.nudge_alpha * (dcx - hcx)
         new_cy = hcy + self.nudge_alpha * (dcy - hcy)
 
-        hw, hh = self.held_box[2], self.held_box[3]
+        hw, hh = held_box[2], held_box[3]
         h_fr, w_fr = frame.shape[:2]
         nx = int(np.clip(new_cx - hw / 2.0, 0, w_fr - 1))
         ny = int(np.clip(new_cy - hh / 2.0, 0, h_fr - 1))
@@ -1984,7 +2037,9 @@ class SiamRAMTracker:
         clean = history[:len(history) - skip] if skip > 0 else history
 
         if len(clean) == 0:
-            return self.ekf
+            ekf = self.ekf
+            assert ekf is not None
+            return ekf
 
         first_bbox, _, _, _ = clean[0]
         fresh_ekf = BBoxEKF(
@@ -2175,7 +2230,9 @@ class SiamRAMTracker:
         """
         h_fr, w_fr = frame.shape[:2]
 
-        last_bbox = self.current_bbox.astype(float)
+        current_bbox = self.current_bbox
+        assert current_bbox is not None
+        last_bbox = current_bbox.astype(float)
         lx1, ly1, lw, lh = last_bbox
         lx2, ly2 = lx1 + lw, ly1 + lh
         lcx = lx1 + lw / 2.0
@@ -2370,8 +2427,6 @@ class SiamRAMTracker:
                 best_iou, best_cls = iou, cls_id
 
         if best_iou >= 0.3 and best_cls is not None:
-            if not hasattr(self, '_class_votes'):
-                self._class_votes: dict = {}
             self._class_votes[best_cls] = self._class_votes.get(best_cls, 0) + 1
 
     def _maybe_commit_target_class(self) -> None:
@@ -2396,10 +2451,10 @@ class SiamRAMTracker:
             about the target's class in the first few frames, while still locking
             quickly enough to be useful before the first occlusion typically occurs.
         """
-        votes = getattr(self, '_class_votes', {})
+        votes = self._class_votes
         if not votes:
             return
-        best_cls = max(votes, key=votes.get)
+        best_cls = max(votes, key=lambda cls_id: votes[cls_id])
         total = sum(votes.values())
         if votes[best_cls] / total >= 0.6:
             self._target_class_id = best_cls

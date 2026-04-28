@@ -39,6 +39,8 @@ class FastParallelPolarizedSelfAttention(nn.Module):
         self.softmax_spatial=nn.Softmax(-1)
         self.ch_wz=nn.Conv2d(channel//self.squeeze,channel,kernel_size=(1,1))
         self.ln=nn.LayerNorm(channel)
+
+        
         self.sigmoid=nn.Sigmoid()
         self.sp_wq=nn.Conv2d(channel,channel//self.squeeze,kernel_size=(1,1))
         # self.sp_wz=nn.Conv2d(1,1,kernel_size=(1,1))

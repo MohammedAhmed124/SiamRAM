@@ -75,11 +75,12 @@ Expected result: CUDA available is `False`.
 ## Option 3: Local Installation with uv
 
 Use this path if you want to run directly on your host Python environment.
+Plain `uv sync` defaults to CPU torch. The command below keeps CPU explicit with the CPU group.
 
 ### Step 1: Install project dependencies
 
 ```bash
-uv sync
+uv sync --group cpu
 ```
 
 ### Step 2: Verify environment

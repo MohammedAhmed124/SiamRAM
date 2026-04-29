@@ -1,3 +1,10 @@
+"""
+Bounding box encoding and decoding for Siamese trackers.
+
+This module provides classes to convert between ground-truth bounding boxes
+and model output maps (regression and classification), as well as utilities
+for generating Gaussian labels.
+"""
 import math
 from abc import ABC, abstractmethod
 from collections import namedtuple
@@ -13,7 +20,20 @@ TrackerDecodeResult = namedtuple("TrackerDecodeResult", ["bbox", "pred_coords"])
 
 
 class BoxCoder(ABC):
+    """
+    Abstract base class for bounding box encoding and decoding.
+
+    Handles the conversion of bounding boxes to spatial maps for training
+    and the decoding of network outputs back into image-coordinate boxes.
+    """
     def __init__(self, tracker_config: Dict[str, Any]) -> None:
+        """
+        Initialise the BoxCoder with a tracker configuration.
+
+        Args:
+            tracker_config (Dict[str, Any]): Configuration containing
+                'score_size', 'total_stride', and 'instance_size'.
+        """
         super().__init__()
         self.tracker_config = tracker_config
         self.grid_x, self.grid_y = make_grid(
@@ -21,6 +41,15 @@ class BoxCoder(ABC):
         )
 
     def to_device(self, device: Union[str, int]) -> "BoxCoder":
+        """
+        Move the internal coordinate grids to the specified device.
+
+        Args:
+            device (Union[str, int]): Target device (e.g., 'cuda:0').
+
+        Returns:
+            BoxCoder: The instance itself.
+        """
         self.grid_x = self.grid_x.to(device)
         self.grid_y = self.grid_y.to(device)
         return self
@@ -52,7 +81,19 @@ class BoxCoder(ABC):
 
 
 class SiamABCBoxCoder(BoxCoder):
+    """
+    Box coder implementation for the SiamABC model.
+
+    Implements the encoding of boxes into 4-channel regression maps (l, t, r, b)
+    and single-channel classification labels.
+    """
     def __init__(self, tracker_config: Dict[str, Any]) -> None:
+        """
+        Initialise the SiamABCBoxCoder.
+
+        Args:
+            tracker_config (Dict[str, Any]): Configuration for the coder.
+        """
         super().__init__(tracker_config=tracker_config)
 
     @torch.no_grad()
@@ -76,6 +117,18 @@ class SiamABCBoxCoder(BoxCoder):
 
     @torch.no_grad()
     def decode(self, regression_map, classification_map, use_sigmoid=True, pred_location=None):
+        """
+        Decode model outputs into a bounding box in image coordinates.
+
+        Args:
+            regression_map (torch.Tensor): Predicted regression offsets.
+            classification_map (torch.Tensor): Predicted classification scores.
+            use_sigmoid (bool): Whether to apply sigmoid to classification_map.
+            pred_location (Optional[torch.Tensor]): Pre-computed absolute locations.
+
+        Returns:
+            TrackerDecodeResult: Decoded box [x, y, w, h] and max-score coordinates.
+        """
         if use_sigmoid:
             classification_map = classification_map.float().sigmoid()
         cls_map = classification_map[0, 0]  # [H, W] — skip batch dim, no loop
@@ -114,6 +167,19 @@ def get_box_coder(tracker_config: Dict[str, Any], tracker_name: str = "SiamABC")
 
 
 def gauss_1d(sz, sigma, center, end_pad=0, density=False) -> torch.Tensor:
+    """
+    Generate a 1D Gaussian distribution.
+
+    Args:
+        sz (int): Size of the output tensor.
+        sigma (float): Standard deviation of the Gaussian.
+        center (torch.Tensor): Center position(s).
+        end_pad (int): Optional padding.
+        density (bool): Whether to normalise to unit area.
+
+    Returns:
+        torch.Tensor: 1D Gaussian values.
+    """
     k = torch.arange(-(sz - 1) / 2, (sz + 1) / 2 + end_pad).reshape(1, -1)
     gauss = torch.exp(-1.0 / (2 * sigma ** 2) * (k - center.reshape(-1, 1)) ** 2)
     if density:
@@ -123,6 +189,19 @@ def gauss_1d(sz, sigma, center, end_pad=0, density=False) -> torch.Tensor:
 
 
 def gauss_2d(sz, sigma, center, end_pad=(0, 0), density=False) -> torch.Tensor:
+    """
+    Generate a 2D Gaussian distribution.
+
+    Args:
+        sz (Tuple[int, int]): Size of the output map.
+        sigma (Union[float, Tuple[float, float]]): Standard deviation.
+        center (torch.Tensor): Center coordinates.
+        end_pad (Tuple[int, int]): Optional padding.
+        density (bool): Whether to normalise to unit area.
+
+    Returns:
+        torch.Tensor: 2D Gaussian values.
+    """
     if isinstance(sigma, (float, int)):
         sigma = (sigma, sigma)
     return gauss_1d(sz[0].item(), sigma[0], center[:, 0], end_pad[0], density).reshape(center.shape[0], 1, -1) * \

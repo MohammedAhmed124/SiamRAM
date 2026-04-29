@@ -1,3 +1,10 @@
+"""
+Full-video inference and performance visualisation for SiamRAM.
+
+This module provides the main entry point for running the tracker on video
+files, rendering annotated outputs with side-by-side template and search
+crops, and generating detailed latency reports.
+"""
 import gc
 import os
 from typing import List

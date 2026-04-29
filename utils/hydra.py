@@ -1,3 +1,9 @@
+"""
+Hydra configuration management utilities.
+
+This module provides helpers for loading Hydra and YAML configurations,
+and preparing experiments by saving the resolved configuration.
+"""
 import os
 from typing import Any, Dict, List, Optional
 
@@ -31,6 +37,17 @@ def load_hydra_config(hydra_config: DictConfig) -> Dict[str, Any]:
 
 def load_hydra_config_from_path(config_path: str, config_name: str, overrides: Optional[List[str]] = None) \
     -> Dict[str, Any]:
+    """
+    Load a Hydra configuration from a specific file path.
+
+    Args:
+        config_path (str): Path to the configuration directory.
+        config_name (str): Name of the configuration file (without extension).
+        overrides (Optional[List[str]]): Hydra overrides list.
+
+    Returns:
+        Dict[str, Any]: The resolved configuration as a dictionary.
+    """
     if overrides is None:
         overrides = list()
     rel_module_path = os.path.relpath(os.getcwd(), os.path.dirname(__file__))
@@ -39,11 +56,29 @@ def load_hydra_config_from_path(config_path: str, config_name: str, overrides: O
 
 
 def load_yaml(yaml_path: str) -> Dict[str, Any]:
+    """
+    Load a YAML file.
+
+    Args:
+        yaml_path (str): Path to the YAML file.
+
+    Returns:
+        Dict[str, Any]: Loaded dictionary.
+    """
     with open(yaml_path, "r") as f:
         return yaml.safe_load(f)
 
 
 def prepare_experiment(hydra_config: DictConfig) -> Dict[str, Any]:
+    """
+    Prepare the experiment directory and save the configuration.
+
+    Args:
+        hydra_config (DictConfig): The Hydra configuration object.
+
+    Returns:
+        Dict[str, Any]: The resolved configuration.
+    """
     experiment_dir = os.getcwd()
     save_path = os.path.join(experiment_dir, "experiment_config.yaml")
     OmegaConf.set_struct(hydra_config, False)

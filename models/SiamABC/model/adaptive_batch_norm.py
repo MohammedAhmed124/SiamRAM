@@ -7,27 +7,39 @@ from torch import nn
 
 
 class AdaptiveBatchNorm(nn.BatchNorm2d):
-    """BatchNorm2d whose TTA blending weight is supplied at forward-time.
+    """
+    Adaptive Batch Normalisation (ABN) layer for Test-Time Adaptation (TTA).
 
-    ``lam`` is the actual blending coefficient passed in by the caller:
-      - ``lam = 0.0``           → pure running statistics  (TTA off)
-      - ``lam = norm_lambda``   → blended batch + running  (TTA on)
+    ABN extends standard BatchNorm2d by allowing the blending of running
+    statistics (calculated during training) with batch statistics (calculated
+    during inference). This allows the model to adapt to distribution shifts
+    in the search region or template during tracking.
 
-    Keeping ``lam`` as a tensor *input* (rather than a stored buffer) means
-    there are no side-effecting mutations between forward calls, so the module
-    is fully compatible with ``torch.compile`` / TensorRT.
+    The blending is controlled by a 'lambda' parameter:
+        μ_eff = λ * μ_batch + (1 - λ) * μ_running
+        σ_eff = λ * σ_batch + (1 - λ) * σ_running
 
-    During *training* the standard batch-normalisation update is used and
-    ``lam`` is ignored, so training behaviour is unchanged.
+    When λ = 0, it behaves like standard inference BN.
+    When λ > 0, it incorporates local batch statistics.
     """
 
     def __init__(self, num_features, eps=1e-5, momentum=0.1,
                  affine=True, track_running_stats=True,
                  contineous=False, norm_lambda=0.1):
+        """
+        Initialise the AdaptiveBatchNorm layer.
+
+        Args:
+            num_features (int): Number of channels in the input tensor.
+            eps (float): Small constant for numerical stability.
+            momentum (float): Momentum factor for running stats updates.
+            affine (bool): Whether to use learnable scale and shift parameters.
+            track_running_stats (bool): Whether to track running mean and variance.
+            contineous (bool): Reserved for future use in continuous adaptation.
+            norm_lambda (float): Default blending factor for Test-Time Adaptation.
+        """
         super().__init__(num_features, eps, momentum, affine, track_running_stats)
         self.contineous = contineous
-        # Stored so the tracker can recover the configured strength when
-        # enabling TTA; not used inside forward().
         self._norm_lambda = norm_lambda
 
     def forward(self, x: torch.Tensor, lam: torch.Tensor) -> torch.Tensor:
@@ -59,7 +71,7 @@ class AdaptiveBatchNorm(nn.BatchNorm2d):
         batch_var = x.var([0, 2, 3], unbiased=False)
 
         mean = lam * batch_mean + (1.0 - lam) * self.running_mean
-        var  = lam * batch_var  + (1.0 - lam) * self.running_var
+        var = lam * batch_var + (1.0 - lam) * self.running_var
 
         x = (x - mean[None, :, None, None]) \
             / torch.sqrt(var[None, :, None, None] + self.eps)
@@ -70,6 +82,14 @@ class AdaptiveBatchNorm(nn.BatchNorm2d):
 
 
 def replace_layers_adaptive_bn(model, norm_lambda, continuous):
+    """
+    Recursively replace BatchNorm2d layers in a model with AdaptiveBatchNorm.
+
+    Args:
+        model (nn.Module): The model or submodule to process.
+        norm_lambda (float): Blending factor for the new ABN layers.
+        continuous (bool): Whether to enable continuous adaptation (reserved).
+    """
     for name, module in model.named_children():
         if len(list(module.children())) > 0:
             replace_layers_adaptive_bn(module, norm_lambda, continuous)

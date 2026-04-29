@@ -22,6 +22,7 @@ class AdaptiveBatchNorm(nn.BatchNorm2d):
     When λ = 0, it behaves like standard inference BN.
     When λ > 0, it incorporates local batch statistics.
     """
+
     def __init__(self, num_features, eps=1e-5, momentum=0.1,
                  affine=True, track_running_stats=True,
                  contineous=False, norm_lambda=0.1):
@@ -41,44 +42,17 @@ class AdaptiveBatchNorm(nn.BatchNorm2d):
         self.contineous = contineous
         self._norm_lambda = norm_lambda
 
-        self.register_buffer('_lam', torch.tensor(norm_lambda, dtype=torch.float32))
-
-    def enable_tta(self):
+    def forward(self, x: torch.Tensor, lam: torch.Tensor) -> torch.Tensor:
         """
-        Enable Test-Time Adaptation by setting the blending factor to norm_lambda.
-        """
-        self._lam.fill_(self._norm_lambda)
-
-    def disable_tta(self):
-        """
-        Disable Test-Time Adaptation by setting the blending factor to 0.0.
-        """
-        self._lam.fill_(0.0)
-
-    @property
-    def tta_enabled(self) -> bool:
-        """
-        Return whether Test-Time Adaptation is currently enabled.
-        """
-        return self._lam.item() > 0.0
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Pass the input through the AdaptiveBatchNorm layer.
-
-        In training mode, this behaves as standard Batch Normalisation.
-        In evaluation mode, it blends the running statistics with the current
-        batch statistics if TTA is enabled.
-
         Args:
-            x (torch.Tensor): Input tensor of shape (B, C, H, W).
-
-        Returns:
-            torch.Tensor: Normalised output tensor.
+            x:   input feature map  [B, C, H, W]
+            lam: scalar tensor — blending weight for batch statistics.
+                 0.0 → TTA off (use running stats only).
+                 norm_lambda → TTA on (blend batch and running stats).
         """
         self._check_input_dim(x)
 
-        # Training path — standard BN, untouched
+        # Training path — standard BN; lam is intentionally ignored.
         if self.training:
             return torch.nn.functional.batch_norm(
                 x,
@@ -89,15 +63,15 @@ class AdaptiveBatchNorm(nn.BatchNorm2d):
                 self.eps,
             )
 
-        # ── Single eval path — no Python branch on tta_enabled ───────────
-        # When _lam = 0.0  → mean = running_mean, var = running_var  (TTA off)
-        # When _lam > 0.0  → blended stats                           (TTA on)
-        # The compiler sees ONE graph for both modes.
+        # ── Single eval path — branch-free, TRT-safe ──────────────────────
+        # lam = 0.0 → mean/var collapse to running_mean/var  (TTA off)
+        # lam > 0.0 → blended statistics                     (TTA on)
+        # The compiler sees ONE static graph regardless of the lam value.
         batch_mean = x.mean([0, 2, 3])
         batch_var = x.var([0, 2, 3], unbiased=False)
 
-        mean = self._lam * batch_mean + (1.0 - self._lam) * self.running_mean
-        var = self._lam * batch_var + (1.0 - self._lam) * self.running_var
+        mean = lam * batch_mean + (1.0 - lam) * self.running_mean
+        var = lam * batch_var + (1.0 - lam) * self.running_var
 
         x = (x - mean[None, :, None, None]) \
             / torch.sqrt(var[None, :, None, None] + self.eps)
@@ -117,13 +91,23 @@ def replace_layers_adaptive_bn(model, norm_lambda, continuous):
         continuous (bool): Whether to enable continuous adaptation (reserved).
     """
     for name, module in model.named_children():
-
         if len(list(module.children())) > 0:
             replace_layers_adaptive_bn(module, norm_lambda, continuous)
 
-        if isinstance(module, nn.BatchNorm2d):
-            mybatch_norm = AdaptiveBatchNorm(module.num_features, norm_lambda=norm_lambda)
+        if isinstance(module, nn.BatchNorm2d) and not isinstance(module, AdaptiveBatchNorm):
+            new_bn = AdaptiveBatchNorm(
+                module.num_features,
+                eps=module.eps,
+                momentum=module.momentum,
+                affine=module.affine,
+                track_running_stats=module.track_running_stats,
+                norm_lambda=norm_lambda,
+            )
+            # ← copy all trained state
+            new_bn.load_state_dict(module.state_dict())
+            new_bn.to(next(module.parameters(), module.running_mean).device)
+
             if isinstance(model, (nn.Sequential, nn.ModuleList)) and name.isdigit():
-                model[int(name)] = mybatch_norm
+                model[int(name)] = new_bn
             else:
-                setattr(model, name, mybatch_norm)
+                setattr(model, name, new_bn)

@@ -22,14 +22,15 @@ from .base_tracker import Tracker
 
 
 class SiamABCTracker(Tracker):
-    """
-    State-of-the-art Single Object Tracker based on SiamABCNet.
+    def __init__(self, model, cuda_id=0, **tracking_config):
+        super().__init__(model, cuda_id, **tracking_config)
 
-    This tracker implements a dual-template strategy with polarized attention
-    and test-time adaptation (TTA) via Adaptive Batch Normalisation. It
-    maintains a memory window of reliable target appearances to update the
-    dynamic template branch.
-    """
+        self._norm_lambda_tta: float = next(
+            (m._norm_lambda for m in self.net.modules() if isinstance(m, AdaptiveBatchNorm)),
+            0.1,
+        )
+        self._tta_lam: torch.Tensor = torch.zeros(1, device=f"cuda:{cuda_id}")
+
     def get_box_coder(self, tracking_config, cuda_id: str | int = 0):
         """
         Return the appropriate box coder for decoding model outputs.
@@ -44,14 +45,12 @@ class SiamABCTracker(Tracker):
         return SiamABCBoxCoder(tracking_config)
 
     def initialize(self, image: NDArray, rect: NDArray, **kwargs) -> None:
-
         """
         args:
             img(np.ndarray): RGB image
             bbox(list): [x, y, width, height]
                         x, y need to be 0-based
         """
-
         self.smooth_pred = self.tracking_config['smooth']
         self._prev_bbox = rect.copy()
         self.N = self.tracking_config["N"]
@@ -61,22 +60,36 @@ class SiamABCTracker(Tracker):
 
         rect = clamp_bbox(rect, image.shape)
         self.tracking_state.bbox = rect
-        self._init_rect = rect.copy()  # ← add this
+        self._init_rect = rect.copy()
 
         self.tracking_state.pred_score = 1.0
         self.prev_good_bbox = rect
-        self.tracking_state.paths.clear()
+        self.tracking_state.paths = deque([], maxlen=70)
 
+        # Compute mean_color once here so we can pass it everywhere — including
+        # get_template_features — and avoid re-computing np.mean over the full
+        # frame inside get_extended_crop (which was the previous behaviour when
+        # padding_value was not supplied to that call).
         self.tracking_state.mean_color = np.mean(image, axis=(0, 1))
 
-        self._template_features = self.get_template_features(image, rect)
+        self._template_features, _ = self.get_template_features(image, rect)
         self.dynamic_template_features = self._template_features.clone()
-        self.dynamic_search_features, _, _ = self.get_search_features(image, rect)
+        search_feats, search_bbox_in_crop, _, search_crop_raw = self.get_search_features(image, rect)
+        self.dynamic_search_features = search_feats
 
-        self.all_memory_imgs = deque([[image, rect]], maxlen=self.memory_window_size)
-        self.classification_scores = deque([0.5], maxlen=self.memory_window_size)
+        self.warmup_frames = self.tracking_config.get("warmup_frames", 0)
+        warmup_window = self.tracking_config.get("warmup_window_size", self.memory_window_size)
+        init_window = warmup_window if self.warmup_frames > 0 else self.memory_window_size
 
-        self.running_dynamic_image = image
+        # Memory stores [search_crop_256, search_bbox_in_crop, frame_bbox].
+        # search_bbox_in_crop lets select_representatives re-derive a template crop
+        # from the small 256x256 image — no full-res frame ever stored or re-read.
+        self.all_memory_imgs = deque(
+            [[search_crop_raw, search_bbox_in_crop, rect]],
+            maxlen=init_window,
+        )
+        self.classification_scores = deque([0.5], maxlen=init_window)
+        self.running_dynamic_image = search_crop_raw
         self.running_dynamic_bbox = rect
 
         self.offset = self.tracking_config["search_context"]
@@ -91,20 +104,15 @@ class SiamABCTracker(Tracker):
 
         self._best_idx = 0
         self._best_score = 0.5
-        self._is_full = False  # tracks whether deque has started evicti
+        self._is_full = False
+
+    # ------------------------------------------------------------------
+    # Feature extraction
+    # ------------------------------------------------------------------
 
     @torch.no_grad()
     def get_template_features(self, image, rect):
-        """
-        Extract features from a template crop.
-
-        Args:
-            image (NDArray): Full RGB image.
-            rect (NDArray): Target bounding box [x, y, w, h].
-
-        Returns:
-            torch.Tensor: Encoded template features.
-        """
+        """Returns (features, raw_template_crop_numpy)."""
         context = extend_bbox(rect,
                               offset=self.tracking_config["template_bbox_offset"],
                               image_width=image.shape[1], image_height=image.shape[0])
@@ -113,33 +121,30 @@ class SiamABCTracker(Tracker):
             bbox=rect,
             context=context,
             crop_size=self.tracking_config["template_size"],
+            # FIX: pass pre-computed mean_color so get_extended_crop never falls
+            # back to np.mean(image, axis=(0,1)) — an O(resolution) operation on
+            # the full raw frame.  mean_color is always set before this call in
+            # initialize(), so tracking_state.mean_color is always valid here.
+            padding_value=self.tracking_state.mean_color,
         )
-
         img = self._preprocess_image(template_crop, self._template_transform)
-
-        return self.net.get_features(img)
+        return self.net.get_features(img), template_crop
 
     @torch.no_grad()
     def get_search_features(self, image, bbox):
         """
-        Extract features from a search region crop.
+        Returns (features, search_bbox_in_crop, search_context, raw_search_crop_numpy).
 
-        Args:
-            image (NDArray): Full RGB image.
-            bbox (NDArray): Center bounding box for the search region.
-
-        Returns:
-            Tuple[torch.Tensor, NDArray, NDArray]:
-                (features, search_bbox, search_context).
+        search_bbox_in_crop is the tracked object bbox scaled into 256x256 crop space.
+        Storing it alongside the crop allows select_representatives to re-derive a
+        128x128 template crop from the small image only — never the full-res frame.
         """
-
         context = extend_bbox(
             bbox,
             offset=self.tracking_config["search_context"],
             image_width=image.shape[1],
             image_height=image.shape[0]
         )
-
         search_crop, search_bbox, search_context = get_extended_crop(
             image=image,
             bbox=bbox,
@@ -147,67 +152,87 @@ class SiamABCTracker(Tracker):
             padding_value=self.tracking_state.mean_color,
             context=context
         )
-        search_crop = self._preprocess_image(search_crop, self._search_transform)
-        return self.net.get_features(search_crop), search_bbox, search_context
+        search_tensor = self._preprocess_image(search_crop, self._search_transform)
+        return self.net.get_features(search_tensor), search_bbox, search_context, search_crop
+
+    @torch.no_grad()
+    def _get_features_from_crop(self, crop: np.ndarray):
+        """Run net.get_features on an already-resized small crop (128 or 256 px)."""
+        tensor = self._preprocess_image(crop, None)
+        return self.net.get_features(tensor)
+
+    def _extract_template_from_search_crop(
+        self, search_crop: np.ndarray, bbox_in_crop: np.ndarray
+    ) -> np.ndarray:
+        """
+        Re-derive a 128x128 template crop from the stored 256x256 search crop.
+
+        Source area: 256x256 = 65 K px.
+        Full-res 4K source area: ~8 M px.
+        This is ~120x cheaper than cropping from the original frame, and happens
+        only every N=10 frames in select_representatives — not on the per-frame path.
+        """
+        context = extend_bbox(
+            bbox_in_crop,
+            offset=self.tracking_config["template_bbox_offset"],
+            image_width=search_crop.shape[1],
+            image_height=search_crop.shape[0],
+        )
+        template_crop, _, _ = get_extended_crop(
+            image=search_crop,
+            bbox=bbox_in_crop,
+            context=context,
+            crop_size=self.tracking_config["template_size"],  # 128
+        )
+        return template_crop
+
+    # ------------------------------------------------------------------
+    # Memory management
+    # ------------------------------------------------------------------
 
     def check_validity(self, bbox_window, bbox):
-        """
-        Check if a bounding box is within the specified window.
-
-        Args:
-            bbox_window (NDArray): Window boundaries [x1, y1, x2, y2].
-            bbox (NDArray): Bounding box to check [x, y, w, h].
-
-        Returns:
-            bool: True if the box is within the window.
-        """
-        return bbox[0] >= bbox_window[0] and bbox[1] >= bbox_window[1] and bbox[2] <= bbox_window[2] and bbox[3] <= \
-            bbox_window[3]
-
-    def select_representatives_from_all(self):
-        """
-        Select a representative frame from the memory window to update templates.
-
-        This method uses a mean-based selection strategy to find a frame with
-        above-average classification confidence.
-        """
-        for num in range(len(self.classification_scores) - 1, -1, -1):
-            if self.classification_scores[num] > mean(self.classification_scores):
-                self.dynamic_template_features = self.get_template_features(self.all_memory_imgs[num][0],
-                                                                            self.all_memory_imgs[num][1])
-                self.dynamic_search_features, _, _ = self.get_search_features(self.all_memory_imgs[num][0],
-                                                                              self.all_memory_imgs[num][1])
-                return
+        return (
+            bbox[0] >= bbox_window[0]
+            and bbox[1] >= bbox_window[1]
+            and bbox[2] <= bbox_window[2]
+            and bbox[3] <= bbox_window[3]
+        )
 
     def _update_best_index(self, pred_score: float, evicting: bool) -> None:
-        """
-        O(1) amortized best-index maintenance.
-        Only O(window_size) on the rare event the best element is evicted.
-        Must be called AFTER appending to both deques.
-        """
+        """O(1) amortised best-index maintenance."""
         if evicting:
             if self._best_idx == 0:
-                # Best was just dropped — rescan (new element already in deque)
                 scores = np.array(self.classification_scores, dtype=np.float16)
                 self._best_idx = int(np.argmax(scores))
                 self._best_score = float(scores[self._best_idx])
             else:
-                # Best survived — shift index left to account for eviction
                 self._best_idx -= 1
-                # Still check if new element beats it
                 if pred_score > self._best_score:
                     self._best_score = pred_score
                     self._best_idx = len(self.classification_scores) - 1
         else:
-            # No eviction — just check new element
             if pred_score > self._best_score:
                 self._best_score = pred_score
                 self._best_idx = len(self.classification_scores) - 1
 
-    def _maybe_store_frame(self, search: np.ndarray, pred_bbox: np.ndarray, pred_score: float) -> None:
-        """Append to memory and keep best-index consistent. Single responsibility."""
+    def _maybe_store_frame(
+        self,
+        search_crop_raw: np.ndarray,
+        search_bbox_in_crop: np.ndarray,
+        pred_bbox: np.ndarray,
+        pred_score: float,
+    ) -> None:
+        """
+        Zero extra computation on the per-frame hot path.
+
+        Both arguments are already computed during run_track — this is purely
+        appending references that already exist. No crop, no resize, no copy.
+
+        Memory: 256x256x3 uint8 ≈ 196 KB per slot.
+        window_size=20 → ~4 MB total vs ~500 MB in the original.
+        """
         evicting = len(self.classification_scores) == self.memory_window_size
-        self.all_memory_imgs.append([search, pred_bbox])
+        self.all_memory_imgs.append([search_crop_raw, search_bbox_in_crop, pred_bbox])
         self.classification_scores.append(pred_score)
         self._update_best_index(pred_score, evicting)
 
@@ -220,37 +245,36 @@ class SiamABCTracker(Tracker):
         if self._best_score < self.dynamic_update_threshold:
             return
 
-        best_img, best_bbox = self.all_memory_imgs[self._best_idx]
-        self.dynamic_template_features = self.get_template_features(best_img, best_bbox)
-        self.dynamic_search_features, _, _ = self.get_search_features(best_img, best_bbox)
-        self.running_dynamic_image = best_img.copy()
+        best_search_crop, best_bbox_in_crop, best_bbox = self.all_memory_imgs[self._best_idx]
+
+        # Cheap crop from 256x256 source — ~120x less work than cropping a 4K frame.
+        # This runs every N=10 frames; with the previous bug it paid full-res crop cost here.
+        best_template_crop = self._extract_template_from_search_crop(best_search_crop, best_bbox_in_crop)
+
+        self.dynamic_template_features = self._get_features_from_crop(best_template_crop)
+        self.dynamic_search_features = self._get_features_from_crop(best_search_crop)
+
+        self.running_dynamic_image = best_search_crop   # 256x256 ref, not a 25 MB memcpy
         self.running_dynamic_bbox = best_bbox.copy()
 
         if hasattr(self.net, "invalidate_template_cache"):
             self.net.invalidate_template_cache()
 
+    # ------------------------------------------------------------------
+    # Tracking loop
+    # ------------------------------------------------------------------
+
     def update(self, search: NDArray, *kw):
-        """
-        Process a new frame and update the tracker state.
+        pred_bbox, pred_score, sim_score, search_crop_raw, search_bbox_in_crop = self.run_track(search)
 
-        Args:
-            search (NDArray): RGB image of the new frame.
-            *kw: Additional keyword arguments.
-
-        Returns:
-            Tuple[NDArray, float, float]: (pred_bbox, pred_score, sim_score).
-        """
-        pred_bbox, pred_score, sim_score = self.run_track(search)
-
-        # Always update state
         self.tracking_state.bbox = pred_bbox
         self.tracking_state.pred_score = pred_score
         self.tracking_state.paths.append(pred_bbox)
 
         if self.dynamic_update:
             score_ok = (
-                pred_score > self.running_confidence or
-                pred_score >= self.dynamic_update_threshold
+                pred_score > self.running_confidence
+                or pred_score >= self.dynamic_update_threshold
             )
             if score_ok:
                 iou_ok = (
@@ -258,15 +282,25 @@ class SiamABCTracker(Tracker):
                     >= self.tracking_config.get("iou_threshold", 0.3)
                 )
                 if iou_ok:
-                    self._maybe_store_frame(search, pred_bbox, pred_score)
+                    # Both values already computed in run_track — storing them is free.
+                    self._maybe_store_frame(search_crop_raw, search_bbox_in_crop, pred_bbox, pred_score)
 
             self._prev_bbox = pred_bbox.copy()
+
+            if self.warmup_frames > 0 and self.idx == self.warmup_frames - 1:
+                full_imgs   = deque(self.all_memory_imgs,       maxlen=self.memory_window_size)
+                full_scores = deque(self.classification_scores, maxlen=self.memory_window_size)
+                self.all_memory_imgs       = full_imgs
+                self.classification_scores = full_scores
+                scores = np.array(self.classification_scores, dtype=np.float16)
+                self._best_idx   = int(np.argmax(scores))
+                self._best_score = float(scores[self._best_idx])
+
             self.idx += 1
 
             if self.idx % self.N == 0:
                 self.select_representatives()
 
-            # Single EMA update, then clamp — fixes double-update bug
             self.running_confidence = (
                 self.update_lambda * pred_score
                 + (1 - self.update_lambda) * self.running_confidence
@@ -277,43 +311,32 @@ class SiamABCTracker(Tracker):
 
     def run_track(self, search):
         """
-        Execute tracking on the given search image.
+        Returns (pred_bbox, pred_score, sim_score, search_crop_raw, search_bbox_in_crop).
 
-        Args:
-            search (NDArray): RGB image of the search region.
-
-        Returns:
-            Tuple[NDArray, float, float]: (pred_bbox, pred_score, sim_score).
+        search_crop_raw and search_bbox_in_crop are free byproducts of get_search_features.
+        Returning them here means update() can call _maybe_store_frame at zero extra cost.
         """
-        search_features, search_bbox, search_context = self.get_search_features(search, self.tracking_state.bbox)
+        search_features, search_bbox_in_crop, search_context, search_crop_raw = self.get_search_features(
+            search, self.tracking_state.bbox
+        )
         self.tracking_state.mapping = search_context
-        self.tracking_state.prev_size = search_bbox[2:]
-        pred_bbox, pred_score, sim_score, _ = self.track(search_features, self.dynamic_search_features,
-                                                         self.dynamic_template_features)
+        self.tracking_state.prev_size = search_bbox_in_crop[2:]
+        pred_bbox, pred_score, sim_score, _ = self.track(
+            search_features, self.dynamic_search_features, self.dynamic_template_features
+        )
         pred_bbox = self._rescale_bbox(pred_bbox, self.tracking_state.mapping)
         pred_bbox = clamp_bbox(pred_bbox, search.shape)
-        return pred_bbox, pred_score, sim_score
+        return pred_bbox, pred_score, sim_score, search_crop_raw, search_bbox_in_crop
 
     @torch.no_grad()
     def track(self, search_features, dynamic_search_features, dynamic_template_features):
-        """
-        Perform a model forward pass using pre-extracted features.
-
-        Args:
-            search_features (torch.Tensor): Features from the current search region.
-            dynamic_search_features (torch.Tensor): Features from the dynamic search region.
-            dynamic_template_features (torch.Tensor): Features from the dynamic template.
-
-        Returns:
-            Tuple[NDArray, float, float, torch.Tensor]: Post-processed results.
-        """
         track_result = self.net.track(
             search_features=search_features,
             dynamic_search_features=dynamic_search_features,
             template_features=self._template_features,
-            dynamic_template_features=dynamic_template_features
+            dynamic_template_features=dynamic_template_features,
+            lam=self._tta_lam,
         )
-
         return self._postprocess(track_result=track_result)
 
     def _postprocess(
@@ -356,12 +379,8 @@ class SiamABCTracker(Tracker):
             Tuple[NDArray, float, float]: (pred_bbox, pred_score, sim_score).
         """
         cand_x, cand_y, cand_w, cand_h = [float(v) for v in candidate_bbox]
-
         h_fr, w_fr = search.shape[:2]
-
-        # Use the same context ratio as normal tracking so the feature extractor
-        # sees the same relative amount of context it was trained with.
-        context_ratio = self.tracking_config["search_context"]  # e.g. 2.0
+        context_ratio = self.tracking_config["search_context"]
 
         pad_w = cand_w * context_ratio
         pad_h = cand_h * context_ratio
@@ -374,28 +393,21 @@ class SiamABCTracker(Tracker):
         padded_context = np.array([px1, py1, px2 - px1, py2 - py1], dtype=int)
 
         saved_bbox = self.tracking_state.bbox
-
         try:
             self.tracking_state.bbox = candidate_bbox.copy()
             self.tracking_state.mapping = padded_context.copy()
-            # search_context stays UNCHANGED — already the right ratio
-            return self.run_track(search)
+            pred_bbox, pred_score, sim_score, _, _ = self.run_track(search)
+            return pred_bbox, pred_score, sim_score
         finally:
             self.tracking_state.bbox = saved_bbox
 
-    def set_tta(self, enabled: bool) -> None:
-        """
-        Enable or disable Test-Time Adaptation (Adaptive Batch Normalisation).
+    # ------------------------------------------------------------------
+    # TTA
+    # ------------------------------------------------------------------
 
-        Args:
-            enabled (bool): Whether to enable TTA.
-        """
-        for module in self.net.modules():
-            if isinstance(module, (AdaptiveBatchNorm)):
-                if enabled:
-                    module.enable_tta()
-                else:
-                    module.disable_tta()
+    def set_tta(self, enabled: bool) -> None:
+        val = self._norm_lambda_tta if enabled else 0.0
+        self._tta_lam.fill_(val)
 
     def enable_tta(self) -> None:
         """
@@ -408,6 +420,10 @@ class SiamABCTracker(Tracker):
         Disable Test-Time Adaptation.
         """
         self.set_tta(False)
+
+    # ------------------------------------------------------------------
+    # Utilities
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _compute_iou(boxA, boxB) -> float:

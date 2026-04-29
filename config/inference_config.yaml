@@ -1,0 +1,120 @@
+model:
+  _target_: models.SiamABC.model.SiamABC.SiamABCNet
+  backbone: custom_fbnet
+  growth_factor: 1.2
+  upsample: pixel_shuffle
+  pretrained: true
+  num_classes: 1
+  num_filters: 32
+  num_channels: 3
+  align: false
+  img_size: 256
+  stride: 2
+  conv_block: sep_conv
+  towernum: 2
+  model_size: M
+  max_layer: 4
+  crop_template_features: false
+
+tracker:
+  _target_: models.SiamABC.tracker.SiamABC_Tracker.SiamABCTracker
+  penalty_k: 0.062
+  window_influence: 0.38
+  lr: 0.4
+  windowing: cosine
+  total_stride: 16
+  score_size: 16
+  N: 10
+  dynamic_update: true
+  similarity_score: false
+  stride: 2
+  smooth: false
+  bbox_ratio: 0.5
+  template_bbox_offset: 0.2
+  search_context: 2
+  instance_size: 256
+  template_size: 128
+  memory_window_size: 20
+  dynamic_update_threshold: 0.87
+  running_confidence_floor_value: 100
+  iou_threshold: 0.6
+  warmup_frames: 35
+  warmup_window_size: 8
+
+
+
+
+trt_engine:
+  lambda_tta: 0.1
+  fp16: true
+  cuda_id: 0
+
+# --------------------------------------------------------------------------- #
+# SiamRAMTracker (Occlusion & DRM Management)
+# --------------------------------------------------------------------------- #
+ram_tracker:
+  yolo_weights: "yolo11n.pt"
+  yolo_conf: 0.3
+  yolo_filter_class: false
+  yolo_class_detect_frames: 5
+  copile_yolo: False
+  
+  # Core Thresholds & Hysteresis
+  conf_threshold: 0.55
+  reacq_threshold: 0.7
+  occ_siam_reacq_threshold: 0.80
+  app_match_threshold: 0.1
+  occ_siam_margin: 0.5
+  nudge_alpha: 0.0
+  entry_patience: 1
+  enter_occlusion_on_loss: true
+  
+  # Dynamic Recovery Module (DRM)
+  cand_collection_frames: 1
+  drm_tau_sim: 0.6
+  drm_mmin: 3
+  drm_capacity: 20
+  drm_margin: 0.6
+  drm_skip_threshold: 23
+  drm_top_k: 100
+  drm_gamma: 0
+  
+  # DRM Weights (Lambda)
+  drm_lam_app: 1
+  drm_lam_cand_vel: 0.0
+  drm_lam_dist: 0.0
+  drm_lam_cand_dir: 0.0
+  drm_lam_time: 0.0
+  drm_lam_iou: 0.0
+  drm_lam_mot: 0.0
+  
+  # Velocity & Motion
+  vel_score_min_speed: 0.5
+  vel_dir_hard_gate: 0.4
+  velocity_window_average: 200
+  
+  # Memory & History
+  mem_capacity: 50
+  history_decay: 0.1
+  conf_history_len: 200
+  size_history_len: 200
+  history_skip_last: 8
+  shrinkage_max_lookback: 30
+  
+  # ROI Expansion (Normal)
+  roi_start_expand: 20
+  yolo_search_expand: 100
+  search_expand_growth_factor: 1.4
+  search_expand_growth_every: 150
+  search_expand_max: 500.0
+  
+  # Tiny / Long Distance ROI Parameters
+  long_distance_area_fraction: 0.030
+  tiny_roi_start_expand: 8.0
+  tiny_yolo_search_expand: 20.0
+  tiny_search_expand_growth_factor: 1.3
+  tiny_search_expand_growth_every: 50
+  tiny_search_expand_max: 40.0
+  
+  # Logging
+  debug: false

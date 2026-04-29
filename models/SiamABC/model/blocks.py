@@ -11,10 +11,37 @@ from typing import Any, List, Tuple, Union
 
 import torch
 import torch.nn as nn
-
 # from models import neuron
 from mobile_cv.model_zoo.models.fbnet_v2 import fbnet
 from torchvision.models.resnet import resnet50
+
+from .adaptive_batch_norm import AdaptiveBatchNorm
+
+
+def _make_norm(num_features: int, inference_mode: bool, norm_lambda: float = 0.1) -> nn.Module:
+    """Return AdaptiveBatchNorm when building for inference, plain BatchNorm2d otherwise."""
+    if inference_mode:
+        return AdaptiveBatchNorm(num_features, norm_lambda=norm_lambda)
+    return nn.BatchNorm2d(num_features)
+
+
+class AdaptiveSequential(nn.Sequential):
+    """``nn.Sequential`` that forwards the ``lam`` tensor to any
+    ``AdaptiveBatchNorm`` children and calls every other layer normally.
+
+    Using a subclass (rather than a plain loop) means the module tree is
+    identical to what ``torch.compile`` / TensorRT see — there is no
+    Python-level branching on the *value* of ``lam``, only on its *type*
+    at graph-build time (``isinstance`` is resolved at compile time).
+    """
+
+    def forward(self, x: torch.Tensor, lam: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
+        for module in self:
+            if isinstance(module, AdaptiveBatchNorm):
+                x = module(x, lam)
+            else:
+                x = module(x)
+        return x
 
 
 def conv_2d(inp, oup, kernel_size=3, stride=1, padding=0, groups=1, bias=False, norm=True, act=True):
@@ -43,6 +70,7 @@ def conv_2d(inp, oup, kernel_size=3, stride=1, padding=0, groups=1, bias=False, 
         conv.add_module('Activation', nn.SiLU())
     return conv
 
+
 class FastParallelPolarizedSelfAttention(nn.Module):
     """
     Polarized Self-Attention (PSA) module for dual-template feature fusion.
@@ -62,18 +90,19 @@ class FastParallelPolarizedSelfAttention(nn.Module):
         """
         super().__init__()
 
-        self.squeeze=squeeze
-        self.wv=nn.Conv2d(channel,channel//self.squeeze,kernel_size=(1,1))
+        self.squeeze = squeeze
+        self.wv = nn.Conv2d(channel, channel // self.squeeze, kernel_size=(1, 1))
 
-        self.ch_wq=nn.Conv2d(channel,1,kernel_size=(1,1))
-        self.softmax_channel=nn.Softmax(1)
-        self.softmax_spatial=nn.Softmax(-1)
-        self.ch_wz=nn.Conv2d(channel//self.squeeze,channel,kernel_size=(1,1))
-        self.ln=nn.LayerNorm(channel)
-        self.sigmoid=nn.Sigmoid()
-        self.sp_wq=nn.Conv2d(channel,channel//self.squeeze,kernel_size=(1,1))
+        self.ch_wq = nn.Conv2d(channel, 1, kernel_size=(1, 1))
+        self.softmax_channel = nn.Softmax(1)
+        self.softmax_spatial = nn.Softmax(-1)
+        self.ch_wz = nn.Conv2d(channel // self.squeeze, channel, kernel_size=(1, 1))
+        self.ln = nn.LayerNorm(channel)
+
+        self.sigmoid = nn.Sigmoid()
+        self.sp_wq = nn.Conv2d(channel, channel // self.squeeze, kernel_size=(1, 1))
         # self.sp_wz=nn.Conv2d(1,1,kernel_size=(1,1))
-        self.agp=nn.AdaptiveAvgPool2d((1,1))
+        self.agp = nn.AdaptiveAvgPool2d((1, 1))
 
     def forward(self, x1):
         """
@@ -87,30 +116,32 @@ class FastParallelPolarizedSelfAttention(nn.Module):
         """
         b, c, h, w = x1.size()
 
+        wv = self.wv(x1)  # bs,c//2,h,w
+        wv = wv.reshape(b, c // self.squeeze, -1)  # bs,c//2,h*w
 
+        # Channel-only Self-Attention
+        channel_wq = self.ch_wq(x1)  # bs,1,h,w
+        channel_wq = channel_wq.reshape(b, -1, 1)  # bs,h*w,1
+        channel_wq = self.softmax_channel(channel_wq)
+        channel_wz = torch.sum(wv * channel_wq.permute(0, 2, 1), dim=2).unsqueeze(-1).unsqueeze(-1)
+        channel_weight = self.ln(self.ch_wz(channel_wz).reshape(b, c, 1).permute(0, 2, 1)).permute(0, 2, 1).reshape(b,
+                                                                                                                    c,
+                                                                                                                    1,
+                                                                                                                    1)  # bs,c,1,1
 
-        wv=self.wv(x1) #bs,c//2,h,w
-        wv=wv.reshape(b,c//self.squeeze,-1) #bs,c//2,h*w
-
-        #Channel-only Self-Attention
-        channel_wq=self.ch_wq(x1) #bs,1,h,w
-        channel_wq=channel_wq.reshape(b,-1,1) #bs,h*w,1
-        channel_wq=self.softmax_channel(channel_wq)
-        channel_wz=torch.sum(wv*channel_wq.permute(0,2,1),dim=2).unsqueeze(-1).unsqueeze(-1)
-        channel_weight=self.ln(self.ch_wz(channel_wz).reshape(b,c,1).permute(0,2,1)).permute(0,2,1).reshape(b,c,1,1) #bs,c,1,1
-
-        #Spatial-only Self-Attention
-        spatial_wq=self.sp_wq(x1) #bs,c,h,w
-        spatial_wq=self.agp(spatial_wq) #bs,c,1,1
-        spatial_wq=spatial_wq.permute(0,2,3,1).reshape(b,1,c//self.squeeze) #bs,1,c//2
-        spatial_wq=self.softmax_spatial(spatial_wq)
-        spatial_wz=torch.sum(spatial_wq.permute(0,2,1)*wv,dim=1).unsqueeze(1)
-        spatial_weight=spatial_wz.reshape(b,1,h,w) #bs,1,h,w
+        # Spatial-only Self-Attention
+        spatial_wq = self.sp_wq(x1)  # bs,c,h,w
+        spatial_wq = self.agp(spatial_wq)  # bs,c,1,1
+        spatial_wq = spatial_wq.permute(0, 2, 3, 1).reshape(b, 1, c // self.squeeze)  # bs,1,c//2
+        spatial_wq = self.softmax_spatial(spatial_wq)
+        spatial_wz = torch.sum(spatial_wq.permute(0, 2, 1) * wv, dim=1).unsqueeze(1)
+        spatial_weight = spatial_wz.reshape(b, 1, h, w)  # bs,1,h,w
         # spatial_weight=self.sp_wz(spatial_weight)
 
-        out=(self.sigmoid(channel_weight)+self.sigmoid(spatial_weight))*x1
+        out = (self.sigmoid(channel_weight) + self.sigmoid(spatial_weight)) * x1
 
         return out
+
 
 class EncoderResNet(nn.Module):
     """
@@ -120,6 +151,7 @@ class EncoderResNet(nn.Module):
     third stage (layer3) to produce high-resolution feature maps suitable
     for object tracking.
     """
+
     def __init__(self, pretrained: bool = True) -> None:
         """
         Initialise the EncoderResNet.
@@ -132,7 +164,6 @@ class EncoderResNet(nn.Module):
         self.last_layer_channels = 1024
         self.model = self._load_model()
         self.layers = self._get_layers()
-
 
     def _load_model(self) -> Any:
         model = resnet50(pretrained=self.pretrained)
@@ -167,6 +198,7 @@ class EncoderResNet(nn.Module):
             encoder_maps.append(x)
         return encoder_maps
 
+
 class Encoder(nn.Module):
     """
     Lightweight FBNet-based feature encoder for small SiamABC variants.
@@ -174,6 +206,7 @@ class Encoder(nn.Module):
     Optimised for real-time inference on mobile or edge devices, this encoder
     uses an FBNet architecture to extract hierarchical features.
     """
+
     def __init__(self, pretrained: bool = True) -> None:
         """
         Initialise the Encoder.
@@ -186,11 +219,11 @@ class Encoder(nn.Module):
         self.model = self._load_model()
         self.stages = self._get_stages()
         self.encoder_channels = {
-           "layer0": 352,
-           "layer1": 112,
-           "layer2": 32,
-           "layer3": 24,
-           "layer4": 16,
+            "layer0": 352,
+            "layer1": 112,
+            "layer2": 32,
+            "layer3": 24,
+            "layer4": 16,
         }
 
     def _load_model(self) -> Any:
@@ -233,6 +266,7 @@ class ConvBlock(nn.Module):
     pointwise convolution, significantly reducing the parameter count and
     computational cost compared to standard convolutions.
     """
+
     def __init__(
         self,
         in_channels: int,
@@ -291,6 +325,7 @@ class AdjustLayer(nn.Module):
     target dimensionality, ensuring compatibility with the attention and
     regression heads.
     """
+
     def __init__(self, in_channels: int, out_channels: int, crop_rate: int = 4):
         """
         Initialise the AdjustLayer.
@@ -322,17 +357,21 @@ class AdjustLayer(nn.Module):
         adjust = x_ori
         return adjust
 
+
 class BoxTower(nn.Module):
     """
     Box Tower for FCOS regression
     """
+
     def __init__(
         self,
         towernum: int = 4,
         conv_block: str = "regular",
         inchannels: int = 512,
         outchannels: int = 256,
-        gaussian_map=False
+        gaussian_map=False,
+        inference_mode: bool = False,
+        norm_lambda: float = 0.1,
     ):
         """
         Initialise the BoxTower regression and classification head.
@@ -354,22 +393,24 @@ class BoxTower(nn.Module):
         # self.cls_dw = Correlation2xConcat(num_channels=outchannels, conv_block=conv_block)
         # self.reg_dw = Correlation2xConcat(num_channels=outchannels, conv_block=conv_block)
 
-        self.cls_dw = CorrelationConcatAtt(num_channels=outchannels)
-        self.reg_dw = CorrelationConcatAtt(num_channels=outchannels)
+        self.cls_dw = CorrelationConcatAtt(num_channels=outchannels,
+                                           inference_mode=inference_mode, norm_lambda=norm_lambda)
+        self.reg_dw = CorrelationConcatAtt(num_channels=outchannels,
+                                           inference_mode=inference_mode, norm_lambda=norm_lambda)
 
         # box pred head
         for i in range(4):
             tower.append(ConvBlock(outchannels, outchannels, kernel_size=3, stride=1, padding=1))
-            tower.append(nn.BatchNorm2d(outchannels))
+            tower.append(_make_norm(outchannels, inference_mode, norm_lambda))
             tower.append(nn.ReLU())
         # cls tower
         for i in range(towernum):
             cls_tower.append(ConvBlock(outchannels, outchannels, kernel_size=3, stride=1, padding=1))
-            cls_tower.append(nn.BatchNorm2d(outchannels))
+            cls_tower.append(_make_norm(outchannels, inference_mode, norm_lambda))
             cls_tower.append(nn.ReLU())
 
-        self.add_module("bbox_tower", nn.Sequential(*tower))
-        self.add_module("cls_tower", nn.Sequential(*cls_tower))
+        self.add_module("bbox_tower", AdaptiveSequential(*tower))
+        self.add_module("cls_tower", AdaptiveSequential(*cls_tower))
 
         # reg head
         self.bbox_pred = ConvBlock(outchannels, 4, kernel_size=3, stride=1, padding=1)
@@ -379,19 +420,7 @@ class BoxTower(nn.Module):
         self.adjust = nn.Parameter(0.1 * torch.ones(1))
         self.bias = nn.Parameter(torch.Tensor(1.0 * torch.ones(1, 4, 1, 1)))
 
-    def forward(self, search_org, search, kernel): #forward(self, search, dynamic, kernel):
-        """
-        Predict bounding boxes and classification scores for a search region.
-
-        Args:
-            search_org (torch.Tensor): Original search region features.
-            search (torch.Tensor): Attention-refined search features.
-            kernel (torch.Tensor): Attention-refined template features.
-
-        Returns:
-            Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-                (bbox_pred, cls_pred, correlation_map, regression_features).
-        """
+    def forward(self, search_org, search, kernel, lam: torch.Tensor):  # forward(self, search, dynamic, kernel):
 
         # encode first
         cls_z = kernel.reshape(kernel.size(0), kernel.size(1), -1)
@@ -401,19 +430,19 @@ class BoxTower(nn.Module):
         reg_x = self.reg_encode(search)
 
         # cls and reg DW
-        cls_dw = self.cls_dw(cls_z, cls_x, search_org )
-        reg_dw = self.reg_dw(reg_z, reg_x, search_org)
+        cls_dw = self.cls_dw(cls_z, cls_x, search_org, lam)
+        reg_dw = self.reg_dw(reg_z, reg_x, search_org, lam)
 
-
-        x_reg = self.bbox_tower(reg_dw)
+        x_reg = self.bbox_tower(reg_dw, lam)
         x = self.adjust * self.bbox_pred(x_reg) + self.bias
         x = torch.exp(x)
 
         # cls tower
-        c = self.cls_tower(cls_dw)
+        c = self.cls_tower(cls_dw, lam)
         cls = 0.1 * self.cls_pred(c)
 
         return x, cls, cls_dw, x_reg
+
 
 class EncodeBackbone(nn.Module):
     """
@@ -464,7 +493,6 @@ class CorrelationConcat(nn.Module):
         """
         super().__init__()
 
-
         in_size = num_channels + num_corr_channels
         self.enc = nn.Sequential(
             ConvBlock(in_size, num_channels, kernel_size=3, padding=1),
@@ -484,7 +512,6 @@ class CorrelationConcat(nn.Module):
         Returns:
             torch.Tensor: Combined correlation features.
         """
-
         b, c, w, h = x.size()
         s = torch.matmul(z.permute(0, 2, 1), x.view(b, c, -1)).view(b, -1, w, h)
         s = torch.cat([s, d], dim=1)
@@ -497,42 +524,23 @@ class CorrelationConcatAtt(nn.Module):
     Correlation module
     """
 
-    def __init__(self, num_channels: int, num_corr_channels: int = 64):
-        """
-        Initialise the CorrelationConcatAtt module.
-
-        Args:
-            num_channels (int): Output channel count.
-            num_corr_channels (int): Number of correlation map channels.
-        """
+    def __init__(self, num_channels: int, num_corr_channels: int = 64,
+                 inference_mode: bool = False, norm_lambda: float = 0.1):
         super().__init__()
 
-
         in_size = num_channels + num_corr_channels
-        self.enc = nn.Sequential(
+        self.enc = AdaptiveSequential(
             ConvBlock(in_size, num_channels, kernel_size=3, padding=1),
-            nn.BatchNorm2d(num_channels),
+            _make_norm(num_channels, inference_mode, norm_lambda),
             nn.ReLU(inplace=True),
         )
         # self.att = ParallelPolarizedSelfAttention(num_channels)
         self.att = FastParallelPolarizedSelfAttention(num_channels, 1)
 
-    def forward(self, z, x, d):
-        """
-        Perform correlation and apply polarized self-attention.
-
-        Args:
-            z (torch.Tensor): Template feature map (reshaped).
-            x (torch.Tensor): Search region feature map.
-            d (torch.Tensor): Original search features for residual connection.
-
-        Returns:
-            torch.Tensor: Attended correlation features.
-        """
-
+    def forward(self, z, x, d, lam: torch.Tensor):
         b, c, w, h = x.size()
         s = torch.matmul(z.permute(0, 2, 1), x.view(b, c, -1)).view(b, -1, w, h)
         s = torch.cat([s, d], dim=1)
-        s = self.enc(s)
+        s = self.enc(s, lam)
         s = self.att(s)
         return s

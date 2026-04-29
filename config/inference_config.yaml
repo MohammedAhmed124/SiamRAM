@@ -57,7 +57,7 @@ ram_tracker:
   yolo_conf: 0.3
   yolo_filter_class: false
   yolo_class_detect_frames: 5
-  copile_yolo: True
+  copile_yolo: False
   
   # Core Thresholds & Hysteresis
   conf_threshold: 0.55

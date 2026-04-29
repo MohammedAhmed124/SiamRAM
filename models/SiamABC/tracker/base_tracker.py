@@ -75,12 +75,6 @@ class Tracker(ABC):
 
     @staticmethod
     def _get_tracking_window(windowing: str, score_size: int) -> torch.Tensor:
-        """
-
-        :param windowing: str - window creation type
-        :param score_size: int - size of classification map
-        :return: window: np.array
-        """
         if windowing == "cosine":
             return torch.from_numpy(np.outer(np.hanning(score_size), np.hanning(score_size)))
         return torch.ones(int(score_size), int(score_size))
@@ -113,44 +107,34 @@ class Tracker(ABC):
         image: np.ndarray,
         transform: Optional[Callable[..., Any]] = None,
     ) -> torch.Tensor:
-        # Non-blocking CPU→GPU transfer
-        x = torch.from_numpy(
-            np.ascontiguousarray(image[:, :, :3].transpose(2, 0, 1))
-        ).unsqueeze(0).float()
-        x = x.to(self.cuda_id, non_blocking=True) / 255.0
-        # return (x - self._norm_mean) / self._norm_std
+        # Single CPU copy path:
+        #   torch.from_numpy shares memory (no copy).
+        #   .permute(2,0,1) changes strides only (no copy).
+        #   .unsqueeze(0) adds a dim (no copy).
+        #   .float() does the single necessary copy: uint8 HWC → float32 CHW.
+        #   .to(device) is the GPU transfer.
+        #
+        # Previous version called .copy() before transpose (1 extra CPU copy),
+        # then .float() (another copy) = 2 CPU copies total for every crop.
+        x = (
+            torch.from_numpy(image[:, :, :3])
+            .permute(2, 0, 1)
+            .unsqueeze(0)
+            .float()
+        )
+        x = x.to(self.cuda_id, non_blocking=True).div_(255.0)
         return x.sub_(self._norm_mean).div_(self._norm_std)
 
     def reset(self) -> None:
         self._template_features = None
 
     def initialize(self, image: NDArray, rect: NDArray, **kwargs) -> None:
-        """
-        args:
-            img(np.ndarray): RGB image
-            bbox(list): [x, y, width, height]
-                        x, y need to be 0-based
-        """
         pass
 
     def update(self, search: NDArray, *kw):
-        """
-        args:
-            img(np.ndarray): RGB image
-        return:
-            bbox(np.array):[x, y, width, height]
-        """
         return {"bbox": self.tracking_state.bbox}
 
     def _smooth_size(self, size: NDArray, prev_size: NDArray, lr: float) -> Tuple[float, float]:
-        """
-        Tracking smoothing logic matches the code of Siamese Tracking
-        https://www.robots.ox.ac.uk/~luca/siamese-fc.html
-        :param size: np.array([w, h]) - predicted bbox size
-        :param prev_size: np.array([w, h]) - bbox size on previous frame
-        :param lr: float - smoothing learning rate
-        :return: Tuple[float, float] - smoothed size
-        """
         size = size * lr
         prev_size = prev_size * (1 - lr)
         w = prev_size[0] + lr * (size[0] + prev_size[0])
@@ -175,7 +159,6 @@ class Tracker(ABC):
         prev_size = self.tracking_state.prev_size
         assert prev_size is not None
         r_max, c_max = decoded_info.pred_coords[0]
-        # size learning rate
         lr = (penalty[r_max, c_max] * cls_score[r_max, c_max] * self.tracking_config["lr"]).item()
 
         pred_size = np.array(pred_bbox[2:])
@@ -186,13 +169,6 @@ class Tracker(ABC):
     def _confidence_postprocess(
         self, cls_score: NDArray, regression_map: torch.Tensor
     ) -> tuple[NDArray, None, None] | tuple[Any, NDArray, Tensor]:
-        """
-
-        :param cls_score: torch.Tensor - classification score
-        :param pred_location: torch.Tensor - predicted locations
-        :param prev_size: np.array - size from previous frame
-        :return: penalty_score: np.ndarray - updated cls_score
-        """
         if not self.tracking_config.get("smooth", False):
             return cls_score, None, None
         prev_size = self.tracking_state.prev_size
@@ -203,9 +179,9 @@ class Tracker(ABC):
             self.box_coder.grid_y - regression_map[:, 1],
             self.box_coder.grid_x + regression_map[:, 2],
             self.box_coder.grid_y + regression_map[:, 3],
-        ], dim=1)  # shape [1,4,H,W]
+        ], dim=1)
 
-        pred_location = pred_location_[0]  # [4,H,W]
+        pred_location = pred_location_[0]
 
         s_c = limit(
             squared_size(pred_location[2] - pred_location[0], pred_location[3] - pred_location[1])

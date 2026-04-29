@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 from numpy._typing import NDArray
 from torch import Tensor
-
+import math
 from utils.box_coder import TrackerDecodeResult
 from utils.utils import limit, squared_size, to_device
 
@@ -94,6 +94,11 @@ class Tracker(ABC):
         return process
 
     def _rescale_bbox(self, bbox: np.array, padded_box) -> np.array:
+
+        if not all(math.isfinite(x) for x in [w_scale, h_scale] + list(bbox)):
+            return np.array([0, 0, 3, 3]) # Return a tiny valid box instead of crashing
+
+        bbox[2] = max(3, round(bbox[2] * w_scale))
         w_scale = padded_box[2] / self.tracking_config["instance_size"]
         h_scale = padded_box[3] / self.tracking_config["instance_size"]
         bbox[0] = round(bbox[0] * w_scale + padded_box[0])

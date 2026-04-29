@@ -17,39 +17,39 @@ from models.SiamRAM import SiamRAMTracker
 from utils.hydra import load_hydra_config_from_path
 from vis.test_model import run_inference
 
-with open("/home/moha/AIC-4/data_competition/metadata/contestant_manifest.json", "r") as f:
-    manifest = json.load(f)
-test_public_lb = manifest["public_lb"]
-manifest.keys()
 
+manifest_path = "/home/moha/AIC-4/data_competition/metadata/contestant_manifest.json"
 
-
-# 1. Setup Environment & Paths
 data_dir = "../../AIC-4/data_competition"
 outputs_dir = "outputs/SiamDAM__test"
 manifest_path = "/home/moha/AIC-4/data_competition/metadata/contestant_manifest.json"
 weights_path = "/home/moha/AIC-for submission/SiamRAM/checkpoints/head_epoch_000.pth"
 yaml_config_path = "config/inference_config.yaml" 
 
-# 2. Load Config & Initialize Tracker Once
-# (No need to reload/rebuild the model inside the loop unless you are changing weights)
+
+with open(manifest_path, "r") as f:
+    manifest = json.load(f)
+test_public_lb = manifest["public_lb"]
+manifest.keys()
+
+
+
+
+
 config = OmegaConf.load(yaml_config_path)
-config.model.model_size = 'M' # Or dynamic logic if needed
 
-# wrapped = get_trt_tracker(
-#     config=config,
-#     weights_path=weights_path,
-#     **config.trt_engine
-# )
+wrapped = get_trt_tracker(
+    config=config,
+    weights_path=weights_path,
+    **config.trt_engine
+)
 
-wrapped = get_tracker(config=config, weights_path=weights_path , lambda_tta=0.1 , continuous=False)
 
 tracker = SiamRAMTracker(
     siam_tracker=wrapped,
     **config.ram_tracker,
 )
 
-# 3. Load and Filter Manifest
 with open(manifest_path, "r") as f:
     manifest = json.load(f)
 
@@ -64,13 +64,11 @@ for i, (key, value) in enumerate(test_public_lb.items()):
     ann_path = os.path.join(data_dir, value["annotation_path"])
     output_path = os.path.join(outputs_dir, value["video_path"])
 
-    # Ensure output directory exists
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
     print(f"[{i+1}/{len(test_public_lb)}] Processing: {value['video_path']}")
     
     init_bbox = np.loadtxt(ann_path, delimiter=",", dtype=np.float32).tolist()
-    # Handle possible nested list from loadtxt
     if isinstance(init_bbox[0], list):
         init_bbox = init_bbox[0]
 
@@ -81,7 +79,6 @@ for i, (key, value) in enumerate(test_public_lb.items()):
         output_path=output_path
     )
 
-# 5. Generate Submission CSV
 print("\nCompiling submission.csv...")
 submission_df = defaultdict(list)
 

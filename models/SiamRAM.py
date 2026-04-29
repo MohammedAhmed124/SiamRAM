@@ -6,6 +6,7 @@ tracking (SiamABC) with a YOLO-based re-detection system and an Extended
 Kalman Filter (EKF) for motion modelling. It features a Dynamic Reference
 Memory (DRM) for reliable re-acquisition after long-term occlusion.
 """
+import os
 from collections import deque
 from typing import List, Optional, Tuple, TypedDict, cast
 
@@ -922,7 +923,7 @@ class SiamRAMTracker:
             drm_ok = drm_score >= self.app_match_threshold
             if self.debug:
                 print(f"[occ frame {self._occ_frames}] phase=siam  "
-                    f"score={score:.3f}  drm={drm_score:.3f}  pass={drm_ok}")
+                      f"score={score:.3f}  drm={drm_score:.3f}  pass={drm_ok}")
 
             if drm_ok:
                 self.recovered_early_occlusion = True
@@ -1055,7 +1056,7 @@ class SiamRAMTracker:
         if last_idx == -1:
             if self.debug:
                 print(f"[occ frame {self._occ_frames}] phase=final_drm  "
-                    f"no candidates in any collection frame — resetting")
+                      f"no candidates in any collection frame — resetting")
             _reset()
             return self.held_box, 0.0
 
@@ -1085,12 +1086,12 @@ class SiamRAMTracker:
                 f"fully_tracked={len(fully_tracked_bboxes)}  "
                 f"drm_size={self.memory.drm_size()}  ram={len(self.memory)}  "
                 f"ekf_unc={cast(BBoxEKF, self.ekf).get_uncertainty():.1f}px"
-        )
+            )
 
         if not fully_tracked_bboxes:
             if self.debug:
                 print(f"[occ frame {self._occ_frames}] phase=final_drm  "
-                    f"no fully-tracked candidates — resetting")
+                      f"no fully-tracked candidates — resetting")
             if last_cand_bboxes:
                 self.held_box = self._nudge_toward_nearest(frame, last_cand_bboxes)
                 ekf = self.ekf
@@ -2492,7 +2493,7 @@ class SiamRAMTracker:
             self._class_warmup_done = True
             if self.debug:
                 print(f"[class filter] target class locked: {best_cls}  "
-                    f"(votes={votes})")
+                      f"(votes={votes})")
 
     def _is_near_exit_edge(
         self,
@@ -2525,7 +2526,6 @@ class SiamRAMTracker:
             return cy <= h_fr * fraction
 
         return True
-
 
     def load_yolo_compiled(self, weights_path, force_recompile=False):
         engine_path = weights_path.replace(".pt", ".engine")

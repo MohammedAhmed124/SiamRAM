@@ -7,9 +7,36 @@ from torch import nn
 
 
 class AdaptiveBatchNorm(nn.BatchNorm2d):
+    """
+    Adaptive Batch Normalisation (ABN) layer for Test-Time Adaptation (TTA).
+
+    ABN extends standard BatchNorm2d by allowing the blending of running
+    statistics (calculated during training) with batch statistics (calculated
+    during inference). This allows the model to adapt to distribution shifts
+    in the search region or template during tracking.
+
+    The blending is controlled by a 'lambda' parameter:
+        μ_eff = λ * μ_batch + (1 - λ) * μ_running
+        σ_eff = λ * σ_batch + (1 - λ) * σ_running
+
+    When λ = 0, it behaves like standard inference BN.
+    When λ > 0, it incorporates local batch statistics.
+    """
     def __init__(self, num_features, eps=1e-5, momentum=0.1,
                  affine=True, track_running_stats=True,
                  contineous=False, norm_lambda=0.1):
+        """
+        Initialise the AdaptiveBatchNorm layer.
+
+        Args:
+            num_features (int): Number of channels in the input tensor.
+            eps (float): Small constant for numerical stability.
+            momentum (float): Momentum factor for running stats updates.
+            affine (bool): Whether to use learnable scale and shift parameters.
+            track_running_stats (bool): Whether to track running mean and variance.
+            contineous (bool): Reserved for future use in continuous adaptation.
+            norm_lambda (float): Default blending factor for Test-Time Adaptation.
+        """
         super().__init__(num_features, eps, momentum, affine, track_running_stats)
         self.contineous = contineous
         self._norm_lambda = norm_lambda
@@ -17,16 +44,38 @@ class AdaptiveBatchNorm(nn.BatchNorm2d):
         self.register_buffer('_lam', torch.tensor(norm_lambda, dtype=torch.float32))
 
     def enable_tta(self):
+        """
+        Enable Test-Time Adaptation by setting the blending factor to norm_lambda.
+        """
         self._lam.fill_(self._norm_lambda)
 
     def disable_tta(self):
+        """
+        Disable Test-Time Adaptation by setting the blending factor to 0.0.
+        """
         self._lam.fill_(0.0)
 
     @property
     def tta_enabled(self) -> bool:
+        """
+        Return whether Test-Time Adaptation is currently enabled.
+        """
         return self._lam.item() > 0.0
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Pass the input through the AdaptiveBatchNorm layer.
+
+        In training mode, this behaves as standard Batch Normalisation.
+        In evaluation mode, it blends the running statistics with the current
+        batch statistics if TTA is enabled.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape (B, C, H, W).
+
+        Returns:
+            torch.Tensor: Normalised output tensor.
+        """
         self._check_input_dim(x)
 
         # Training path — standard BN, untouched
@@ -59,6 +108,14 @@ class AdaptiveBatchNorm(nn.BatchNorm2d):
 
 
 def replace_layers_adaptive_bn(model, norm_lambda, continuous):
+    """
+    Recursively replace BatchNorm2d layers in a model with AdaptiveBatchNorm.
+
+    Args:
+        model (nn.Module): The model or submodule to process.
+        norm_lambda (float): Blending factor for the new ABN layers.
+        continuous (bool): Whether to enable continuous adaptation (reserved).
+    """
     for name, module in model.named_children():
 
         if len(list(module.children())) > 0:

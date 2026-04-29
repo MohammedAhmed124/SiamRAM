@@ -1,3 +1,10 @@
+"""
+Extended Kalman Filter (EKF) for bounding box motion modelling.
+
+This module provides a constant-velocity EKF that tracks the center
+coordinates of a bounding box. It supports camera motion compensation
+via homography matrices and provides uncertainty estimates.
+"""
 from typing import Optional
 
 import numpy as np
@@ -15,6 +22,15 @@ class BBoxEKF:
 
     def __init__(self, bbox, process_noise: float = 2.0, meas_noise: float = 5.0,
                  vel_window: int = 100):
+        """
+        Initialise the BBoxEKF.
+
+        Args:
+            bbox (NDArray): Initial bounding box [x1, y1, w, h].
+            process_noise (float): Process noise covariance scalar.
+            meas_noise (float): Measurement noise covariance scalar.
+            vel_window (int): Legacy window parameter (unused).
+        """
         x1, y1, w, h = bbox
         cx = float(x1 + w / 2.0)
         cy = float(y1 + h / 2.0)
@@ -52,6 +68,13 @@ class BBoxEKF:
         return F
 
     def predict(self, H: Optional[np.ndarray] = None, H_reliable: bool = False):
+        """
+        Perform the EKF prediction step.
+
+        Args:
+            H (Optional[np.ndarray]): Homography matrix for camera motion.
+            H_reliable (bool): Whether the homography is reliable.
+        """
         cx, cy = self.x[0], self.x[1]
         if H is not None and H_reliable:
             denom = H[2, 0] * cx + H[2, 1] * cy + H[2, 2]
@@ -66,6 +89,12 @@ class BBoxEKF:
         self.P = F @ self.P @ F.T + self.Q
 
     def update(self, bbox):
+        """
+        Perform the EKF update step with a new measurement.
+
+        Args:
+            bbox (NDArray): Measured bounding box [x, y, w, h].
+        """
         x1, y1, w, h = bbox
         cx = float(x1 + w / 2.0)
         cy = float(y1 + h / 2.0)
@@ -80,6 +109,12 @@ class BBoxEKF:
         self.P = I_KH @ self.P
 
     def get_bbox(self) -> np.ndarray:
+        """
+        Return the current predicted bounding box.
+
+        Returns:
+            np.ndarray: Bounding box [x, y, w, h].
+        """
         cx, cy = self.x[0], self.x[1]
         x1 = cx - self._bw / 2.0
         y1 = cy - self._bh / 2.0
@@ -88,12 +123,31 @@ class BBoxEKF:
                          max(1, int(self._bh))], dtype=int)
 
     def get_velocity(self) -> np.ndarray:
+        """
+        Return the current estimated velocity.
+
+        Returns:
+            np.ndarray: Velocity vector [vx, vy].
+        """
         return self.x[2:4].copy()
 
     def get_uncertainty(self) -> float:
+        """
+        Return the average uncertainty (standard deviation) of the position.
+
+        Returns:
+            float: Uncertainty value.
+        """
         return float(np.sqrt(np.diag(self.P[:2]).mean()))
 
     def reseed(self, bbox, velocity: np.ndarray):
+        """
+        Reset the EKF state with a new position and velocity.
+
+        Args:
+            bbox (NDArray): New bounding box.
+            velocity (np.ndarray): New velocity vector.
+        """
         x1, y1, w, h = bbox
         self.x[0] = float(x1 + w / 2.0)
         self.x[1] = float(y1 + h / 2.0)
@@ -104,6 +158,12 @@ class BBoxEKF:
         self.P = np.diag([25., 25., 40., 40.]).astype(float)
 
     def nudge_position(self, bbox):
+        """
+        Adjust the EKF position without affecting velocity.
+
+        Args:
+            bbox (NDArray): New bounding box.
+        """
         x1, y1, w, h = bbox
         self.x[0] = float(x1 + w / 2.0)
         self.x[1] = float(y1 + h / 2.0)

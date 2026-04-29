@@ -311,8 +311,10 @@ class SiamRAMTracker:
         self.ekf: Optional[BBoxEKF] = None
         self._last_H: Optional[np.ndarray] = None
         self._last_H_reliable: bool = False
+        self._FLOW_LONG_EDGE = 1000
 
-        self._flow_scale = 0.5
+
+
         self._cached_pts: Optional[np.ndarray] = None
         self._cached_shape: Optional[tuple[int, int]] = None
 
@@ -391,6 +393,10 @@ class SiamRAMTracker:
         self._cam_vel_history.clear()
         if desc is not None:
             self.memory.try_admit(bbox, desc, bbox)
+
+
+        h_fr, w_fr = frame.shape[:2]
+        self._flow_scale = min(0.5, self._FLOW_LONG_EDGE / max(h_fr, w_fr))
 
     def update(self, frame: np.ndarray) -> Tuple[np.ndarray, float, bool, List]:
         """
@@ -2533,7 +2539,7 @@ class SiamRAMTracker:
 
     @property
     def running_dynamic_image(self):
-        return self.tracker.running_dynamic_image
+        return self.tracker.running_dynamic_crop
 
     @property
     def tracking_config(self):

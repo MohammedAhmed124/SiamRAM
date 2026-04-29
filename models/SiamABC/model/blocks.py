@@ -217,84 +217,6 @@ class AdjustLayer(nn.Module):
         adjust = x_ori
         return adjust
 
-# class BoxTower(nn.Module):
-#     """
-#     Box Tower for FCOS regression
-#     """
-#     def __init__(
-#         self,
-#         towernum: int = 4,
-#         conv_block: str = "regular",
-#         inchannels: int = 512,
-#         outchannels: int = 256,
-#         gaussian_map=False,
-#         inference_mode: bool = False,
-#         norm_lambda: float = 0.1,
-#     ):
-#         super().__init__()
-#         tower = []
-#         cls_tower = []
-#         # encode backbone
-#         self.cls_encode = EncodeBackbone(in_channels=inchannels, out_channels=outchannels, conv_block=conv_block)
-#         self.reg_encode = EncodeBackbone(in_channels=inchannels, out_channels=outchannels, conv_block=conv_block)
-
-#         # self.cls_dw = Correlation2xConcat(num_channels=outchannels, conv_block=conv_block)
-#         # self.reg_dw = Correlation2xConcat(num_channels=outchannels, conv_block=conv_block)
-
-#         self.cls_dw = CorrelationConcatAtt(num_channels=outchannels,
-#                                            inference_mode=inference_mode, norm_lambda=norm_lambda)
-#         self.reg_dw = CorrelationConcatAtt(num_channels=outchannels,
-#                                            inference_mode=inference_mode, norm_lambda=norm_lambda)
-
-#         # box pred head
-#         for i in range(4):
-#             tower.append(ConvBlock(outchannels, outchannels, kernel_size=3, stride=1, padding=1))
-#             tower.append(_make_norm(outchannels, inference_mode, norm_lambda))
-#             tower.append(nn.ReLU())
-#         # cls tower
-#         for i in range(towernum):
-#             cls_tower.append(ConvBlock(outchannels, outchannels, kernel_size=3, stride=1, padding=1))
-#             cls_tower.append(_make_norm(outchannels, inference_mode, norm_lambda))
-#             cls_tower.append(nn.ReLU())
-
-#         self.add_module("bbox_tower", AdaptiveSequential(*tower))
-#         self.add_module("cls_tower", AdaptiveSequential(*cls_tower))
-
-#         # reg head
-#         self.bbox_pred = ConvBlock(outchannels, 4, kernel_size=3, stride=1, padding=1)
-#         self.cls_pred = ConvBlock(outchannels, 1, kernel_size=3, stride=1, padding=1)
-
-#         # adjust scale
-#         self.adjust = nn.Parameter(0.1 * torch.ones(1))
-#         self.bias = nn.Parameter(torch.Tensor(1.0 * torch.ones(1, 4, 1, 1)))
-
-#     def forward(self, search_org, search, kernel, lam: torch.Tensor): #forward(self, search, dynamic, kernel):
-
-#         # encode first
-#         cls_z = kernel.reshape(kernel.size(0), kernel.size(1), -1)
-#         cls_x = self.cls_encode(search)
-
-#         reg_z = kernel.reshape(kernel.size(0), kernel.size(1), -1)
-#         reg_x = self.reg_encode(search)
-
-#         # cls and reg DW
-#         cls_dw = self.cls_dw(cls_z, cls_x, search_org, lam)
-#         reg_dw = self.reg_dw(reg_z, reg_x, search_org, lam)
-
-#         x_reg = self.bbox_tower(reg_dw, lam)
-#         x = self.adjust * self.bbox_pred(x_reg) + self.bias
-#         x = torch.exp(x)
-
-#         # cls tower
-#         c = self.cls_tower(cls_dw, lam)
-#         cls = 0.1 * self.cls_pred(c)
-
-#         return x, cls, cls_dw, x_reg
-
-
-
-
-
 class BoxTower(nn.Module):
     """
     Box Tower for FCOS regression
@@ -323,10 +245,6 @@ class BoxTower(nn.Module):
                                            inference_mode=inference_mode, norm_lambda=norm_lambda)
         self.reg_dw = CorrelationConcatAtt(num_channels=outchannels,
                                            inference_mode=inference_mode, norm_lambda=norm_lambda)
-        
-
-        # self._cls_stream = torch.cuda.Stream()
-        # self._reg_stream = torch.cuda.Stream()
 
         # box pred head
         for i in range(4):
@@ -350,30 +268,112 @@ class BoxTower(nn.Module):
         self.adjust = nn.Parameter(0.1 * torch.ones(1))
         self.bias = nn.Parameter(torch.Tensor(1.0 * torch.ones(1, 4, 1, 1)))
 
-    def forward(self, search_org, search, kernel, lam: torch.Tensor):
+    def forward(self, search_org, search, kernel, lam: torch.Tensor): #forward(self, search, dynamic, kernel):
 
-        if not hasattr(self, '_cls_stream'):
-            self._cls_stream = torch.cuda.Stream()
-            self._reg_stream = torch.cuda.Stream()
-        z = kernel.reshape(kernel.size(0), kernel.size(1), -1)
+        # encode first
+        cls_z = kernel.reshape(kernel.size(0), kernel.size(1), -1)
+        cls_x = self.cls_encode(search)
 
-        with torch.cuda.stream(self._cls_stream):
-            cls_x  = self.cls_encode(search)
-            cls_dw = self.cls_dw(z, cls_x, search_org, lam)
-            c      = self.cls_tower(cls_dw, lam)
-            cls    = 0.1 * self.cls_pred(c)
+        reg_z = kernel.reshape(kernel.size(0), kernel.size(1), -1)
+        reg_x = self.reg_encode(search)
 
-        with torch.cuda.stream(self._reg_stream):
-            reg_x  = self.reg_encode(search)
-            reg_dw = self.reg_dw(z, reg_x, search_org, lam)
-            x_reg  = self.bbox_tower(reg_dw, lam)
-            x      = self.adjust * self.bbox_pred(x_reg) + self.bias
-            x      = torch.exp(x)
+        # cls and reg DW
+        cls_dw = self.cls_dw(cls_z, cls_x, search_org, lam)
+        reg_dw = self.reg_dw(reg_z, reg_x, search_org, lam)
 
-        torch.cuda.current_stream().wait_stream(self._cls_stream)
-        torch.cuda.current_stream().wait_stream(self._reg_stream)
+        x_reg = self.bbox_tower(reg_dw, lam)
+        x = self.adjust * self.bbox_pred(x_reg) + self.bias
+        x = torch.exp(x)
+
+        # cls tower
+        c = self.cls_tower(cls_dw, lam)
+        cls = 0.1 * self.cls_pred(c)
 
         return x, cls, cls_dw, x_reg
+
+
+
+
+
+# class BoxTower(nn.Module):
+#     """
+#     Box Tower for FCOS regression
+#     """
+#     def __init__(
+#         self,
+#         towernum: int = 4,
+#         conv_block: str = "regular",
+#         inchannels: int = 512,
+#         outchannels: int = 256,
+#         gaussian_map=False,
+#         inference_mode: bool = False,
+#         norm_lambda: float = 0.1,
+#     ):
+#         super().__init__()
+#         tower = []
+#         cls_tower = []
+#         # encode backbone
+#         self.cls_encode = EncodeBackbone(in_channels=inchannels, out_channels=outchannels, conv_block=conv_block)
+#         self.reg_encode = EncodeBackbone(in_channels=inchannels, out_channels=outchannels, conv_block=conv_block)
+
+#         # self.cls_dw = Correlation2xConcat(num_channels=outchannels, conv_block=conv_block)
+#         # self.reg_dw = Correlation2xConcat(num_channels=outchannels, conv_block=conv_block)
+
+#         self.cls_dw = CorrelationConcatAtt(num_channels=outchannels,
+#                                            inference_mode=inference_mode, norm_lambda=norm_lambda)
+#         self.reg_dw = CorrelationConcatAtt(num_channels=outchannels,
+#                                            inference_mode=inference_mode, norm_lambda=norm_lambda)
+        
+
+#         # self._cls_stream = torch.cuda.Stream()
+#         # self._reg_stream = torch.cuda.Stream()
+
+#         # box pred head
+#         for i in range(4):
+#             tower.append(ConvBlock(outchannels, outchannels, kernel_size=3, stride=1, padding=1))
+#             tower.append(_make_norm(outchannels, inference_mode, norm_lambda))
+#             tower.append(nn.ReLU())
+#         # cls tower
+#         for i in range(towernum):
+#             cls_tower.append(ConvBlock(outchannels, outchannels, kernel_size=3, stride=1, padding=1))
+#             cls_tower.append(_make_norm(outchannels, inference_mode, norm_lambda))
+#             cls_tower.append(nn.ReLU())
+
+#         self.add_module("bbox_tower", AdaptiveSequential(*tower))
+#         self.add_module("cls_tower", AdaptiveSequential(*cls_tower))
+
+#         # reg head
+#         self.bbox_pred = ConvBlock(outchannels, 4, kernel_size=3, stride=1, padding=1)
+#         self.cls_pred = ConvBlock(outchannels, 1, kernel_size=3, stride=1, padding=1)
+
+#         # adjust scale
+#         self.adjust = nn.Parameter(0.1 * torch.ones(1))
+#         self.bias = nn.Parameter(torch.Tensor(1.0 * torch.ones(1, 4, 1, 1)))
+
+#     def forward(self, search_org, search, kernel, lam: torch.Tensor):
+
+#         if not hasattr(self, '_cls_stream'):
+#             self._cls_stream = torch.cuda.Stream()
+#             self._reg_stream = torch.cuda.Stream()
+#         z = kernel.reshape(kernel.size(0), kernel.size(1), -1)
+
+#         with torch.cuda.stream(self._cls_stream):
+#             cls_x  = self.cls_encode(search)
+#             cls_dw = self.cls_dw(z, cls_x, search_org, lam)
+#             c      = self.cls_tower(cls_dw, lam)
+#             cls    = 0.1 * self.cls_pred(c)
+
+#         with torch.cuda.stream(self._reg_stream):
+#             reg_x  = self.reg_encode(search)
+#             reg_dw = self.reg_dw(z, reg_x, search_org, lam)
+#             x_reg  = self.bbox_tower(reg_dw, lam)
+#             x      = self.adjust * self.bbox_pred(x_reg) + self.bias
+#             x      = torch.exp(x)
+
+#         torch.cuda.current_stream().wait_stream(self._cls_stream)
+#         torch.cuda.current_stream().wait_stream(self._reg_stream)
+
+#         return x, cls, cls_dw, x_reg
 
 class EncodeBackbone(nn.Module):
     """

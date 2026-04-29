@@ -74,9 +74,9 @@ name = "anyio"
 version = "4.13.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "exceptiongroup" },
+    { name = "exceptiongroup", marker = "python_full_version == '3.10.*'" },
     { name = "idna" },
-    { name = "typing-extensions" },
+    { name = "typing-extensions", marker = "python_full_version == '3.10.*'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/19/14/2c5dd9f512b66549ae92767a9c7b330ae88e1932ca57876909410251fe13/anyio-4.13.0.tar.gz", hash = "sha256:334b70e641fd2221c1505b3890c69882fe4a2df910cba14d97019b90b24439dc", size = 231622, upload-time = "2026-03-24T12:59:09.671Z" }
 wheels = [
@@ -417,6 +417,15 @@ wheels = [
 ]
 
 [[package]]
+name = "dllist"
+version = "2.0.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/b2/ce/dda13123329d55555de67b414206f14f4f80b96cb273ec59d76d5ce6b5c3/dllist-2.0.0.tar.gz", hash = "sha256:7413ba963aaa1b2b6827eadd7908e40e635b19108ab431667485eaf75c492bf4", size = 5369, upload-time = "2025-02-10T15:41:07.637Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7b/07/a212ca4cfe56fa35c8315307e37df218e5946c726a792b5c7a795b245c10/dllist-2.0.0-py3-none-any.whl", hash = "sha256:cd307b1a91bc46fae084f8c817d79be7e34951b149a2fd69004772e03573bfb3", size = 5721, upload-time = "2025-02-10T15:41:06.045Z" },
+]
+
+[[package]]
 name = "easydict"
 version = "1.13"
 source = { registry = "https://pypi.org/simple" }
@@ -439,7 +448,7 @@ name = "exceptiongroup"
 version = "1.3.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "typing-extensions" },
+    { name = "typing-extensions", marker = "python_full_version == '3.10.*'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/50/79/66800aadf48771f6b62f7eb014e352e5d06856655206165d775e675a02c9/exceptiongroup-1.3.1.tar.gz", hash = "sha256:8b412432c6055b0b7d14c310000ae93352ed6754f70fa8f7c34141f91c4e3219", size = 30371, upload-time = "2025-11-21T23:01:54.787Z" }
 wheels = [
@@ -511,7 +520,7 @@ dependencies = [
     { name = "filelock" },
     { name = "requests", extra = ["socks"] },
     { name = "tqdm" },
-    { name = "typing-extensions" },
+    { name = "typing-extensions", marker = "python_full_version == '3.10.*'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/72/01/9e0280ba321f73295374765dc3c0b1e03058188a592a48a321376f9eb092/gdown-6.0.0.tar.gz", hash = "sha256:1f1f735a174ef3599fca95786aafac1219b9d85d4c729ccb95e674996c47fd44", size = 262729, upload-time = "2026-04-12T06:37:40.182Z" }
 wheels = [
@@ -634,7 +643,7 @@ name = "humanfriendly"
 version = "10.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pyreadline3", marker = "sys_platform == 'win32'" },
+    { name = "pyreadline3", marker = "python_full_version == '3.10.*' and sys_platform == 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/cc/3f/2c29224acb2e2df4d2046e4c73ee2662023c58ff5b113c4c1adac0886c43/humanfriendly-10.0.tar.gz", hash = "sha256:6b0b831ce8f15f7300721aa49829fc4e83921a9a301cc7f606be6686a2288ddc", size = 360702, upload-time = "2021-09-17T21:40:43.31Z" }
 wheels = [
@@ -719,7 +728,7 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "colorama", marker = "sys_platform == 'win32'" },
     { name = "decorator" },
-    { name = "exceptiongroup" },
+    { name = "exceptiongroup", marker = "python_full_version == '3.10.*'" },
     { name = "jedi" },
     { name = "matplotlib-inline" },
     { name = "pexpect", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
@@ -727,7 +736,7 @@ dependencies = [
     { name = "pygments" },
     { name = "stack-data" },
     { name = "traitlets" },
-    { name = "typing-extensions" },
+    { name = "typing-extensions", marker = "python_full_version == '3.10.*'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/40/18/f8598d287006885e7136451fdea0755af4ebcbfe342836f24deefaed1164/ipython-8.39.0.tar.gz", hash = "sha256:4110ae96012c379b8b6db898a07e186c40a2a1ef5d57a7fa83166047d9da7624", size = 5513971, upload-time = "2026-03-27T10:02:13.94Z" }
 wheels = [
@@ -1342,7 +1351,7 @@ name = "opencv-python"
 version = "4.13.0.92"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy" },
+    { name = "numpy", marker = "python_full_version == '3.10.*'" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/fc/6f/5a28fef4c4a382be06afe3938c64cc168223016fa520c5abaf37e8862aa5/opencv_python-4.13.0.92-cp37-abi3-macosx_13_0_arm64.whl", hash = "sha256:caf60c071ec391ba51ed00a4a920f996d0b64e3e46068aac1f646b5de0326a19", size = 46247052, upload-time = "2026-02-05T07:01:25.046Z" },
@@ -1360,7 +1369,7 @@ name = "opencv-python-headless"
 version = "4.13.0.92"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy" },
+    { name = "numpy", marker = "python_full_version == '3.10.*'" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/79/42/2310883be3b8826ac58c3f2787b9358a2d46923d61f88fedf930bc59c60c/opencv_python_headless-4.13.0.92-cp37-abi3-macosx_13_0_arm64.whl", hash = "sha256:1a7d040ac656c11b8c38677cc8cccdc149f98535089dbe5b081e80a4e5903209", size = 46247192, upload-time = "2026-02-05T07:01:35.187Z" },
@@ -1396,7 +1405,7 @@ name = "pandas"
 version = "2.3.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy" },
+    { name = "numpy", marker = "python_full_version == '3.10.*'" },
     { name = "python-dateutil" },
     { name = "pytz" },
     { name = "tzdata" },
@@ -1490,7 +1499,7 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pastel" },
     { name = "pyyaml" },
-    { name = "tomli" },
+    { name = "tomli", marker = "python_full_version == '3.10.*'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/a1/a4/e487662f12a5ecd2ac4d77f7697e4bda481953bb80032b158e5ab55173d4/poethepoet-0.44.0.tar.gz", hash = "sha256:c2667b513621788fb46482e371cdf81c0b04344e0e0bcb7aa8af45f84c2fce7b", size = 96040, upload-time = "2026-04-06T19:40:58.908Z" }
 wheels = [
@@ -2051,6 +2060,8 @@ gpu = [
     { name = "torch", version = "2.11.0", source = { registry = "https://pypi.org/simple" }, marker = "'cpu' not in dependency_groups and 'gpu' not in dependency_groups" },
     { name = "torch", version = "2.11.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "(sys_platform == 'linux' and 'cpu' in dependency_groups and 'gpu' not in dependency_groups) or (sys_platform == 'win32' and 'cpu' in dependency_groups and 'gpu' not in dependency_groups)" },
     { name = "torch", version = "2.11.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "'gpu' in dependency_groups" },
+    { name = "torch-tensorrt", version = "2.11.0", source = { registry = "https://pypi.org/simple" }, marker = "'gpu' not in dependency_groups" },
+    { name = "torch-tensorrt", version = "2.11.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "'gpu' in dependency_groups" },
     { name = "torchvision", version = "0.26.0", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'linux' and sys_platform != 'win32' and 'cpu' in dependency_groups and 'gpu' not in dependency_groups" },
     { name = "torchvision", version = "0.26.0", source = { registry = "https://pypi.org/simple" }, marker = "'cpu' not in dependency_groups and 'gpu' not in dependency_groups" },
     { name = "torchvision", version = "0.26.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "(sys_platform == 'linux' and 'cpu' in dependency_groups and 'gpu' not in dependency_groups) or (sys_platform == 'win32' and 'cpu' in dependency_groups and 'gpu' not in dependency_groups)" },
@@ -2116,6 +2127,8 @@ gpu = [
     { name = "torch", marker = "'cpu' not in dependency_groups and 'gpu' not in dependency_groups", specifier = "==2.11.0" },
     { name = "torch", marker = "'cpu' in dependency_groups and 'gpu' not in dependency_groups", specifier = "==2.11.0", index = "https://download.pytorch.org/whl/cpu" },
     { name = "torch", marker = "'gpu' in dependency_groups", specifier = "==2.11.0", index = "https://download.pytorch.org/whl/cu128" },
+    { name = "torch-tensorrt", marker = "'gpu' in dependency_groups", specifier = "==2.11.0", index = "https://download.pytorch.org/whl/cu128" },
+    { name = "torch-tensorrt", marker = "'gpu' not in dependency_groups", specifier = "==2.11.0" },
     { name = "torchvision", marker = "'cpu' not in dependency_groups and 'gpu' not in dependency_groups", specifier = "==0.26.0" },
     { name = "torchvision", marker = "'cpu' in dependency_groups and 'gpu' not in dependency_groups", specifier = "==0.26.0", index = "https://download.pytorch.org/whl/cpu" },
     { name = "torchvision", marker = "'gpu' in dependency_groups", specifier = "==0.26.0", index = "https://download.pytorch.org/whl/cu128" },
@@ -2259,6 +2272,66 @@ sdist = { url = "https://files.pythonhosted.org/packages/48/a9/fc520ea91ab1f3ba5
 wheels = [
     { url = "https://files.pythonhosted.org/packages/87/0f/69fbab4c30b2f3a76e6de67585ea72a8eccf381751f5c0046b966fde9658/tensorboardx-2.6.5-py3-none-any.whl", hash = "sha256:c10b891d00af306537cb8b58a039b2ba41571f0da06f433a41c4ca8d6abe1373", size = 87510, upload-time = "2026-04-03T15:40:22.111Z" },
 ]
+
+[[package]]
+name = "tensorrt"
+version = "10.15.1.29"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "tensorrt-cu13" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/29/8d/1b3ea6493ee07d221fdf655a936f6b9d7c4bebfad7c0fdb879440a4172ad/tensorrt-10.15.1.29.tar.gz", hash = "sha256:a78fb34aee9695b81a7485ac0648859b802ff1faaac4bde743d9c51d7493204b", size = 16701, upload-time = "2026-01-30T07:40:25.93Z" }
+
+[[package]]
+name = "tensorrt-cu12"
+version = "10.15.1.29"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "tensorrt-cu12-bindings", marker = "'gpu' in dependency_groups" },
+    { name = "tensorrt-cu12-libs", marker = "'gpu' in dependency_groups" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/57/a7/c8d81de98428c7dd67b5b9df0e1ea21c497661b4703f946e8d84b39ad76e/tensorrt_cu12-10.15.1.29.tar.gz", hash = "sha256:d28acc4d14804cac0b50c0c1fc58c0d25cb974aa4c53cda5cfd8c4a4154c45fe", size = 19096, upload-time = "2026-01-30T07:44:47.652Z" }
+
+[[package]]
+name = "tensorrt-cu12-bindings"
+version = "10.15.1.29"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/90/c4/dc079a032a29d5a216210c741f4c8ce8bc550a69ed50f9a5eff1266de25e/tensorrt_cu12_bindings-10.15.1.29-cp310-none-manylinux_2_28_x86_64.whl", hash = "sha256:1c108b0645452955c23b9e3fd7610af183dccf8ca5e5374be7f694161f604008", size = 1141114, upload-time = "2026-01-29T21:16:03.578Z" },
+    { url = "https://files.pythonhosted.org/packages/7e/48/aff0384984df819d049a2318e4236e24a5dbbe12f3be4d80783ad90e14a6/tensorrt_cu12_bindings-10.15.1.29-cp310-none-win_amd64.whl", hash = "sha256:ed8155c4feba035813c0f0ef59fa7ad207bc0f6b8264d0f609a037c51d99cba1", size = 890375, upload-time = "2026-01-29T21:15:17.112Z" },
+]
+
+[[package]]
+name = "tensorrt-cu12-libs"
+version = "10.15.1.29"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/52/b0/2306f25ea0893d0080091c75b5df55d5e0580183293b4839d66f1fcab457/tensorrt_cu12_libs-10.15.1.29.tar.gz", hash = "sha256:b2a4ad7d46e6f1a43bb413cd8efc8ecd511a365beccd75515db5f65dacab6119", size = 681, upload-time = "2026-01-29T21:13:21.179Z" }
+
+[[package]]
+name = "tensorrt-cu13"
+version = "10.15.1.29"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "tensorrt-cu13-bindings" },
+    { name = "tensorrt-cu13-libs" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/1b/0b/ff3683ddf1960227fb2c6210e92ab83c26eda92091046c123d8dfc1adc93/tensorrt_cu13-10.15.1.29.tar.gz", hash = "sha256:60edcdf1a68526732ea613c309283af036f418f6ebcbc8e18d24566b74d776e0", size = 19084, upload-time = "2026-01-30T07:42:55.055Z" }
+
+[[package]]
+name = "tensorrt-cu13-bindings"
+version = "10.15.1.29"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f2/a9/a1c15fb4472f8d5a0cc9b24075dd14f00c69bd1d1f37dc4b8c685a2269f4/tensorrt_cu13_bindings-10.15.1.29-cp310-none-manylinux_2_28_x86_64.whl", hash = "sha256:af6a18dfe937d801474dbcf4a511771dc83991be9b2b1ef1cf519b8b631def46", size = 1141114, upload-time = "2026-01-29T21:00:43.909Z" },
+    { url = "https://files.pythonhosted.org/packages/08/ac/11352689bb6562a41cdd0d1a6671e36cd8d2bdc55b651078868ea1b82ef0/tensorrt_cu13_bindings-10.15.1.29-cp310-none-manylinux_2_35_aarch64.whl", hash = "sha256:04f4db7e418c24d913bb5c21a745b066747d80ec8fabe0921b70a259af284b83", size = 1152064, upload-time = "2026-01-29T21:00:55.526Z" },
+    { url = "https://files.pythonhosted.org/packages/fc/e3/577f9efa52a3191fbc8c13541ff0fbaa9c829c606ca0014ba279e47363c2/tensorrt_cu13_bindings-10.15.1.29-cp310-none-win_amd64.whl", hash = "sha256:5942b7b1fff3a7c1079e13e861766e86bf28825263debfd53333fbde286d692e", size = 890381, upload-time = "2026-01-29T20:59:30.766Z" },
+]
+
+[[package]]
+name = "tensorrt-cu13-libs"
+version = "10.15.1.29"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/1a/dd/745dacecd032db5720e8bacfbbb436319eb49b621142414b3abf19cafd9a/tensorrt_cu13_libs-10.15.1.29.tar.gz", hash = "sha256:d07fe8b65ce7edb94e805d0b6e9653afe742610b7d5e1b270c918bc9e58a36b1", size = 681, upload-time = "2026-01-29T20:58:43.318Z" }
 
 [[package]]
 name = "termcolor"
@@ -2414,6 +2487,61 @@ wheels = [
     { url = "https://download-r2.pytorch.org/whl/cu128/torch-2.11.0%2Bcu128-cp310-cp310-manylinux_2_28_aarch64.whl", hash = "sha256:5ac6e34681d5a0e527edb741b38254899cd03087a7dd7e841791a4ee0a5e7011", upload-time = "2026-04-27T17:32:32Z" },
     { url = "https://download-r2.pytorch.org/whl/cu128/torch-2.11.0%2Bcu128-cp310-cp310-manylinux_2_28_x86_64.whl", hash = "sha256:72d53f3176a69cc20710c4ecb95f7dc4c6ba10c4e4eda45b8396ee79ee40f75a", upload-time = "2026-04-27T17:33:09Z" },
     { url = "https://download-r2.pytorch.org/whl/cu128/torch-2.11.0%2Bcu128-cp310-cp310-win_amd64.whl", hash = "sha256:7c792fe95ad5edaf622cf9e4f5573f5aecf2bc0654c7e866eda6134088f95d72", upload-time = "2026-04-27T17:34:55Z" },
+]
+
+[[package]]
+name = "torch-tensorrt"
+version = "2.11.0"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "sys_platform == 'win32' and 'cpu' in dependency_groups and 'gpu' not in dependency_groups",
+    "sys_platform == 'win32' and 'cpu' not in dependency_groups and 'gpu' not in dependency_groups",
+    "sys_platform == 'linux' and 'cpu' in dependency_groups and 'gpu' not in dependency_groups",
+    "sys_platform == 'linux' and 'cpu' not in dependency_groups and 'gpu' not in dependency_groups",
+    "sys_platform != 'linux' and sys_platform != 'win32' and 'cpu' in dependency_groups and 'gpu' not in dependency_groups",
+    "sys_platform != 'linux' and sys_platform != 'win32' and 'cpu' not in dependency_groups and 'gpu' not in dependency_groups",
+]
+dependencies = [
+    { name = "dllist", marker = "'gpu' not in dependency_groups" },
+    { name = "numpy", marker = "'gpu' not in dependency_groups" },
+    { name = "packaging", marker = "'gpu' not in dependency_groups" },
+    { name = "psutil", marker = "'gpu' not in dependency_groups" },
+    { name = "tensorrt", marker = "'gpu' not in dependency_groups" },
+    { name = "torch", version = "2.11.0", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'linux' and sys_platform != 'win32' and 'cpu' in dependency_groups and 'gpu' not in dependency_groups" },
+    { name = "torch", version = "2.11.0", source = { registry = "https://pypi.org/simple" }, marker = "'cpu' not in dependency_groups and 'gpu' not in dependency_groups" },
+    { name = "torch", version = "2.11.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "(sys_platform == 'linux' and 'cpu' in dependency_groups and 'gpu' not in dependency_groups) or (sys_platform == 'win32' and 'cpu' in dependency_groups and 'gpu' not in dependency_groups)" },
+    { name = "typing-extensions", marker = "'gpu' not in dependency_groups" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/27/c5/abcf8dfa462b642d09842917baaaa7f071fdb5d3c7067876bd06f08a889f/torch_tensorrt-2.11.0-cp310-cp310-manylinux_2_28_aarch64.whl", hash = "sha256:89297d9c63b3ed51ad50db0b7baf5a1b0a72cb69825719985fa9227b2214a367", size = 3566170, upload-time = "2026-04-02T16:06:09.474Z" },
+    { url = "https://files.pythonhosted.org/packages/ee/3b/b83f5fe4ce115e48941f287572b8c0ff746b16af109e19d0226ed6356015/torch_tensorrt-2.11.0-cp310-cp310-manylinux_2_28_x86_64.whl", hash = "sha256:ca6dfcfa2d01b7f8bb66265ee8388476d33635a8d7eda22271659e0b0023cf99", size = 3710625, upload-time = "2026-04-02T16:06:11.075Z" },
+    { url = "https://files.pythonhosted.org/packages/11/d7/93023ca34b3fa0f9bd1fdbc28e19cc42149b057da274f364f4777ca7442b/torch_tensorrt-2.11.0-cp310-cp310-win_amd64.whl", hash = "sha256:bf8749f12c4cf088811bfa2f3188b0718b586da458791dbaae8976eaefef6356", size = 1887471, upload-time = "2026-04-02T16:06:13.114Z" },
+]
+
+[[package]]
+name = "torch-tensorrt"
+version = "2.11.0+cu128"
+source = { registry = "https://download.pytorch.org/whl/cu128" }
+resolution-markers = [
+    "sys_platform == 'win32' and 'gpu' in dependency_groups",
+    "sys_platform == 'linux' and 'gpu' in dependency_groups",
+    "sys_platform != 'linux' and sys_platform != 'win32' and 'gpu' in dependency_groups",
+]
+dependencies = [
+    { name = "dllist", marker = "'gpu' in dependency_groups" },
+    { name = "numpy", marker = "'gpu' in dependency_groups" },
+    { name = "packaging", marker = "'gpu' in dependency_groups" },
+    { name = "psutil", marker = "'gpu' in dependency_groups" },
+    { name = "tensorrt", marker = "'gpu' in dependency_groups" },
+    { name = "tensorrt-cu12", marker = "'gpu' in dependency_groups" },
+    { name = "tensorrt-cu12-bindings", marker = "'gpu' in dependency_groups" },
+    { name = "tensorrt-cu12-libs", marker = "'gpu' in dependency_groups" },
+    { name = "torch", version = "2.11.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "'gpu' in dependency_groups" },
+    { name = "typing-extensions", marker = "'gpu' in dependency_groups" },
+]
+wheels = [
+    { url = "https://download.pytorch.org/whl/cu128/torch_tensorrt-2.11.0%2Bcu128-cp310-cp310-manylinux_2_28_x86_64.whl", hash = "sha256:32b5a9599cd7cf1ad3124e6e15e19887aea023e720d0092a5aa5766f7f16c73c", upload-time = "2026-04-01T16:21:17Z" },
+    { url = "https://download.pytorch.org/whl/cu128/torch_tensorrt-2.11.0%2Bcu128-cp310-cp310-win_amd64.whl", hash = "sha256:2ad9f8b3da989c7262165712065a89473ad7826072c576d5efdbec7d8dc776c5", upload-time = "2026-04-01T16:21:17Z" },
 ]
 
 [[package]]

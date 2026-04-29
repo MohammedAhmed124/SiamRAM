@@ -38,24 +38,33 @@ manifest.keys()
 
 config = OmegaConf.load(yaml_config_path)
 
+
 wrapped = get_trt_tracker(
     config=config,
     weights_path=weights_path,
-    **config.trt_engine
+    **config.trt_engine  
 )
 
 
 tracker = SiamRAMTracker(
     siam_tracker=wrapped,
-    **config.ram_tracker,
+    **config.ram_tracker 
 )
+
+
 
 with open(manifest_path, "r") as f:
     manifest = json.load(f)
 
 test_public_lb = {
     k: v for k, v in manifest["public_lb"].items()
-    if v["dataset"] in ["dataset1", "dataset2", "dataset3", "dataset4", "dataset5"]
+    if v["dataset"] in [
+        # "dataset1",
+        # "dataset2",
+        # "dataset3",
+        "dataset4",
+        "dataset5"
+        ]
 }
 
 print(f"Starting inference on {len(test_public_lb)} videos...")

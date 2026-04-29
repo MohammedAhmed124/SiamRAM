@@ -132,7 +132,7 @@ uv sync --group gpu
 3. Re-run:
 
 ```bash
-docker compose -f docker-compose.gpu.yml run --rm gpu nvidia-smi
+docker compose -f containers/docker-compose.gpu.yml run --rm gpu nvidia-smi
 ```
 
 ### Torch/CUDA not detected in container

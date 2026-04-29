@@ -33,13 +33,12 @@ Modified from the FEAR tracker by PinataFarms:
     - Author: FEAR (https://github.com/PinataFarms/FEARTracker/blob/main/model_training/model/fear_net.py)
 """
 import collections.abc
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
 
 from . import constants
-
 # from blocks import Encoder, AdjustLayer, BoxTower, SpatialSelfCrossAttention
 # TARGET_CLASSIFICATION_KEY = "TARGET_CLASSIFICATION_KEY"
 # TARGET_REGRESSION_LABEL_KEY = "TARGET_REGRESSION_LABEL_KEY"
@@ -48,21 +47,21 @@ from . import constants
 from .blocks import AdjustLayer, BoxTower, Encoder, EncoderResNet, FastParallelPolarizedSelfAttention
 
 # Comprehensive fix for Python 3.10+ compatibility with older libraries
-collections.Mapping = collections.abc.Mapping # type: ignore
-collections.MutableMapping = collections.abc.MutableMapping # type: ignore
-collections.Iterable = collections.abc.Iterable # type: ignore
-collections.Iterator = collections.abc.Iterator # type: ignore
-collections.Sequence = collections.abc.Sequence # type: ignore
-collections.MutableSequence = collections.abc.MutableSequence # type: ignore
-collections.Set = collections.abc.Set # type: ignore
-collections.MutableSet = collections.abc.MutableSet # type: ignore
-collections.Callable = collections.abc.Callable # type: ignore
-collections.Hashable = collections.abc.Hashable # type: ignore
-collections.Sized = collections.abc.Sized # type: ignore
-collections.Container = collections.abc.Container # type: ignore
-collections.ValuesView = collections.abc.ValuesView # type: ignore
-collections.KeysView = collections.abc.KeysView # type: ignore
-collections.ItemsView = collections.abc.ItemsView # type: ignore
+collections.Mapping = collections.abc.Mapping  # type: ignore
+collections.MutableMapping = collections.abc.MutableMapping  # type: ignore
+collections.Iterable = collections.abc.Iterable  # type: ignore
+collections.Iterator = collections.abc.Iterator  # type: ignore
+collections.Sequence = collections.abc.Sequence  # type: ignore
+collections.MutableSequence = collections.abc.MutableSequence  # type: ignore
+collections.Set = collections.abc.Set  # type: ignore
+collections.MutableSet = collections.abc.MutableSet  # type: ignore
+collections.Callable = collections.abc.Callable  # type: ignore
+collections.Hashable = collections.abc.Hashable  # type: ignore
+collections.Sized = collections.abc.Sized  # type: ignore
+collections.Container = collections.abc.Container  # type: ignore
+collections.ValuesView = collections.abc.ValuesView  # type: ignore
+collections.KeysView = collections.abc.KeysView  # type: ignore
+collections.ItemsView = collections.abc.ItemsView  # type: ignore
 
 
 class SiamABCNet(nn.Module):
@@ -166,6 +165,7 @@ class SiamABCNet(nn.Module):
             >>> outputs = model((template, dynamic_template, search, dynamic_search))
             >>> print(outputs.keys())
         """
+
     def __init__(
         self,
         simsiam_dim: int = 2048,
@@ -177,23 +177,10 @@ class SiamABCNet(nn.Module):
         conv_block: str = "regular",
         model_size='S',
         build_simsiam_heads=True,
+        inference_mode: bool = False,
+        norm_lambda: float = 0.1,
         **kwargs,
     ):
-        """
-        Initialise the SiamABCNet model.
-
-        Args:
-            simsiam_dim (int): Output dimensionality of the SimSiam projection head.
-            simsiam_pred_dim (int): Hidden dimensionality of the SimSiam prediction MLP.
-            pretrained (bool): Whether to use ImageNet-pretrained weights for the backbone.
-            adjust_channels (int): Output channel count for the neck and attention modules.
-            towernum (int): Number of convolutional blocks in the prediction head.
-            max_layer (int): Backbone stage depth (only for model_size='S').
-            conv_block (str): Type of convolution used in the tower.
-            model_size (str): Backbone variant ('S' or 'M').
-            build_simsiam_heads (bool): Whether to construct auxiliary projection heads.
-            **kwargs: Additional parameters for forward compatibility.
-        """
         max_layer2name = {3: "layer2", 4: "layer1"}
         self.build_simsiam_heads = build_simsiam_heads
         assert max_layer in max_layer2name
@@ -222,7 +209,9 @@ class SiamABCNet(nn.Module):
             inchannels=adjust_channels,
             outchannels=adjust_channels,
             towernum=towernum,
-            conv_block=conv_block
+            conv_block=conv_block,
+            inference_mode=inference_mode,
+            norm_lambda=norm_lambda,
         )
 
         self.similarity = nn.CosineSimilarity(dim=1)
@@ -250,112 +239,23 @@ class SiamABCNet(nn.Module):
         return x
 
     def get_features(self, crop: torch.Tensor) -> torch.Tensor:
-        """
-                Extract and project features from a single image crop.
-
-                Convenience wrapper that chains ``feature_extractor`` with the ``neck``
-                projection layer, producing features at the uniform ``adjust_channels``
-                width expected by attention and regression heads.
-
-                Args:
-                    crop (torch.Tensor):
-                        Input image crop of shape ``(B, 3, H, W)``.
-
-                Returns:
-                    torch.Tensor:
-                        Channel-projected feature map of shape
-                        ``(B, adjust_channels, H', W')``.
-                """
         features = self.feature_extractor(crop)
         features = self.neck(features)
         return features
 
     def connector(self, template_mixed_attention: torch.Tensor, search_mixed_attention: torch.Tensor,
-                  search: torch.Tensor) -> Tuple[str, torch.Tensor]:
-        """
-                Cross-correlate template and search attention maps to predict the target.
-
-                Feeds the attention-refined template and search features into the
-                ``BoxTower`` head, which performs cross-correlation and produces
-                per-location regression deltas and classification scores.
-
-                Args:
-                    template_mixed_attention (torch.Tensor):
-                        Attention-refined template feature map of shape
-                        ``(B, adjust_channels, H_t, W_t)``.
-                    search_mixed_attention (torch.Tensor):
-                        Attention-refined search feature map of shape
-                        ``(B, adjust_channels, H_s, W_s)``.
-                    search (torch.Tensor):
-                        Raw (pre-attention) search feature map of shape
-                        ``(B, adjust_channels, H_s, W_s)``. Passed to the tower as a
-                        residual / original context signal alongside the refined map.
-
-                Returns:
-                    Tuple[torch.Tensor, torch.Tensor]:
-                        A two-element tuple ``(bbox_pred, cls_pred)`` where:
-
-                        - **bbox_pred** ``(torch.Tensor)``: Per-location bounding-box
-                          regression deltas of shape ``(B, 4, H_s, W_s)``, typically
-                          encoding ``(dx, dy, dw, dh)`` offsets relative to anchor points.
-                        - **cls_pred** ``(torch.Tensor)``: Per-location classification
-                          logits of shape ``(B, 1, H_s, W_s)`` indicating the presence
-                          confidence of the tracked target at each spatial position.
-                """
-
+                  search: torch.Tensor, lam: torch.Tensor) -> Tuple[str, torch.Tensor]:
         bbox_pred, cls_pred, _, _ = self.connect_model(search_org=search, search=search_mixed_attention,
-                                                       kernel=template_mixed_attention)
+                                                       kernel=template_mixed_attention, lam=lam)
         return bbox_pred, cls_pred
 
-    def forward(self, x: Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]) -> Dict[
-        str, torch.Tensor | List[torch.Tensor]]:
-        """
-                Full forward pass used during training.
-
-                Accepts four image crops packed into a single tuple, extracts and fuses
-                their features through the dual-template attention pipeline, and returns
-                a dictionary that can be directly consumed by the training loss functions.
-
-                Processing steps:
-                    1. Extract and project features for all four crops independently.
-                    2. Concatenate static and dynamic template features channel-wise,
-                       then refine them with polarized self-attention and re-project.
-                    3. Repeat step 2 for the search-region pair (dynamic first, then static).
-                    4. Cross-correlate the mixed template and search representations via
-                       the ``BoxTower`` head to produce box and class predictions.
-
-                Args:
-                    x (Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]):
-                        A four-element tuple in the following order:
-
-                        - **template** ``(B, 3, H_t, W_t)``: Static template crop
-                          captured at track initialisation.
-                        - **dynamic_template** ``(B, 3, H_t, W_t)``: Dynamically updated
-                          template crop reflecting recent target appearance.
-                        - **search** ``(B, 3, H_s, W_s)``: Static search-region crop.
-                        - **dynamic_search** ``(B, 3, H_s, W_s)``: Dynamic search-region
-                          crop aligned with the dynamic template update.
-
-                Returns:
-                    Dict[str, torch.Tensor | List[torch.Tensor]]:
-                        A dictionary with the following keys (defined in ``constants``):
-
-                        - **TARGET_REGRESSION_LABEL_KEY** — bounding-box regression
-                          deltas, shape ``(B, 4, H_s, W_s)``.
-                        - **TARGET_CLASSIFICATION_KEY** — classification logits,
-                          shape ``(B, 1, H_s, W_s)``.
-                        - **SIMSIAM_SEARCH_OUT_KEY** — SimSiam projection output for
-                          the search branch; ``None`` in the current implementation.
-                        - **SIMSIAM_DYNAMIC_OUT_KEY** — SimSiam projection output for
-                          the dynamic branch; ``None`` in the current implementation.
-                        - **TRACKER_TARGET_SEARCH_SIM_SCORE** — cosine similarity score
-                          between template and search; ``None`` in the current
-                          implementation.
-                        - **TRACKER_ATTENTION_MAP** — the attention-refined search
-                          feature map, shape ``(B, adjust_channels, H_s, W_s)``, useful
-                          for visualisation and auxiliary supervision.
-                """
+    def forward(self, x: Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+                lam: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor | List[torch.Tensor]]:
         template, dynamic_template, search, dynamic_search = x
+
+        # lam defaults to 0 (TTA off) when not supplied, e.g. during training.
+        if lam is None:
+            lam = torch.zeros(1, device=template.device)
 
         template_features = self.get_features(template)
         dynamic_template_features = self.get_features(dynamic_template)
@@ -372,7 +272,8 @@ class SiamABCNet(nn.Module):
         search_mixed_attention = self.attention_neck(search_attention)
 
         bbox_pred, cls_pred = self.connector(template_mixed_attention=template_mixed_attention,
-                                             search_mixed_attention=search_mixed_attention, search=search_features)
+                                             search_mixed_attention=search_mixed_attention,
+                                             search=search_features, lam=lam)
 
         simsiam_out_search = None
         simsiam_out_dynamic = None
@@ -391,54 +292,9 @@ class SiamABCNet(nn.Module):
         search_features: torch.Tensor,
         dynamic_search_features: torch.Tensor,
         template_features: torch.Tensor,
-        dynamic_template_features: torch.Tensor
+        dynamic_template_features: torch.Tensor,
+        lam: torch.Tensor,
     ) -> Dict[str, torch.Tensor]:
-        """
-                Inference-optimised tracking step operating on pre-extracted features.
-
-                Unlike ``forward``, this method skips the backbone and neck passes and
-                works directly on cached feature maps. In a typical deployment the
-                template features are extracted once at initialisation and reused across
-                all subsequent frames, while the search features are extracted fresh for
-                every new frame — making this path significantly faster than calling
-                ``forward`` repeatedly.
-
-                The attention fusion, mixed-attention projection, and Box Tower steps are
-                identical to those in ``forward``.
-
-                Args:
-                    search_features (torch.Tensor):
-                        Projected features from the current static search region,
-                        shape ``(B, adjust_channels, H_s, W_s)``.
-                    dynamic_search_features (torch.Tensor):
-                        Projected features from the current dynamic search region,
-                        shape ``(B, adjust_channels, H_s, W_s)``.
-                    template_features (torch.Tensor):
-                        Cached projected features from the static initialisation
-                        template, shape ``(B, adjust_channels, H_t, W_t)``.
-                    dynamic_template_features (torch.Tensor):
-                        Projected features from the most recently updated dynamic
-                        template, shape ``(B, adjust_channels, H_t, W_t)``.
-
-                Returns:
-                    Dict[str, torch.Tensor]:
-                        A dictionary with the following keys (defined in ``constants``):
-
-                        - **TARGET_REGRESSION_LABEL_KEY** — bounding-box regression
-                          deltas, shape ``(B, 4, H_s, W_s)``.
-                        - **TARGET_CLASSIFICATION_KEY** — classification logits,
-                          shape ``(B, 1, H_s, W_s)``.
-                        - **TRACKER_TARGET_SEARCH_SIM_SCORE** — cosine similarity score;
-                          ``None`` in the current implementation.
-                        - **TRACKER_ATTENTION_MAP** — attention-refined search feature
-                          map, shape ``(B, adjust_channels, H_s, W_s)``.
-
-                Note:
-                    Template features should be refreshed at whatever cadence the
-                    dynamic template update strategy dictates (e.g., every N frames or
-                    on low-confidence detections). Passing stale dynamic template
-                    features will degrade tracking accuracy over long sequences.
-                """
 
         template_combined_features = torch.concat([template_features, dynamic_template_features], dim=1)
         template_attention = self.polarized_self_attention(template_combined_features)
@@ -449,7 +305,8 @@ class SiamABCNet(nn.Module):
         search_mixed_attention = self.attention_neck(search_attention)
 
         bbox_pred, cls_pred = self.connector(template_mixed_attention=template_mixed_attention,
-                                             search_mixed_attention=search_mixed_attention, search=search_features)
+                                             search_mixed_attention=search_mixed_attention,
+                                             search=search_features, lam=lam)
         return {
             constants.TARGET_REGRESSION_LABEL_KEY: bbox_pred,
             constants.TARGET_CLASSIFICATION_KEY: cls_pred,
@@ -463,14 +320,3 @@ if __name__ == '__main__':
     search = torch.randn((2, 3, 128, 128)).cuda()
     dynamic = torch.randn((2, 3, 128, 128)).cuda()
     template = torch.randn((2, 3, 64, 64)).cuda()
-
-    # for i in trange(300000):
-    #     template_features = model.get_features(template)
-    #     search_features = model.get_features(search)
-    #     dynamic_features = model. get_features(dynamic)
-    #     self_attention_features, cross_attention_features = model.SpatialSelfCrossAttention(search_features, dynamic_features)
-    #     bbox_pred, cls_pred,_,_ =  model.connect_model(self_attention_features, cross_attention_features, template_features, gaussian_val=gaussian_val)
-    # simsiam_out_search = model.simsiam_forward(template_features, search_features)
-    # simsiam_out_dynamic = model.simsiam_forward(template_features, dynamic_features)
-
-    # print(bbox_pred, cls_pred)

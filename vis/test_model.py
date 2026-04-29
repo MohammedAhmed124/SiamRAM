@@ -363,18 +363,18 @@ def run_inference(
                 times_normal.append(elapsed_ms)
 
             if output_video:
-                cur_dyn_bbox = inner_tracker.running_dynamic_bbox
-                cur_dyn_obj = inner_tracker.running_dynamic_image
-                template_updated = not np.array_equal(cur_dyn_bbox, last_dyn_bbox)
+                # cur_dyn_bbox = inner_tracker.running_dynamic_bbox
+                # cur_dyn_obj = inner_tracker.running_dynamic_crop
+                # template_updated = not np.array_equal(cur_dyn_bbox, last_dyn_bbox)
 
-                if template_updated:
-                    _refresh_panels(inner_tracker, cur_dyn_obj, panel_template,
-                                    panel_search, frame_idx=frame_idx, updated=True)
-                    last_dyn_bbox = cur_dyn_bbox.copy()
-                else:
-                    _stamp_panel(panel_template,
-                                 f"Dynamic TEMPLATE  F:{frame_idx - 1}", updated=False)
-                    _stamp_panel(panel_search, "SEARCH CTX", updated=False)
+                # if template_updated:
+                #     _refresh_panels(inner_tracker, cur_dyn_obj, panel_template,
+                #                     panel_search, frame_idx=frame_idx, updated=True)
+                #     last_dyn_bbox = cur_dyn_bbox.copy()
+                # else:
+                #     _stamp_panel(panel_template,
+                #                  f"Dynamic TEMPLATE  F:{frame_idx - 1}", updated=False)
+                #     _stamp_panel(panel_search, "SEARCH CTX", updated=False)
 
                 canvas.fill(0)
                 canvas[y_off: y_off + h, :w] = frame
@@ -383,8 +383,8 @@ def run_inference(
 
                 if in_occlusion:
                     cv2.rectangle(canvas, (w, 0), (total_w - 1, canvas_h - 1), C_OCCLUDED, 3)
-                elif template_updated:
-                    cv2.rectangle(canvas, (w, 0), (total_w - 1, canvas_h - 1), C_UPDATE, 2)
+                # elif template_updated:
+                #     cv2.rectangle(canvas, (w, 0), (total_w - 1, canvas_h - 1), C_UPDATE, 2)
 
                 mapping = inner_tracker.tracking_state.mapping
                 if mapping is not None:
@@ -414,8 +414,8 @@ def run_inference(
 
                 if in_occlusion:
                     hud = f"F:{frame_idx}  [DAM RECOVERY]"
-                elif template_updated:
-                    hud = f"F:{frame_idx}  [TMPL UPDATE]"
+                # elif template_updated:
+                #     hud = f"F:{frame_idx}  [TMPL UPDATE]"
                 else:
                     hud = f"F:{frame_idx}"
                 cv2.putText(canvas, hud, (156, y_off + 22), FONT, 0.45, C_FRAME, 1, cv2.LINE_AA)

@@ -1,3 +1,9 @@
+"""
+Constants and keys used across the SiamABC model and tracker.
+
+This module defines standardized keys for dictionary access of features,
+images, and metadata in both training and inference pipelines.
+"""
 TARGET_CLASSIFICATION_KEY = "TARGET_CLASSIFICATION_KEY"
 TARGET_REGRESSION_WEIGHT_KEY = "TARGET_REGRESSION_WEIGHT_KEY"
 TARGET_REGRESSION_LABEL_KEY = "TARGET_REGRESSION_LABEL_KEY"

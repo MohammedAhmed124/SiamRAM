@@ -1,3 +1,9 @@
+"""
+General utility functions for SiamRAM.
+
+This module contains bounding box conversion helpers, coordinate grid
+generation, image cropping utilities, and IoU calculation functions.
+"""
 from typing import Any, Optional, Tuple, Union
 
 import cv2
@@ -74,15 +80,43 @@ def _cos_sim(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def xyxy_to_xywh(boxes):
+    """
+    Convert bounding boxes from [x1, y1, x2, y2] to [x, y, w, h] format.
+
+    Args:
+        boxes (List[float]): Bounding box coordinates.
+
+    Returns:
+        List[float]: Converted bounding box.
+    """
     x1, y1, x2, y2 = boxes
     return [x1, y1, x2 - x1, y2 - y1]
 
 
 def convert_xywh_to_xyxy(bbox: NDArray) -> NDArray:
+    """
+    Convert bounding boxes from [x, y, w, h] to [x1, y1, x2, y2] format.
+
+    Args:
+        bbox (NDArray): Bounding box in xywh format.
+
+    Returns:
+        NDArray: Bounding box in xyxy format.
+    """
     return np.array([bbox[0], bbox[1], bbox[2] + bbox[0], bbox[3] + bbox[1]])
 
 
 def to_device(x: Union[torch.Tensor, torch.nn.Module], cuda_id: int = 0) -> Tensor | Module:
+    """
+    Move a tensor or module to a CUDA device if available.
+
+    Args:
+        x (Union[Tensor, Module]): Object to move.
+        cuda_id (int): CUDA device index.
+
+    Returns:
+        Union[Tensor, Module]: Object on the target device.
+    """
     return x.cuda(cuda_id) if torch.cuda.is_available() else x
 
 
@@ -228,6 +262,20 @@ def clamp_bbox(
 
 
 def get_extended_crop(image, bbox, crop_size, context, padding_value=None):
+    """
+    Extract a cropped and resized patch from an image with padding.
+
+    Args:
+        image (np.ndarray): Source image.
+        bbox (np.ndarray): Target bounding box.
+        crop_size (int): Size of the output square crop.
+        context (np.ndarray): Context window to crop.
+        padding_value (Optional[np.ndarray]): Value for border padding.
+
+    Returns:
+        Tuple[np.ndarray, np.ndarray, np.ndarray]:
+            (resized_crop, bbox_in_crop, context_rect).
+    """
     if padding_value is None:
         padding_value = np.mean(image, axis=(0, 1))
 
@@ -261,6 +309,16 @@ def get_extended_crop(image, bbox, crop_size, context, padding_value=None):
 
 
 def handle_empty_bbox(bbox: NDArray, min_bbox: int = 3) -> NDArray:
+    """
+    Ensure a bounding box has a minimum width and height.
+
+    Args:
+        bbox (NDArray): Bounding box [x, y, w, h].
+        min_bbox (int): Minimum side length.
+
+    Returns:
+        NDArray: Adjusted bounding box.
+    """
     bbox[2] = max(bbox[2], min_bbox)
     bbox[3] = max(bbox[3], min_bbox)
     return bbox
@@ -269,6 +327,18 @@ def handle_empty_bbox(bbox: NDArray, min_bbox: int = 3) -> NDArray:
 def get_regression_weight_label(
     bbox, image_size: int = 255, map_size: int = 25, r_pos: int = 2, r_neg: int = 0
 ) -> torch.Tensor:
+    """
+    Generate a Gaussian regression weight label map.
+
+    Args:
+        bbox (NDArray): Target bounding box.
+        image_size (int): Size of the input image.
+        map_size (int): Size of the output score map.
+        r_pos, r_neg (int): Radius for positive and negative locations.
+
+    Returns:
+        torch.Tensor: Weight map.
+    """
     bbox_c_x, bbox_c_y = bbox[0] + bbox[2] // 2, bbox[1] + bbox[3] // 2
     sz_x, sz_y = np.floor(float(bbox_c_x / image_size * map_size)), np.floor(float(bbox_c_y / image_size * map_size))
     x, y = np.meshgrid(np.arange(0, map_size) - sz_x, np.arange(0, map_size) - sz_y)
@@ -302,12 +372,30 @@ def make_grid(score_size: int, total_stride: int, instance_size: int) -> Tuple[t
 
 
 def limit(radius: Union[torch.Tensor, float]) -> Union[torch.Tensor, float]:
+    """
+    Limit the scale ratio to avoid extreme values.
+
+    Args:
+        radius (Union[Tensor, float]): Scale ratio.
+
+    Returns:
+        Union[Tensor, float]: Limited scale ratio.
+    """
     if isinstance(radius, torch.Tensor):
         return torch.maximum(radius, 1.0 / radius)
     return np.maximum(radius, 1.0 / radius)
 
 
 def squared_size(w: int, h: int) -> Union[torch.Tensor, float]:
+    """
+    Compute the side length of a square with equivalent area after padding.
+
+    Args:
+        w, h (int): Original width and height.
+
+    Returns:
+        Union[Tensor, float]: Equivalent square side length.
+    """
     pad = (w + h) * 0.5
     size = (w + pad) * (h + pad)
     if isinstance(size, torch.Tensor):
@@ -316,6 +404,16 @@ def squared_size(w: int, h: int) -> Union[torch.Tensor, float]:
 
 
 def unravel_index(index: Any, shape: Tuple[int, int]) -> Tuple[int, ...]:
+    """
+    Convert a flat index to a multi-dimensional index.
+
+    Args:
+        index (Any): Flat index.
+        shape (Tuple[int, int]): Dimensions of the target tensor.
+
+    Returns:
+        Tuple[int, ...]: Multi-dimensional index.
+    """
     out = []
     for dim in reversed(shape):
         out.append(index % dim)
@@ -323,6 +421,17 @@ def unravel_index(index: Any, shape: Tuple[int, int]) -> Tuple[int, ...]:
     return tuple(reversed(out))
 
 def calc_iou(reg_target: torch.Tensor, pred: torch.Tensor, smooth: float = 1.0) -> torch.Tensor:
+    """
+    Compute the Intersection-over-Union (IoU) between two boxes.
+
+    Args:
+        reg_target (torch.Tensor): Ground-truth boxes.
+        pred (torch.Tensor): Predicted boxes.
+        smooth (float): Smoothing factor to avoid division by zero.
+
+    Returns:
+        torch.Tensor: IoU values.
+    """
     target_area = (reg_target[..., 0] + reg_target[..., 2]) * (reg_target[..., 1] + reg_target[..., 3])
     pred_area = (pred[..., 0] + pred[..., 2]) * (pred[..., 1] + pred[..., 3])
 

@@ -1,3 +1,11 @@
+"""
+SiamRAM Tracker: A robust hybrid tracker with occlusion recovery.
+
+This module implements the SiamRAMTracker, which combines Siamese visual
+tracking (SiamABC) with a YOLO-based re-detection system and an Extended
+Kalman Filter (EKF) for motion modelling. It features a Dynamic Reference
+Memory (DRM) for reliable re-acquisition after long-term occlusion.
+"""
 from collections import deque
 from typing import List, Optional, Tuple, TypedDict, cast
 
@@ -14,6 +22,22 @@ from .ram_memory import AppearanceMemory
 
 
 class DRMKwargs(TypedDict):
+    """
+    Keyword arguments for the Dynamic Reference Memory (DRM) matching logic.
+
+    Attributes:
+        lam_iou (float): Weight for Intersection-over-Union similarity.
+        lam_app (float): Weight for appearance (cosine) similarity.
+        lam_mot (float): Weight for motion consistency.
+        lam_time (float): Weight for temporal decay.
+        alpha (float): Temporal decay rate.
+        gamma (float): Distractor penalty weight.
+        margin (float): Minimum score margin over distractors.
+        top_k (int): Number of top candidates to consider.
+        skip_threshold (float): Score above which re-verification is skipped.
+        lam_dist (float): Weight for spatial distance penalty.
+        lam_cand_dir (float): Weight for candidate direction consistency.
+    """
     lam_iou: float
     lam_app: float
     lam_mot: float
@@ -28,6 +52,13 @@ class DRMKwargs(TypedDict):
 
 
 class SiamRAMTracker:
+    """
+    Main tracker class integrating SiamABC, YOLO, and EKF.
+
+    SiamRAM manages the transitions between normal tracking and occlusion
+    recovery modes. It uses an EKF to maintain a motion prior and a DRM
+    bank to verify re-acquisition candidates from YOLO detections.
+    """
 
     def __init__(
         self,
@@ -2496,16 +2527,28 @@ class SiamRAMTracker:
 
     @property
     def running_dynamic_bbox(self):
+        """
+        Return the bounding box used for the running dynamic template.
+        """
         return self.tracker.running_dynamic_bbox
 
     @property
     def running_dynamic_image(self):
+        """
+        Return the image used for the running dynamic template.
+        """
         return self.tracker.running_dynamic_image
 
     @property
     def tracking_config(self):
+        """
+        Return the underlying tracker configuration.
+        """
         return self.tracker.tracking_config
 
     @property
     def tracking_state(self):
+        """
+        Return the current internal tracking state.
+        """
         return self.tracker.tracking_state

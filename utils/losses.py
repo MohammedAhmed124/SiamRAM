@@ -39,9 +39,23 @@ class BoxLoss(nn.Module):
     """
 
     def __init__(self) -> None:
+        """
+        Initialise the BoxLoss.
+        """
         super().__init__()
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor, weight: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Compute the IoU loss.
+
+        Args:
+            pred (torch.Tensor): Predicted bounding boxes.
+            target (torch.Tensor): Ground-truth bounding boxes.
+            weight (Optional[torch.Tensor]): Mask for positive locations.
+
+        Returns:
+            torch.Tensor: Scalar loss value.
+        """
         losses = 1 - calc_iou(target, pred)
 
         if weight is not None and weight.sum() > 0:
@@ -51,8 +65,23 @@ class BoxLoss(nn.Module):
 
 
 class TrackingHeadLoss(nn.Module):
+    """
+    Combined loss for SiamABC classification and regression heads.
+
+    Computes Focal Loss for the classification map and IoU Loss (masked by
+    positive labels) for the regression map.
+    """
     def __init__(self, cls_weight=1.0, bbox_weight=1.0,
                  focal_alpha=0.25, focal_gamma=2.0):
+        """
+        Initialise the TrackingHeadLoss.
+
+        Args:
+            cls_weight (float): Weight for the classification loss.
+            bbox_weight (float): Weight for the regression loss.
+            focal_alpha (float): Alpha parameter for Focal Loss.
+            focal_gamma (float): Gamma parameter for Focal Loss.
+        """
         super().__init__()
         self.cls_weight = cls_weight
         self.bbox_weight = bbox_weight
@@ -100,6 +129,19 @@ class TrackingHeadLoss(nn.Module):
         return self.bbox(p[pos], t[pos])
 
     def forward(self, cls_pred, bbox_pred, cls_label, bbox_label, reg_weight):
+        """
+        Compute the total combined loss for a batch.
+
+        Args:
+            cls_pred (torch.Tensor): Predicted classification logit map.
+            bbox_pred (torch.Tensor): Predicted regression map.
+            cls_label (torch.Tensor): Ground-truth classification map.
+            bbox_label (torch.Tensor): Ground-truth regression map.
+            reg_weight (torch.Tensor): Mask for valid regression samples.
+
+        Returns:
+            Dict[str, torch.Tensor]: Dictionary containing 'total', 'cls_loss', and 'bbox_loss'.
+        """
         cls_loss = self._cls_loss(cls_pred, cls_label)
         bbox_loss = self._bbox_loss(bbox_pred, bbox_label, reg_weight)
         total = self.cls_weight * cls_loss + self.bbox_weight * bbox_loss

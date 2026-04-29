@@ -1,3 +1,10 @@
+"""
+SiamABC Tracker implementation.
+
+This module provides the main tracker class for the SiamABC model,
+integrating feature extraction, correlation, and test-time adaptation
+into a cohesive tracking pipeline.
+"""
 from collections import deque
 from statistics import mean
 from typing import Dict, Tuple, Union
@@ -15,7 +22,25 @@ from .base_tracker import Tracker
 
 
 class SiamABCTracker(Tracker):
+    """
+    State-of-the-art Single Object Tracker based on SiamABCNet.
+
+    This tracker implements a dual-template strategy with polarized attention
+    and test-time adaptation (TTA) via Adaptive Batch Normalisation. It
+    maintains a memory window of reliable target appearances to update the
+    dynamic template branch.
+    """
     def get_box_coder(self, tracking_config, cuda_id: str | int = 0):
+        """
+        Return the appropriate box coder for decoding model outputs.
+
+        Args:
+            tracking_config (Dict): Configuration dictionary for tracking.
+            cuda_id (Union[str, int]): GPU device ID.
+
+        Returns:
+            SiamABCBoxCoder: An initialised box coder.
+        """
         return SiamABCBoxCoder(tracking_config)
 
     def initialize(self, image: NDArray, rect: NDArray, **kwargs) -> None:
@@ -70,6 +95,16 @@ class SiamABCTracker(Tracker):
 
     @torch.no_grad()
     def get_template_features(self, image, rect):
+        """
+        Extract features from a template crop.
+
+        Args:
+            image (NDArray): Full RGB image.
+            rect (NDArray): Target bounding box [x, y, w, h].
+
+        Returns:
+            torch.Tensor: Encoded template features.
+        """
         context = extend_bbox(rect,
                               offset=self.tracking_config["template_bbox_offset"],
                               image_width=image.shape[1], image_height=image.shape[0])
@@ -86,6 +121,17 @@ class SiamABCTracker(Tracker):
 
     @torch.no_grad()
     def get_search_features(self, image, bbox):
+        """
+        Extract features from a search region crop.
+
+        Args:
+            image (NDArray): Full RGB image.
+            bbox (NDArray): Center bounding box for the search region.
+
+        Returns:
+            Tuple[torch.Tensor, NDArray, NDArray]:
+                (features, search_bbox, search_context).
+        """
 
         context = extend_bbox(
             bbox,
@@ -105,10 +151,26 @@ class SiamABCTracker(Tracker):
         return self.net.get_features(search_crop), search_bbox, search_context
 
     def check_validity(self, bbox_window, bbox):
+        """
+        Check if a bounding box is within the specified window.
+
+        Args:
+            bbox_window (NDArray): Window boundaries [x1, y1, x2, y2].
+            bbox (NDArray): Bounding box to check [x, y, w, h].
+
+        Returns:
+            bool: True if the box is within the window.
+        """
         return bbox[0] >= bbox_window[0] and bbox[1] >= bbox_window[1] and bbox[2] <= bbox_window[2] and bbox[3] <= \
             bbox_window[3]
 
     def select_representatives_from_all(self):
+        """
+        Select a representative frame from the memory window to update templates.
+
+        This method uses a mean-based selection strategy to find a frame with
+        above-average classification confidence.
+        """
         for num in range(len(self.classification_scores) - 1, -1, -1):
             if self.classification_scores[num] > mean(self.classification_scores):
                 self.dynamic_template_features = self.get_template_features(self.all_memory_imgs[num][0],
@@ -150,6 +212,9 @@ class SiamABCTracker(Tracker):
         self._update_best_index(pred_score, evicting)
 
     def select_representatives(self) -> None:
+        """
+        Update the dynamic template using the best frame in the memory window.
+        """
         if not self.classification_scores:
             return
         if self._best_score < self.dynamic_update_threshold:
@@ -165,6 +230,16 @@ class SiamABCTracker(Tracker):
             self.net.invalidate_template_cache()
 
     def update(self, search: NDArray, *kw):
+        """
+        Process a new frame and update the tracker state.
+
+        Args:
+            search (NDArray): RGB image of the new frame.
+            *kw: Additional keyword arguments.
+
+        Returns:
+            Tuple[NDArray, float, float]: (pred_bbox, pred_score, sim_score).
+        """
         pred_bbox, pred_score, sim_score = self.run_track(search)
 
         # Always update state
@@ -201,6 +276,15 @@ class SiamABCTracker(Tracker):
         return pred_bbox, pred_score, sim_score
 
     def run_track(self, search):
+        """
+        Execute tracking on the given search image.
+
+        Args:
+            search (NDArray): RGB image of the search region.
+
+        Returns:
+            Tuple[NDArray, float, float]: (pred_bbox, pred_score, sim_score).
+        """
         search_features, search_bbox, search_context = self.get_search_features(search, self.tracking_state.bbox)
         self.tracking_state.mapping = search_context
         self.tracking_state.prev_size = search_bbox[2:]
@@ -212,6 +296,17 @@ class SiamABCTracker(Tracker):
 
     @torch.no_grad()
     def track(self, search_features, dynamic_search_features, dynamic_template_features):
+        """
+        Perform a model forward pass using pre-extracted features.
+
+        Args:
+            search_features (torch.Tensor): Features from the current search region.
+            dynamic_search_features (torch.Tensor): Features from the dynamic search region.
+            dynamic_template_features (torch.Tensor): Features from the dynamic template.
+
+        Returns:
+            Tuple[NDArray, float, float, torch.Tensor]: Post-processed results.
+        """
         track_result = self.net.track(
             search_features=search_features,
             dynamic_search_features=dynamic_search_features,
@@ -247,6 +342,19 @@ class SiamABCTracker(Tracker):
         return pred_bbox, cls_score[r_max, c_max].item(), sim_score, track_result[constants.TRACKER_ATTENTION_MAP]
 
     def run_track_for_candidate(self, search: np.ndarray, candidate_bbox: np.ndarray):
+        """
+        Evaluate a specific candidate bounding box using the tracker.
+
+        This method temporarily sets the tracker state to the candidate's
+        location to perform a tracking update, then restores the original state.
+
+        Args:
+            search (np.ndarray): RGB image of the search region.
+            candidate_bbox (np.ndarray): Candidate box to evaluate [x, y, w, h].
+
+        Returns:
+            Tuple[NDArray, float, float]: (pred_bbox, pred_score, sim_score).
+        """
         cand_x, cand_y, cand_w, cand_h = [float(v) for v in candidate_bbox]
 
         h_fr, w_fr = search.shape[:2]
@@ -276,6 +384,12 @@ class SiamABCTracker(Tracker):
             self.tracking_state.bbox = saved_bbox
 
     def set_tta(self, enabled: bool) -> None:
+        """
+        Enable or disable Test-Time Adaptation (Adaptive Batch Normalisation).
+
+        Args:
+            enabled (bool): Whether to enable TTA.
+        """
         for module in self.net.modules():
             if isinstance(module, (AdaptiveBatchNorm)):
                 if enabled:
@@ -284,9 +398,15 @@ class SiamABCTracker(Tracker):
                     module.disable_tta()
 
     def enable_tta(self) -> None:
+        """
+        Enable Test-Time Adaptation.
+        """
         self.set_tta(True)
 
     def disable_tta(self) -> None:
+        """
+        Disable Test-Time Adaptation.
+        """
         self.set_tta(False)
 
     @staticmethod

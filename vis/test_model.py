@@ -379,11 +379,30 @@ def run_inference(
                 # elif template_updated:
                 #     cv2.rectangle(canvas, (w, 0), (total_w - 1, canvas_h - 1), C_UPDATE, 2)
 
+                native_h, native_w = frame.shape[:2]
+                long_edge = max(native_h, native_w)
+
+                # Match this to your SiamRAMTracker._MAX_PROC_LONG_EDGE
+                max_edge = 1280 
+                scale_factor = long_edge / max_edge if long_edge > max_edge else 1.0
+
+                # 2. Update the drawing block
                 mapping = inner_tracker.tracking_state.mapping
                 if mapping is not None:
-                    mx, my, mw, mh = map(int, mapping)
-                    cv2.rectangle(canvas, (mx, my + y_off), (mx + mw, my + mh + y_off),
-                                  C_SEARCH, 1)
+                    # Scale the internal tracker coordinates BACK to native video pixels
+                    mx = int(mapping[0] * scale_factor)
+                    my = int(mapping[1] * scale_factor)
+                    mw = int(mapping[2] * scale_factor)
+                    mh = int(mapping[3] * scale_factor)
+                    
+                    # Draw onto the canvas using the y_off (vertical centering offset)
+                    cv2.rectangle(
+                        canvas, 
+                        (mx, my + y_off), 
+                        (mx + mw, my + mh + y_off),
+                        C_SEARCH, 
+                        1
+                    )
 
                 if in_occlusion and yolo_dets:
                     held = tracker.held_box if is_dam else None

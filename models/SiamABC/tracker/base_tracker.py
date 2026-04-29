@@ -94,18 +94,25 @@ class Tracker(ABC):
         return process
 
     def _rescale_bbox(self, bbox: np.array, padded_box) -> np.array:
+        # 1. Calculate scales first
+        instance_size = self.tracking_config["instance_size"]
+        w_scale = padded_box[2] / instance_size
+        h_scale = padded_box[3] / instance_size
 
+        # 2. Safety check: Ensure scales and bbox values are valid numbers
+        # This prevents the "OverflowError: cannot convert float infinity to integer"
         if not all(math.isfinite(x) for x in [w_scale, h_scale] + list(bbox)):
-            return np.array([0, 0, 3, 3]) # Return a tiny valid box instead of crashing
+            return [0, 0, 3, 3] 
 
-        bbox[2] = max(3, round(bbox[2] * w_scale))
-        w_scale = padded_box[2] / self.tracking_config["instance_size"]
-        h_scale = padded_box[3] / self.tracking_config["instance_size"]
-        bbox[0] = round(bbox[0] * w_scale + padded_box[0])
-        bbox[1] = round(bbox[1] * h_scale + padded_box[1])
-        bbox[2] = max(3, round(bbox[2] * w_scale))
-        bbox[3] = max(3, round(bbox[3] * h_scale))
-        return list(map(int, bbox))
+        # 3. Apply scales and enforce a minimum size of 3 pixels
+        # This ensures round() never receives a 0 or Inf that breaks the tracker
+        new_w = max(3, round(bbox[2] * w_scale))
+        new_h = max(3, round(bbox[3] * h_scale))
+        
+        new_x = round(bbox[0] * w_scale + padded_box[0])
+        new_y = round(bbox[1] * h_scale + padded_box[1])
+
+        return [int(new_x), int(new_y), int(new_w), int(new_h)]
 
     def _preprocess_image(
         self,

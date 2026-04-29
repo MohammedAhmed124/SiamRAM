@@ -58,8 +58,8 @@ import torch
 import torch.nn as nn
 import torch_tensorrt
 
-from .trt_utils import _AttentionNeck, _FeatureExtractorModule, _cast_module, _trt_input
 from ...model import constants
+from .trt_utils import _AttentionNeck, _FeatureExtractorModule, _cast_module, _trt_input
 
 log = logging.getLogger(__name__)
 from .connector import _build_connect_engines, _dispatch_connect

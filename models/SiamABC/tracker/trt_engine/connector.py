@@ -56,10 +56,8 @@ from typing import Dict, Tuple
 
 import torch
 import torch.nn as nn
-from torch_tensorrt.dynamo import compile as trt_dynamo_compile
 import torch_tensorrt
-
-from ...model.blocks import AdaptiveBatchNorm, AdaptiveSequential  # adjust import path
+from torch_tensorrt.dynamo import compile as trt_dynamo_compile
 
 log = logging.getLogger(__name__)
 

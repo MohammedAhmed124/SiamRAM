@@ -11,7 +11,7 @@ from utils.utils import _cos_sim, _extract_descriptor, _iou
 from .SiamABC.tracker.SiamABC_Tracker import SiamABCTracker
 from .motion_model import BBoxEKF
 from .ram_memory import AppearanceMemory
-
+import os
 
 class DRMKwargs(TypedDict):
     lam_iou: float
@@ -102,6 +102,8 @@ class SiamRAMTracker:
         vel_dir_hard_gate: float = 0.5,
         yolo_filter_class: bool = False,
         yolo_class_detect_frames: int = 5,
+        copile_yolo = False,
+        debug = True
     ):
         """
         Inputs:
@@ -181,7 +183,13 @@ class SiamRAMTracker:
             out of the box for most scenarios while still being fully adjustable.
         """
         self.tracker: SiamABCTracker = siam_tracker
-        self.yolo = YOLO(yolo_weights)
+
+        if copile_yolo:
+            self.yolo = self.load_yolo_compiled(yolo_weights)
+        else:
+            self.yolo = YOLO(yolo_weights)
+
+        self.debug = debug
         self.conf_threshold = conf_threshold
         self.reacq_threshold = reacq_threshold
         self.yolo_conf = yolo_conf
@@ -515,12 +523,12 @@ class SiamRAMTracker:
             loss_cause = self._classify_loss_cause()
             if is_exiting:
                 loss_cause = 'out_of_frame'
-
-            print(
-                f"[occlusion entry] frame={self.frame_idx}  "
-                f"loss_cause={loss_cause}  "
-                f"out_of_frame={self._out_of_frame}  exit_edge={self._exit_edge}  "
-                f"entry_streak={entry_streak_val}"
+            if self.debug:
+                print(
+                    f"[occlusion entry] frame={self.frame_idx}  "
+                    f"loss_cause={loss_cause}  "
+                    f"out_of_frame={self._out_of_frame}  exit_edge={self._exit_edge}  "
+                    f"entry_streak={entry_streak_val}"
             )
 
             area_skip = self._detect_shrinkage_onset(
@@ -535,14 +543,14 @@ class SiamRAMTracker:
                 effective_skip = 0
             else:
                 effective_skip = max(dynamic_skip, entry_streak_val)
-
-            print(
-                f"[occlusion entry] frame={self.frame_idx}  "
-                f"loss_cause={loss_cause}  dynamic_skip={dynamic_skip}  "
-                f"entry_streak_skip={entry_streak_val}  "
-                f"effective_skip={effective_skip}  "
-                f"history_len={len(self._conf_history)}"
-            )
+            if self.debug:
+                print(
+                    f"[occlusion entry] frame={self.frame_idx}  "
+                    f"loss_cause={loss_cause}  dynamic_skip={dynamic_skip}  "
+                    f"entry_streak_skip={entry_streak_val}  "
+                    f"effective_skip={effective_skip}  "
+                    f"history_len={len(self._conf_history)}"
+                )
 
             self._occ_phase = 0
             self._pending_candidates = []
@@ -841,11 +849,12 @@ class SiamRAMTracker:
         if score >= self.occ_siam_reacq_threshold:
 
             if not self._is_near_exit_edge(pred_bbox, frame, fraction=0.50) and self.recovered_early_occlusion:
-                print(
-                    f"[occ frame {self._occ_frames}] phase=siam  "
-                    f"score={score:.3f}  REJECTED — too far from exit edge "
-                    f"({self._exit_edge})"
-                )
+                if self.debug:
+                    print(
+                        f"[occ frame {self._occ_frames}] phase=siam  "
+                        f"score={score:.3f}  REJECTED — too far from exit edge "
+                        f"({self._exit_edge})"
+                    )
                 self.tracker.tracking_state.bbox = held_box.copy()
                 self._cand_frames = []
                 self._occ_cam_vels = []
@@ -891,9 +900,9 @@ class SiamRAMTracker:
                 drm_score += lam_dir * (2.0 * dir_score - 1.0)
 
             drm_ok = drm_score >= self.app_match_threshold
-
-            print(f"[occ frame {self._occ_frames}] phase=siam  "
-                  f"score={score:.3f}  drm={drm_score:.3f}  pass={drm_ok}")
+            if self.debug:
+                print(f"[occ frame {self._occ_frames}] phase=siam  "
+                    f"score={score:.3f}  drm={drm_score:.3f}  pass={drm_ok}")
 
             if drm_ok:
                 self.recovered_early_occlusion = True
@@ -958,11 +967,12 @@ class SiamRAMTracker:
                     self._distractor_bank.append(det_desc)
 
         collection_phase_num = self._occ_phase
-        print(
-            f"[occ frame {self._occ_frames}] "
-            f"phase=collect({collection_phase_num}/{self._cand_collection_frames})  "
-            f"detections={len(detections)}  stored={len(frame_cands)}"
-        )
+        if self.debug:
+            print(
+                f"[occ frame {self._occ_frames}] "
+                f"phase=collect({collection_phase_num}/{self._cand_collection_frames})  "
+                f"detections={len(detections)}  stored={len(frame_cands)}"
+            )
 
         self._occ_phase += 1
 
@@ -1023,8 +1033,9 @@ class SiamRAMTracker:
                 break
 
         if last_idx == -1:
-            print(f"[occ frame {self._occ_frames}] phase=final_drm  "
-                  f"no candidates in any collection frame — resetting")
+            if self.debug:
+                print(f"[occ frame {self._occ_frames}] phase=final_drm  "
+                    f"no candidates in any collection frame — resetting")
             _reset()
             return self.held_box, 0.0
 
@@ -1047,18 +1058,19 @@ class SiamRAMTracker:
             if (vel is not None or single_frame_mode)
             and not self._is_near_exit_edge(bbox, frame, fraction=0.50)
         )
-
-        print(
-            f"[occ frame {self._occ_frames}] phase=final_drm  "
-            f"last_cands={len(last_cand_bboxes)}  "
-            f"fully_tracked={len(fully_tracked_bboxes)}  "
-            f"drm_size={self.memory.drm_size()}  ram={len(self.memory)}  "
-            f"ekf_unc={cast(BBoxEKF, self.ekf).get_uncertainty():.1f}px"
+        if self.debug:
+            print(
+                f"[occ frame {self._occ_frames}] phase=final_drm  "
+                f"last_cands={len(last_cand_bboxes)}  "
+                f"fully_tracked={len(fully_tracked_bboxes)}  "
+                f"drm_size={self.memory.drm_size()}  ram={len(self.memory)}  "
+                f"ekf_unc={cast(BBoxEKF, self.ekf).get_uncertainty():.1f}px"
         )
 
         if not fully_tracked_bboxes:
-            print(f"[occ frame {self._occ_frames}] phase=final_drm  "
-                  f"no fully-tracked candidates — resetting")
+            if self.debug:
+                print(f"[occ frame {self._occ_frames}] phase=final_drm  "
+                    f"no fully-tracked candidates — resetting")
             if last_cand_bboxes:
                 self.held_box = self._nudge_toward_nearest(frame, last_cand_bboxes)
                 ekf = self.ekf
@@ -1140,13 +1152,13 @@ class SiamRAMTracker:
             verify_bbox, verify_score, _ = self.tracker.run_track_for_candidate(
                 frame, adjusted)
             verify_bbox = np.array(verify_bbox, dtype=int)
-
-            print(
-                f"[occ frame {self._occ_frames}] phase=final_drm_verify  "
-                f"drm={match_score:.3f}  vel={vel_score:.3f}  "
-                f"verify={verify_score:.3f}  "
-                f"pass={verify_score >= self.reacq_threshold}"
-            )
+            if self.debug:
+                print(
+                    f"[occ frame {self._occ_frames}] phase=final_drm_verify  "
+                    f"drm={match_score:.3f}  vel={vel_score:.3f}  "
+                    f"verify={verify_score:.3f}  "
+                    f"pass={verify_score >= self.reacq_threshold}"
+                )
 
             if verify_score >= self.reacq_threshold:
                 self.recovered_early_occlusion = True
@@ -2459,8 +2471,9 @@ class SiamRAMTracker:
         if votes[best_cls] / total >= 0.6:
             self._target_class_id = best_cls
             self._class_warmup_done = True
-            print(f"[class filter] target class locked: {best_cls}  "
-                  f"(votes={votes})")
+            if self.debug:
+                print(f"[class filter] target class locked: {best_cls}  "
+                    f"(votes={votes})")
             
     def _is_near_exit_edge(
     self,
@@ -2493,6 +2506,26 @@ class SiamRAMTracker:
             return cy <= h_fr * fraction
 
         return True
+    
+
+    def load_yolo_compiled(self, weights_path, force_recompile=False):
+        engine_path = weights_path.replace(".pt", ".engine")
+        
+        if not os.path.exists(engine_path) or force_recompile:
+            # Use a print statement to keep it consistent with your previous logs
+            print("Compiling YOLO model using TensorRT at 320x320 (may take a minute)...")
+            
+            model = YOLO(weights_path)
+            
+            # Add imgsz=320 here to lock the engine to that resolution
+            model.export(
+                format="engine", 
+                half=True, 
+                device=0, 
+                imgsz=320
+            )
+        
+        return YOLO(engine_path)
 
     @property
     def running_dynamic_bbox(self):

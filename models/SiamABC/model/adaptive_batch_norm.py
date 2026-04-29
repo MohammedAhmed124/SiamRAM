@@ -71,13 +71,23 @@ class AdaptiveBatchNorm(nn.BatchNorm2d):
 
 def replace_layers_adaptive_bn(model, norm_lambda, continuous):
     for name, module in model.named_children():
-
         if len(list(module.children())) > 0:
             replace_layers_adaptive_bn(module, norm_lambda, continuous)
 
-        if isinstance(module, nn.BatchNorm2d):
-            mybatch_norm = AdaptiveBatchNorm(module.num_features, norm_lambda=norm_lambda)
+        if isinstance(module, nn.BatchNorm2d) and not isinstance(module, AdaptiveBatchNorm):
+            new_bn = AdaptiveBatchNorm(
+                module.num_features,
+                eps=module.eps,
+                momentum=module.momentum,
+                affine=module.affine,
+                track_running_stats=module.track_running_stats,
+                norm_lambda=norm_lambda,
+            )
+            # ← copy all trained state
+            new_bn.load_state_dict(module.state_dict())
+            new_bn.to(next(module.parameters(), module.running_mean).device)
+
             if isinstance(model, (nn.Sequential, nn.ModuleList)) and name.isdigit():
-                model[int(name)] = mybatch_norm
+                model[int(name)] = new_bn
             else:
-                setattr(model, name, mybatch_norm)
+                setattr(model, name, new_bn)

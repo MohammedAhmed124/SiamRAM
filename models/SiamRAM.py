@@ -2480,7 +2480,7 @@ class SiamRAMTracker:
             if self.debug:
                 print(f"[class filter] target class locked: {best_cls}  "
                     f"(votes={votes})")
-            
+
     def _is_near_exit_edge(
     self,
     bbox: np.ndarray,
@@ -2512,25 +2512,25 @@ class SiamRAMTracker:
             return cy <= h_fr * fraction
 
         return True
-    
+
 
     def load_yolo_compiled(self, weights_path, force_recompile=False):
         engine_path = weights_path.replace(".pt", ".engine")
-        
+
         if not os.path.exists(engine_path) or force_recompile:
             # Use a print statement to keep it consistent with your previous logs
             print("Compiling YOLO model using TensorRT at 320x320 (may take a minute)...")
-            
+
             model = YOLO(weights_path)
-            
+
             # Add imgsz=320 here to lock the engine to that resolution
             model.export(
-                format="engine", 
-                half=True, 
-                device=0, 
+                format="engine",
+                half=True,
+                device=0,
                 imgsz=320
             )
-        
+
         return YOLO(engine_path)
 
     @property
@@ -2539,7 +2539,7 @@ class SiamRAMTracker:
 
     @property
     def running_dynamic_image(self):
-        return self.tracker.running_dynamic_crop
+        return self.tracker.running_dynamic_image
 
     @property
     def tracking_config(self):

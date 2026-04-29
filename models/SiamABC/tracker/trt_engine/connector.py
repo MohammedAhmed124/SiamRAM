@@ -185,7 +185,7 @@ def _build_connect_engines(
     dummy_kernel     = torch.randn(1, C_s, h_t, w_t, device=device, dtype=torch.float32)
 
     # Static-shape TRT Input descriptors (one per tensor input to forward).
-    trt_inputs = [
+    trt_input_set = [
         torch_tensorrt.Input(shape=(1, C_s, h_s, w_s), dtype=torch.float32),  # search_org
         torch_tensorrt.Input(shape=(1, C_s, h_s, w_s), dtype=torch.float32),  # search
         torch_tensorrt.Input(shape=(1, C_s, h_t, w_t), dtype=torch.float32),  # kernel
@@ -216,7 +216,7 @@ def _build_connect_engines(
 
         engine = trt_dynamo_compile(
             exported,
-            inputs=trt_inputs,
+            inputs=[trt_input_set],
             enabled_precisions={torch.float32},
             optimization_level=3,
             use_fast_partitioner=True,

@@ -1,3 +1,10 @@
+"""
+SiamABC Tracker implementation.
+
+This module provides the main tracker class for the SiamABC model,
+integrating feature extraction, correlation, and test-time adaptation
+into a cohesive tracking pipeline.
+"""
 from collections import deque
 from typing import Dict, Tuple, Union
 
@@ -24,6 +31,16 @@ class SiamABCTracker(Tracker):
         self._tta_lam: torch.Tensor = torch.zeros(1, device=f"cuda:{cuda_id}")
 
     def get_box_coder(self, tracking_config, cuda_id: str | int = 0):
+        """
+        Return the appropriate box coder for decoding model outputs.
+
+        Args:
+            tracking_config (Dict): Configuration dictionary for tracking.
+            cuda_id (Union[str, int]): GPU device ID.
+
+        Returns:
+            SiamABCBoxCoder: An initialised box coder.
+        """
         return SiamABCBoxCoder(tracking_config)
 
     def initialize(self, image: NDArray, rect: NDArray, **kwargs) -> None:
@@ -219,6 +236,9 @@ class SiamABCTracker(Tracker):
         self._update_best_index(pred_score, evicting)
 
     def select_representatives(self) -> None:
+        """
+        Update the dynamic template using the best frame in the memory window.
+        """
         if not self.classification_scores:
             return
         if self._best_score < self.dynamic_update_threshold:
@@ -344,6 +364,19 @@ class SiamABCTracker(Tracker):
         return pred_bbox, cls_score[r_max, c_max].item(), sim_score, track_result[constants.TRACKER_ATTENTION_MAP]
 
     def run_track_for_candidate(self, search: np.ndarray, candidate_bbox: np.ndarray):
+        """
+        Evaluate a specific candidate bounding box using the tracker.
+
+        This method temporarily sets the tracker state to the candidate's
+        location to perform a tracking update, then restores the original state.
+
+        Args:
+            search (np.ndarray): RGB image of the search region.
+            candidate_bbox (np.ndarray): Candidate box to evaluate [x, y, w, h].
+
+        Returns:
+            Tuple[NDArray, float, float]: (pred_bbox, pred_score, sim_score).
+        """
         cand_x, cand_y, cand_w, cand_h = [float(v) for v in candidate_bbox]
         h_fr, w_fr = search.shape[:2]
         context_ratio = self.tracking_config["search_context"]
@@ -376,9 +409,15 @@ class SiamABCTracker(Tracker):
         self._tta_lam.fill_(val)
 
     def enable_tta(self) -> None:
+        """
+        Enable Test-Time Adaptation.
+        """
         self.set_tta(True)
 
     def disable_tta(self) -> None:
+        """
+        Disable Test-Time Adaptation.
+        """
         self.set_tta(False)
 
     # ------------------------------------------------------------------

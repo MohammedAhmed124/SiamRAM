@@ -1,12 +1,37 @@
 """
+SiamABCNet — Siamese Attention-Based Correlation Network for Single Object Tracking.
 
-Modified from
-Main Author of this file: FEAR
-Repo: https://github.com/PinataFarms/FEARTracker/tree/main
-File: https://github.com/PinataFarms/FEARTracker/blob/main/model_training/model/fear_net.py
+This module implements SiamABCNet, a dual-branch Siamese network designed for
+real-time single object tracking. The architecture pairs a shared feature encoder
+with a Polarized Self-Attention mechanism that fuses static template features with
+a continuously updated dynamic template, allowing the tracker to adapt to appearance
+changes over time without retraining.
 
+At a high level, the pipeline works as follows:
+    1. Four image crops are passed in — a static template, a dynamic (updated) template,
+       a static search region, and a dynamic search region.
+    2. Each crop is independently encoded by a shared-weight backbone.
+    3. Template and search features are pairwise concatenated and refined through
+       a Polarized Self-Attention block, producing mixed attention maps that capture
+       both static appearance and recent motion context.
+    4. A Box Tower head consumes the attention-refined features to regress a bounding
+       box and predict a classification score for the tracked target.
+
+Architecture variants:
+    - 'S' (Small)  — MobileNet-style lightweight encoder (``Encoder``).
+    - 'M' (Medium) — ResNet-based encoder (``EncoderResNet``) for higher accuracy.
+
+Compatibility note:
+    Several ``collections`` aliases are patched at import time to restore deprecated
+    names (e.g., ``collections.Mapping``) that were removed in Python 3.10. This is
+    required for compatibility with older third-party libraries that have not yet
+    migrated to ``collections.abc``.
+
+Modified from the FEAR tracker by PinataFarms:
+    - Repository : https://github.com/PinataFarms/FEARTracker
+    - Original file: model_training/model/fear_net.py
+    - Author: FEAR (https://github.com/PinataFarms/FEARTracker/blob/main/model_training/model/fear_net.py)
 """
-
 import collections.abc
 from typing import Dict, List, Optional, Tuple
 
@@ -14,7 +39,6 @@ import torch
 import torch.nn as nn
 
 from . import constants
-
 # from blocks import Encoder, AdjustLayer, BoxTower, SpatialSelfCrossAttention
 # TARGET_CLASSIFICATION_KEY = "TARGET_CLASSIFICATION_KEY"
 # TARGET_REGRESSION_LABEL_KEY = "TARGET_REGRESSION_LABEL_KEY"
@@ -23,24 +47,125 @@ from . import constants
 from .blocks import AdjustLayer, BoxTower, Encoder, EncoderResNet, FastParallelPolarizedSelfAttention
 
 # Comprehensive fix for Python 3.10+ compatibility with older libraries
-collections.Mapping = collections.abc.Mapping # type: ignore
-collections.MutableMapping = collections.abc.MutableMapping # type: ignore
-collections.Iterable = collections.abc.Iterable # type: ignore
-collections.Iterator = collections.abc.Iterator # type: ignore
-collections.Sequence = collections.abc.Sequence # type: ignore
-collections.MutableSequence = collections.abc.MutableSequence # type: ignore
-collections.Set = collections.abc.Set # type: ignore
-collections.MutableSet = collections.abc.MutableSet # type: ignore
-collections.Callable = collections.abc.Callable # type: ignore
-collections.Hashable = collections.abc.Hashable # type: ignore
-collections.Sized = collections.abc.Sized # type: ignore
-collections.Container = collections.abc.Container # type: ignore
-collections.ValuesView = collections.abc.ValuesView # type: ignore
-collections.KeysView = collections.abc.KeysView # type: ignore
-collections.ItemsView = collections.abc.ItemsView # type: ignore
+collections.Mapping = collections.abc.Mapping  # type: ignore
+collections.MutableMapping = collections.abc.MutableMapping  # type: ignore
+collections.Iterable = collections.abc.Iterable  # type: ignore
+collections.Iterator = collections.abc.Iterator  # type: ignore
+collections.Sequence = collections.abc.Sequence  # type: ignore
+collections.MutableSequence = collections.abc.MutableSequence  # type: ignore
+collections.Set = collections.abc.Set  # type: ignore
+collections.MutableSet = collections.abc.MutableSet  # type: ignore
+collections.Callable = collections.abc.Callable  # type: ignore
+collections.Hashable = collections.abc.Hashable  # type: ignore
+collections.Sized = collections.abc.Sized  # type: ignore
+collections.Container = collections.abc.Container  # type: ignore
+collections.ValuesView = collections.abc.ValuesView  # type: ignore
+collections.KeysView = collections.abc.KeysView  # type: ignore
+collections.ItemsView = collections.abc.ItemsView  # type: ignore
 
 
 class SiamABCNet(nn.Module):
+    """
+        Siamese Attention-Based Correlation Network (SiamABCNet).
+
+        SiamABCNet is a single object tracker that extends the classic Siamese
+        framework with a dual-template strategy and polarized self-attention.
+        Rather than comparing the target against a single frozen template, the model
+        maintains two parallel representations — a static template captured at
+        initialisation and a dynamic template that is updated during inference to
+        reflect recent appearance changes. These two views are fused via attention
+        before being cross-correlated with the corresponding search-region features.
+
+        The model exposes two execution paths:
+            - ``forward``  — used during training; accepts a packed tuple of four
+              tensors and returns a dictionary of losses / auxiliary outputs.
+            - ``track``    — used during inference; accepts pre-extracted features
+              to avoid redundant computation when the template features are cached
+              across frames.
+
+        Args:
+            simsiam_dim (int):
+                Output dimensionality of the SimSiam projection head.
+                Retained for API compatibility; currently unused in the forward pass.
+                Defaults to ``2048``.
+            simsiam_pred_dim (int):
+                Hidden dimensionality of the SimSiam prediction MLP.
+                Retained for API compatibility; currently unused in the forward pass.
+                Defaults to ``512``.
+            pretrained (bool):
+                Whether to initialise the backbone with ImageNet-pretrained weights.
+                Set to ``False`` when training from scratch or when weights are
+                loaded separately. Defaults to ``True``.
+            adjust_channels (int):
+                Number of output channels for the ``AdjustLayer`` neck. This value
+                controls the width of all subsequent attention and regression heads.
+                Defaults to ``256``.
+            towernum (int):
+                Number of convolutional blocks stacked inside the ``BoxTower`` head.
+                Higher values increase capacity at the cost of latency.
+                Defaults to ``2``.
+            max_layer (int):
+                Index controlling how many backbone stages are used for feature
+                extraction. Accepted values are ``3`` (extracts up to ``layer2``)
+                and ``4`` (extracts up to ``layer1``). Only relevant for model
+                size ``'S'``. Defaults to ``4``.
+            conv_block (str):
+                Convolution block type passed to ``BoxTower``. Use ``"regular"`` for
+                standard convolutions or another supported variant for depthwise-
+                separable alternatives. Defaults to ``"regular"``.
+            model_size (str):
+                Selects the backbone family:
+                - ``'S'`` — lightweight MobileNet-style encoder.
+                - ``'M'`` — heavier ResNet-based encoder.
+                Defaults to ``'S'``.
+            build_simsiam_heads (bool):
+                Flag indicating whether SimSiam projection/prediction heads should
+                be constructed. Retained for API compatibility; the heads are not
+                actively used in the current forward pass. Defaults to ``True``.
+            **kwargs:
+                Additional keyword arguments accepted for forward compatibility.
+
+        Attributes:
+            encoder (nn.Sequential):
+                Shared backbone network used to extract spatial features from every
+                input crop. Weights are shared across all four branches.
+            neck (AdjustLayer):
+                Channel-projection layer that maps raw backbone features to the
+                uniform ``adjust_channels`` width expected by downstream modules.
+            polarized_self_attention (FastParallelPolarizedSelfAttention):
+                Attention module that operates on the concatenation of two feature
+                maps (e.g., static + dynamic template) and produces a refined,
+                context-aware representation.
+            attention_neck (AdjustLayer):
+                Second channel-projection layer that reduces the doubled channel
+                count (``2 × adjust_channels``) produced by concatenation back to
+                ``adjust_channels`` after the attention pass.
+            connect_model (BoxTower):
+                Regression and classification head that cross-correlates the
+                attention-refined template with the search region to predict the
+                target bounding box and confidence score.
+            similarity (nn.CosineSimilarity):
+                Cosine similarity module. Available for optional SimSiam-style
+                self-supervised auxiliary losses.
+
+        Raises:
+            AssertionError:
+                Raised during construction if ``max_layer`` is not one of the
+                supported values (``3`` or ``4``).
+            Exception:
+                Raised during construction if ``model_size`` is not ``'S'`` or
+                ``'M'``.
+
+        Example:
+            >>> model = SiamABCNet(model_size='S', pretrained=False).cuda()
+            >>> template        = torch.randn(1, 3, 64,  64).cuda()   # static template crop
+            >>> dynamic_template= torch.randn(1, 3, 64,  64).cuda()   # updated template crop
+            >>> search          = torch.randn(1, 3, 128, 128).cuda()  # static search region
+            >>> dynamic_search  = torch.randn(1, 3, 128, 128).cuda()  # dynamic search region
+            >>> outputs = model((template, dynamic_template, search, dynamic_search))
+            >>> print(outputs.keys())
+        """
+
     def __init__(
         self,
         simsiam_dim: int = 2048,
@@ -92,6 +217,24 @@ class SiamABCNet(nn.Module):
         self.similarity = nn.CosineSimilarity(dim=1)
 
     def feature_extractor(self, x: torch.Tensor) -> torch.Tensor:
+        """
+                Pass a single image crop through the shared backbone encoder.
+
+                This is the lowest-level extraction step and is intentionally kept
+                separate so that callers can cache its output and avoid redundant
+                computation across frames (see ``track``).
+
+                Args:
+                    x (torch.Tensor):
+                        Input image crop of shape ``(B, 3, H, W)`` normalised to the
+                        range expected by the backbone (typically ImageNet statistics).
+
+                Returns:
+                    torch.Tensor:
+                        Spatial feature map of shape ``(B, C_enc, H', W')``, where
+                        ``C_enc`` is the backbone's output channel count and ``H'``,
+                        ``W'`` are spatially downsampled relative to the input.
+                """
         x = self.encoder(x)
         return x
 
@@ -177,14 +320,3 @@ if __name__ == '__main__':
     search = torch.randn((2, 3, 128, 128)).cuda()
     dynamic = torch.randn((2, 3, 128, 128)).cuda()
     template = torch.randn((2, 3, 64, 64)).cuda()
-
-    # for i in trange(300000):
-    #     template_features = model.get_features(template)
-    #     search_features = model.get_features(search)
-    #     dynamic_features = model. get_features(dynamic)
-    #     self_attention_features, cross_attention_features = model.SpatialSelfCrossAttention(search_features, dynamic_features)
-    #     bbox_pred, cls_pred,_,_ =  model.connect_model(self_attention_features, cross_attention_features, template_features, gaussian_val=gaussian_val)
-    # simsiam_out_search = model.simsiam_forward(template_features, search_features)
-    # simsiam_out_dynamic = model.simsiam_forward(template_features, dynamic_features)
-
-    # print(bbox_pred, cls_pred)

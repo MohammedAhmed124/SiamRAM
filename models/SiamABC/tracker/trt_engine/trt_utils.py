@@ -1,13 +1,12 @@
 import copy
-import logging
-from typing import Dict, Optional, Set, Tuple
+from typing import Tuple
 
 import torch
 import torch.nn as nn
 import torch_tensorrt
 
 from ...model.SiamABC import SiamABCNet
-from ...model import constants
+
 
 class _FeatureExtractorModule(nn.Module):
     """encoder + neck  (deep-copied, dtype-isolated)."""

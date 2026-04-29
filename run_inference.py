@@ -1,20 +1,13 @@
-import os
-import json
-import numpy as np
-import pandas as pd
-from collections import defaultdict
-from omegaconf import OmegaConf
-from models.SiamABC.tracker.trt_engine.siamabc import get_trt_tracker
 import json
 import os
 from collections import defaultdict
 
 import numpy as np
 import pandas as pd
+from omegaconf import OmegaConf
 
 from models.SiamABC.tracker.tracker_setup import get_tracker
 from models.SiamRAM import SiamRAMTracker
-from utils.hydra import load_hydra_config_from_path
 from vis.test_model import run_inference
 
 with open("/home/moha/AIC-4/data_competition/metadata/contestant_manifest.json", "r") as f:

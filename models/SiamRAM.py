@@ -13,6 +13,10 @@ from .motion_model import BBoxEKF
 from .ram_memory import AppearanceMemory
 import os
 
+
+
+
+
 class DRMKwargs(TypedDict):
     lam_iou: float
     lam_app: float
@@ -28,6 +32,9 @@ class DRMKwargs(TypedDict):
 
 
 class SiamRAMTracker:
+
+    _MAX_PROC_LONG_EDGE: int = 1280   # cap for ALL processing after frame entry
+
 
     def __init__(
         self,
@@ -311,7 +318,7 @@ class SiamRAMTracker:
         self.ekf: Optional[BBoxEKF] = None
         self._last_H: Optional[np.ndarray] = None
         self._last_H_reliable: bool = False
-        self._FLOW_LONG_EDGE = 1000
+        self._FLOW_LONG_EDGE = 300
 
 
 
@@ -325,38 +332,61 @@ class SiamRAMTracker:
 
     def initialize(self, frame: np.ndarray, bbox) -> None:
         """
-        Inputs:
-            frame - first video frame as a numpy BGR array (H x W x 3)
-            bbox  - initial bounding box of the target, [x, y, w, h] in pixels
-
-        What it does:
-            Hard-resets every piece of internal state — flags, histories, the EKF,
-            the appearance memory, the SiamABC tracker, occlusion phase counters,
-            velocity, and the distractor bank. Then seeds the tracker with the
-            given frame and bbox, builds a fresh EKF around that bbox, extracts
-            the first appearance descriptor, and commits it to memory so DRM has
-            a reference from frame 1.
-
-        Outputs:
-            None. All state is stored internally.
-
-        Why / where:
-            Must be called exactly once before the tracking loop. Without it the
-            EKF has no initial state, the memory bank is empty, and update() will
-            either crash or produce garbage. It is the mandatory setup step that
-            puts the tracker in a clean, ready-to-track state.
+        Same as the original except:
+        1. _frame_scale is computed from the first frame so all subsequent
+            processing is capped at _MAX_PROC_LONG_EDGE px on the long axis.
+        2. The frame passed to the tracker and all internal state is in
+            proc-frame (scaled) coordinates from the start.
+        3. The caller-supplied bbox (full-frame pixels) is scaled down before
+            being stored or passed to the underlying tracker.
+    
+        After this call every piece of internal state — EKF, conf_history,
+        size_history, current_bbox, held_box, tracker.tracking_state.bbox —
+        is in proc-frame pixel coordinates.  update() scales the output back.
         """
+        # ── 1. Compute frame scale FIRST ────────────────────────────────────────
+        h_fr, w_fr = frame.shape[:2]
+        long_edge = max(h_fr, w_fr)
+        self._frame_scale = (
+            self._MAX_PROC_LONG_EDGE / long_edge
+            if long_edge > self._MAX_PROC_LONG_EDGE
+            else 1.0
+        )
+    
+        proc_frame = self._prescale_frame(frame)
+    
+        # Scale the caller-supplied bbox into proc-frame coordinates.
+        bbox = np.round(
+            np.array(bbox, dtype=float) * self._frame_scale
+        ).astype(int)
+    
+        # ── 2. Everything below is identical to the original initialize() ────────
+        #    except `frame` → `proc_frame` and `bbox` is already scaled.
         self.tracker.enable_tta()
-        bbox = np.array(bbox, dtype=int)
-        self.tracker.initialize(frame, bbox)
+        self.tracker.initialize(proc_frame, bbox)
         self.current_bbox = bbox.copy()
         self.held_box = bbox.copy()
         self.in_occlusion = False
         self.frame_idx = 0
         self.velocity = np.zeros(2)
-        self.prev_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        self.init_frame = frame.copy()
-        self.init_bbox = bbox.copy()
+    
+        # _estimate_homography now works on proc_frame, so prev_gray must also
+        # live at proc resolution.  _flow_scale is recomputed from proc_frame dims.
+        h_p, w_p = proc_frame.shape[:2]
+        self._flow_scale = min(
+            0.5,
+             self._FLOW_LONG_EDGE/ max(h_p, w_p),
+        )
+        small_init = cv2.resize(
+            proc_frame,
+            (int(w_p * self._flow_scale), int(h_p * self._flow_scale)),
+            interpolation=cv2.INTER_LINEAR,
+        )
+        self.prev_gray = cv2.cvtColor(small_init, cv2.COLOR_BGR2GRAY)
+    
+        self.init_frame = proc_frame.copy()   # stored at proc resolution (saves RAM)
+        self.init_bbox  = bbox.copy()         # proc-frame coordinates
+    
         self._distractor_bank = deque(maxlen=self._distractor_bank_maxlen)
         self._out_of_frame = False
         self._exit_edge = None
@@ -374,82 +404,88 @@ class SiamRAMTracker:
         self._last_H = None
         self._last_H_reliable = False
         self._last_yolo = []
-
+    
         self._entry_streak = 0
         self._cand_frames = []
         self._occ_cam_vels = []
-
+    
         self._target_class_id = None
         self._class_warmup_done = False
-
-        self.ekf = BBoxEKF(bbox,
-                           process_noise=self.ekf_process_noise,
-                           meas_noise=self.ekf_meas_noise)
-
-        desc = _extract_descriptor(frame, bbox)
-
+    
+        self.ekf = BBoxEKF(
+            bbox,
+            process_noise=self.ekf_process_noise,
+            meas_noise=self.ekf_meas_noise,
+        )
+    
+        from utils.utils import _extract_descriptor
+        desc = _extract_descriptor(proc_frame, bbox)
+    
         self._vel_history.clear()
         self._center_history.clear()
         self._cam_vel_history.clear()
         if desc is not None:
             self.memory.try_admit(bbox, desc, bbox)
+    
+    
+    # ── Replacement update() ─────────────────────────────────────────────────────
 
-
-        h_fr, w_fr = frame.shape[:2]
-        self._flow_scale = min(0.5, self._FLOW_LONG_EDGE / max(h_fr, w_fr))
 
     def update(self, frame: np.ndarray) -> Tuple[np.ndarray, float, bool, List]:
         """
-        Inputs:
-            frame - current video frame as a numpy BGR array (H x W x 3)
-
-        What it does:
-            The main per-frame entry point. Increments the frame counter, clears
-            the per-frame YOLO cache, estimates background homography for camera
-            motion compensation, and ticks the EKF forward. Then routes to either
-            _normal_update or _occlusion_update depending on whether the target
-            is currently lost. Returns zeros and the occlusion flag when the
-            target is not visible.
-
-        Outputs:
-            bbox       - np.ndarray [x, y, w, h] of the predicted target position;
-                         all zeros if in occlusion
-            score      - float tracker confidence; 0.0 if in occlusion
-            in_occ     - bool True when the tracker is in occlusion recovery mode
-            last_yolo  - list of YOLO detection bboxes from this frame (may be empty)
-
-        Why / where:
-            Called every frame inside the tracking loop. It is the only public
-            method the caller needs after initialize(). All internal state
-            transitions — entering occlusion, recovery phases, EKF prediction —
-            happen as a side effect of calling this.
+        Same as the original except:
+        • The raw frame is prescaled to proc resolution at the very top.
+            Every function called from here — _estimate_homography, _normal_update,
+            _occlusion_update, tracker.update, _extract_descriptor, _yolo_detect —
+            receives proc_frame.  None of them ever touch the full-res frame.
+        • The returned bbox and _last_yolo detections are scaled back to
+            full-frame coordinates before being handed to the caller.
+    
+        Internally all coordinates remain in proc-frame space.
         """
+        # ── Prescale once — the only place the full frame is ever read ──────────
+        proc_frame = self._prescale_frame(frame)
+    
+        # ── Everything below is the original update() with frame → proc_frame ───
         self.frame_idx += 1
         self._last_yolo = []
         self._yolo_cache = []
         ekf = self.ekf
         assert ekf is not None
-
-        H, H_reliable, current_gray = self._estimate_homography(frame)
+    
+        H, H_reliable, current_gray = self._estimate_homography(proc_frame)
         self._last_H = H
         self._last_H_reliable = H_reliable
-
+    
         if self.in_occlusion and self._out_of_frame:
             ekf.P = ekf.P + ekf.Q
         else:
             ekf.predict(H=H, H_reliable=H_reliable)
-
+    
         if self.in_occlusion:
-            bbox, score = self._occlusion_update(frame)
+            bbox, score = self._occlusion_update(proc_frame)
         else:
-            bbox, score = self._normal_update(frame)
-
+            bbox, score = self._normal_update(proc_frame)
+    
         self.prev_gray = current_gray
-
+    
+        # ── Scale outputs back to full-frame coordinates ─────────────────────────
+        scale_inv = 1.0 / self._frame_scale   # == 1.0 when no prescaling was needed
+    
         if self.in_occlusion:
             return np.zeros(4, dtype=int), 0.0, True, self._last_yolo
+    
+        bbox_out = np.round(np.array(bbox, dtype=float) * scale_inv).astype(int)
+    
+        # Also scale any YOLO detections that were collected this frame.
+        yolo_out = [
+            np.round(np.array(b, dtype=float) * scale_inv).astype(int)
+            for b in self._last_yolo
+        ]
+    
+        return bbox_out, float(score), self.in_occlusion, yolo_out
+    
 
-        return bbox.copy(), float(score), self.in_occlusion, self._last_yolo
 
     def _normal_update(self, frame: np.ndarray) -> Tuple[np.ndarray, float]:
         """
@@ -2532,6 +2568,26 @@ class SiamRAMTracker:
             )
         
         return YOLO(engine_path)
+    
+
+
+    def _prescale_frame(self, frame: np.ndarray) -> np.ndarray:
+        """
+        Downscale frame to at most _MAX_PROC_LONG_EDGE on the long axis.
+        Uses self._frame_scale set once during initialize().
+    
+        Returns the original frame unchanged if _frame_scale == 1.0 (no copy,
+        no allocation — zero cost for inputs already at or below the cap).
+        """
+        if self._frame_scale == 1.0:
+            return frame
+        h, w = frame.shape[:2]
+        return cv2.resize(
+            frame,
+            (int(w * self._frame_scale), int(h * self._frame_scale)),
+            interpolation=cv2.INTER_LINEAR,
+        )
+
 
     @property
     def running_dynamic_bbox(self):

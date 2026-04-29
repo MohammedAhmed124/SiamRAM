@@ -39,6 +39,7 @@ import torch
 import torch.nn as nn
 
 from . import constants
+
 # from blocks import Encoder, AdjustLayer, BoxTower, SpatialSelfCrossAttention
 # TARGET_CLASSIFICATION_KEY = "TARGET_CLASSIFICATION_KEY"
 # TARGET_REGRESSION_LABEL_KEY = "TARGET_REGRESSION_LABEL_KEY"

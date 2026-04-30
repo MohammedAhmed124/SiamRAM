@@ -20,6 +20,8 @@ directory from which it is invoked.
 import argparse
 import json
 import os
+import subprocess
+import sys
 from collections import defaultdict
 from pathlib import Path
 
@@ -33,6 +35,8 @@ from models.SiamRAM import SiamRAMTracker
 from vis.test_model import run_inference
 
 BASE_DIR = Path(__file__).resolve().parent
+CHECKPOINTS_DIR = BASE_DIR / "checkpoints"
+CHECKPOINT_DOWNLOADER = CHECKPOINTS_DIR / "download_checkpoints.py"
 
 
 def parse_args():
@@ -94,10 +98,54 @@ def parse_args():
     return parser.parse_args()
 
 
+def _resolve_weights_path(path_value: str) -> Path:
+    path = Path(path_value).expanduser()
+    if path.is_absolute():
+        return path
+    if path.exists():
+        return path.resolve()
+    candidate = CHECKPOINTS_DIR / path.name
+    if candidate.exists():
+        return candidate.resolve()
+    return (BASE_DIR / path).resolve()
+
+
+def _ensure_required_checkpoints(weights_path: Path, yolo_path: Path) -> tuple[Path, Path]:
+    missing = [p for p in (weights_path, yolo_path) if not p.exists()]
+    if not missing:
+        return weights_path, yolo_path
+
+    if not CHECKPOINT_DOWNLOADER.exists():
+        missing_str = ", ".join(str(p) for p in missing)
+        raise FileNotFoundError(
+            f"Missing checkpoints: {missing_str}. Also missing downloader script: {CHECKPOINT_DOWNLOADER}"
+        )
+
+    print("Missing checkpoints detected. Downloading required models...")
+    subprocess.run([sys.executable, str(CHECKPOINT_DOWNLOADER)], check=True, cwd=str(BASE_DIR))
+
+    resolved_weights = _resolve_weights_path(str(weights_path))
+    resolved_yolo = _resolve_weights_path(str(yolo_path))
+    still_missing = [p for p in (resolved_weights, resolved_yolo) if not p.exists()]
+    if still_missing:
+        missing_str = ", ".join(str(p) for p in still_missing)
+        raise FileNotFoundError(f"Checkpoint download finished, but files are still missing: {missing_str}")
+
+    return resolved_weights, resolved_yolo
+
+
 def main():
     args = parse_args()
 
     config = OmegaConf.load(args.yaml_config_path)
+    resolved_weights_path = _resolve_weights_path(args.weights_path)
+    resolved_yolo_path = _resolve_weights_path(str(config.ram_tracker.yolo_weights))
+    resolved_weights_path, resolved_yolo_path = _ensure_required_checkpoints(
+        resolved_weights_path, resolved_yolo_path
+    )
+
+    args.weights_path = str(resolved_weights_path)
+    config.ram_tracker.yolo_weights = str(resolved_yolo_path)
     config.model.model_size = args.model_size
     if config.make_trt_engine:
         wrapped = get_trt_tracker(

@@ -13,6 +13,7 @@ from numpy._typing import NDArray
 from torch import Tensor
 from torch.nn import Module
 
+
 def _extract_descriptor(
     frame: np.ndarray,
     bbox,

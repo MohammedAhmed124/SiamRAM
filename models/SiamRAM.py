@@ -20,10 +20,6 @@ from utils.utils import _cos_sim, _extract_descriptor, _iou
 from .SiamABC.tracker.SiamABC_Tracker import SiamABCTracker
 from .motion_model import BBoxEKF
 from .ram_memory import AppearanceMemory
-import os
-
-
-
 
 
 class DRMKwargs(TypedDict):

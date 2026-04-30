@@ -1,5 +1,4 @@
 from collections import deque
-from statistics import mean
 from typing import Dict, Tuple, Union
 
 import numpy as np

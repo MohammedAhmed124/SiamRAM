@@ -29,7 +29,7 @@ from omegaconf import OmegaConf
 from models.SiamABC.tracker.tracker_setup import get_tracker
 from models.SiamRAM import SiamRAMTracker
 from vis.test_model import run_inference
-
+from models.SiamABC.tracker.trt_engine.siamabc import get_trt_tracker
 BASE_DIR = Path(__file__).resolve().parent
 
 
@@ -97,11 +97,18 @@ def main():
 
     config = OmegaConf.load(args.yaml_config_path)
     config.model.model_size = args.model_size
-
-    wrapped = get_tracker(config=config, weights_path=args.weights_path, lambda_tta=args.lambda_tta, continuous=False)
+    if config.make_trt_engine:
+        wrapped = get_trt_tracker(
+        config=config,
+        weights_path=args.weights_path,
+        **config.trt_engine  
+    )
+    else:
+        wrapped = get_tracker(config=config, weights_path=args.weights_path, lambda_tta=args.lambda_tta, continuous=False)
 
     tracker = SiamRAMTracker(
         siam_tracker=wrapped,
+        
         **config.ram_tracker 
     )
 
@@ -142,6 +149,7 @@ def main():
             initial_bbox=init_bbox,
             tracker=tracker,
             output_path=output_path,
+            output_video=False
         )
 
     print("\nCompiling submission CSV...")

@@ -135,7 +135,8 @@ class SiamRAMTracker:
         yolo_filter_class: bool = False,
         yolo_class_detect_frames: int = 5,
         copile_yolo=False,
-        debug=True
+        debug=True,
+        disable_camera_motion: bool = False,
     ):
         """
         Inputs:
@@ -294,6 +295,9 @@ class SiamRAMTracker:
         self.tiny_search_expand_growth_factor = tiny_search_expand_growth_factor
         self.tiny_search_expand_growth_every = tiny_search_expand_growth_every
         self.tiny_search_expand_max = tiny_search_expand_max
+
+        self.disable_camera_motion = disable_camera_motion 
+
 
         self.memory = AppearanceMemory(
             capacity=mem_capacity,
@@ -1604,11 +1608,15 @@ class SiamRAMTracker:
                 cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 8, 0.04,
             ),
         )
-        SCALE = 0.5
+        SCALE = self._flow_scale
 
         small = cv2.resize(frame, None, fx=SCALE, fy=SCALE,
                            interpolation=cv2.INTER_LINEAR)
         gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+
+
+        if self.disable_camera_motion:
+            return None, False, gray
 
         if self.prev_gray is None:
             return None, False, gray
@@ -2608,7 +2616,6 @@ class SiamRAMTracker:
 
     @property
     def running_dynamic_image(self):
-        return self.tracker.running_dynamic_image
         return self.tracker.running_dynamic_image
 
     @property

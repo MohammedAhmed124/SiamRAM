@@ -43,6 +43,7 @@ warnings.filterwarnings("ignore", message=".*tensorrt.plugin module is experimen
 os.environ["TORCH_LOGS"] = ""
 os.environ["TORCHDYNAMO_VERBOSE"] = "0"
 
+logging.basicConfig(level=logging.ERROR)
 logging.getLogger("torch").setLevel(logging.ERROR)
 logging.getLogger("torch_tensorrt").setLevel(logging.ERROR)
 logging.getLogger("torch._inductor").setLevel(logging.ERROR)

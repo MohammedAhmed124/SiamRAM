@@ -30,7 +30,7 @@ torchmetrics==0.11.4
 spikingjelly==0.0.0.0.14
 pytorch-toolbelt==0.4.3
 pytorchcv==0.0.65
-mobile-cv==0.1
+mobile-cv @ git+https://github.com/facebookresearch/mobile-vision.git
 thop==0.0.31-2005241907
 
 # YOLO / object detection

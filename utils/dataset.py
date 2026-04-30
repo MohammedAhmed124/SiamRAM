@@ -53,15 +53,11 @@ from utils.utils import (
     get_extended_crop,
 )
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Frame-naming patterns tried in order during auto-detection
-# Add new patterns here to support additional datasets without touching logic.
-# ─────────────────────────────────────────────────────────────────────────────
 _FRAME_PATTERNS = [
-    "{:06d}.jpg",  # UAV123, UAVTrack112
-    "img/{:04d}.jpg",  # DTB70
-    "{:04d}.jpg",  # some custom datasets
-    "img/{:06d}.jpg",  # rare variant
+    "{:06d}.jpg",
+    "img/{:04d}.jpg",
+    "{:04d}.jpg",
+    "img/{:06d}.jpg",
     "{:06d}.png",
     "img/{:04d}.png",
 ]
@@ -82,9 +78,6 @@ def _detect_frame_pattern(seq_path: str, probe_indices: List[int]) -> Optional[s
     return None
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Regression weight label (float-division fix retained from original)
-# ─────────────────────────────────────────────────────────────────────────────
 def _regression_weight_label(
     bbox,
     image_size: int = 255,
@@ -92,7 +85,7 @@ def _regression_weight_label(
     r_pos: int = 2,
     r_neg: int = 0,
 ) -> torch.Tensor:
-    bbox_c_x = bbox[0] + bbox[2] / 2.0  # float division — no floor bias
+    bbox_c_x = bbox[0] + bbox[2] / 2.0
     bbox_c_y = bbox[1] + bbox[3] / 2.0
 
     sz_x = np.floor(float(bbox_c_x / image_size * map_size))
@@ -111,9 +104,6 @@ def _regression_weight_label(
     return torch.from_numpy(label.astype(np.float32))
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Sequence wrapper
-# ─────────────────────────────────────────────────────────────────────────────
 class TrackingSequence:
     """
     Dataset-agnostic sequence wrapper.
@@ -148,11 +138,8 @@ class TrackingSequence:
         self.cls = row["class"]
         self.dataset = row["dataset"]
 
-        # Allow the dataframe to pin a pattern; otherwise auto-detect lazily.
         self._frame_pattern: Optional[str] = row.get("frame_pattern") or None
         self._bboxes: Optional[List[np.ndarray]] = None
-
-    # ── frame path resolution ─────────────────────────────────────────────────
 
     def _resolve_frame_pattern(self) -> str:
         """
@@ -207,8 +194,6 @@ class TrackingSequence:
             self._frame_pattern = self._resolve_frame_pattern()
         return os.path.join(self.seq_path, self._frame_pattern.format(frame_idx))
 
-    # ── annotation loading ────────────────────────────────────────────────────
-
     def _load_bboxes(self) -> None:
         if self._bboxes is not None:
             return
@@ -218,8 +203,7 @@ class TrackingSequence:
                 line = line.strip()
                 if not line:
                     continue
-                # Normalise separators; take only the first 4 columns so that
-                # DTB70's extra occlusion/out-of-view flags are silently ignored.
+
                 vals = line.replace("\t", ",").split(",")
                 try:
                     x, y, w, h = (float(v) for v in vals[:4])
@@ -246,7 +230,6 @@ class TrackingSequence:
             return np.full(4, np.nan, dtype=np.float32)
         return self._bboxes[local].copy()
 
-    # ── validity ──────────────────────────────────────────────────────────────
     @staticmethod
     def is_valid_bbox(bbox: np.ndarray) -> bool:
         """
@@ -340,9 +323,6 @@ class TrackingSequence:
         return t_idx, s_idx, s_bbox
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Dataset
-# ─────────────────────────────────────────────────────────────────────────────
 class UAVTrackingDataset(Dataset):
     """
     Unified tracking dataset for UAV123, UAVTrack112, and DTB70.
@@ -415,8 +395,6 @@ class UAVTrackingDataset(Dataset):
             f"score_size={self.score_size}"
         )
 
-    # ── public interface ──────────────────────────────────────────────────────
-
     def __len__(self) -> int:
         return self.num_samples
 
@@ -432,8 +410,6 @@ class UAVTrackingDataset(Dataset):
                     return self._dummy_negative()
         return self._dummy_negative()
 
-    # ── positive sampling ─────────────────────────────────────────────────────
-
     def _positive_sample(self) -> Dict[str, torch.Tensor]:
         for _ in range(10):
             seq = self.rng.choice(self.sequences)
@@ -443,8 +419,6 @@ class UAVTrackingDataset(Dataset):
             if not ok:
                 continue
 
-            # Both dynamic crops come from the same intermediate frame
-            # (max_frame_gap=0 forces t_idx == s_idx inside the pair sampler)
             dt_crop, _, _, ds_crop, _, _, ok_dyn = self.sample_search_template_pair(
                 self.rng, seq,
                 lower_end=t_idx, upper_end=s_idx,
@@ -515,8 +489,6 @@ class UAVTrackingDataset(Dataset):
 
         return t_crop, t_idx, template_bbox, s_crop, s_idx, bbox_in_c, True
 
-    # ── crop helpers (positive path) ──────────────────────────────────────────
-
     def get_template_crop(self, image: np.ndarray, rect: np.ndarray):
         """
         Extract and preprocess a template crop from an image.
@@ -577,8 +549,6 @@ class UAVTrackingDataset(Dataset):
         img = self._preprocess_image(crop, self._search_transform)
         return img, search_bbox, ctx
 
-    # ── negative sampling ─────────────────────────────────────────────────────
-
     def _negative_sample(self) -> Dict[str, torch.Tensor]:
         """
         Build a negative training sample with the following strict structure:
@@ -597,9 +567,6 @@ class UAVTrackingDataset(Dataset):
         for _ in range(15):
             seq = self.rng.choice(self.sequences)
 
-            # ── Step 1: sample a positive (t_idx, s_idx) pair ─────────────────
-            # This gives us the template frame and defines the [t_idx, s_idx]
-            # range for the dynamic intermediate frame.
             t_idx, s_idx, s_bbox = seq.sample_search_template_idx_pair(
                 self.rng, max_frame_gap=self.max_frame_gap
             )
@@ -612,17 +579,13 @@ class UAVTrackingDataset(Dataset):
 
             t_img = self._load_image(seq.frame_path(t_idx))
 
-            # template: positive crop of the actual target from frame t_idx
             t_crop, _ = self.get_template_crop(t_img, t_bbox)
 
-            # ── Step 2: sample the dynamic frame dyn_idx ∈ [t_idx, s_idx] ────
-            # Both dynamic_template and dynamic_search must come from this
-            # SAME intermediate frame (positive target crops, different styles).
             dyn_idx = seq.sample_valid_frame(
                 self.rng, lower_end=t_idx, upper_end=s_idx
             )
             if dyn_idx is None:
-                # Fallback: reuse the template frame.  Still between t and s.
+
                 dyn_idx = t_idx
                 dyn_img = t_img
                 dyn_bbox = t_bbox.copy()
@@ -633,23 +596,17 @@ class UAVTrackingDataset(Dataset):
             if not seq.is_valid_bbox(dyn_bbox):
                 continue
 
-            # dynamic_template: template-style positive crop from dyn_idx
             dynamic_template, _ = self.get_template_crop(dyn_img, dyn_bbox)
 
-            # dynamic_search: search-style positive crop from the SAME dyn_idx
             dynamic_search, _, _ = self.get_search_crop(dyn_img, dyn_bbox)
 
-            # ── Step 3: build the negative search crop ────────────────────────
-            # The target (s_bbox) must NEVER appear inside the search crop.
-            # We attempt two strategies: shifted anchor (75%) or distractor (25%).
-            # Both guarantee absence via explicit bbox overlap check.
             if self.rng.random() < 0.75:
                 s_crop = self._build_shifted_negative_search(seq, s_idx, s_bbox)
             else:
                 s_crop = self._build_distractor_negative_search(seq, s_idx, s_bbox)
 
             if s_crop is None:
-                continue  # all retries failed; try a different sequence
+                continue
 
             S = self.score_size
             cls_label = np.zeros((1, S, S), dtype=np.float32)
@@ -663,8 +620,6 @@ class UAVTrackingDataset(Dataset):
             )
 
         return self._dummy_negative()
-
-    # ── guaranteed-negative crop builders ────────────────────────────────────
 
     @staticmethod
     def _bboxes_overlap(a: np.ndarray, b: np.ndarray) -> bool:
@@ -723,11 +678,6 @@ class UAVTrackingDataset(Dataset):
 
         x, y, w, h = target_clamped.astype(float)
 
-        # Minimum shift magnitude that should clear the context window.
-        # Math: for a pure horizontal right-shift of magnitude s,
-        # context_left = (x + s) - search_context * w.
-        # For target_right (= x + w) ≤ context_left: s ≥ (1 + search_context) * w.
-        # We add 0.1× as margin; the overlap check catches any residual cases.
         min_shift_x = (1.0 + self.search_context + 0.1) * w
         min_shift_y = (1.0 + self.search_context + 0.1) * h
 
@@ -743,7 +693,7 @@ class UAVTrackingDataset(Dataset):
             elif direction == 'down':
                 shift_x = self.rng.uniform(-0.5, 0.5) * w
                 shift_y = self.rng.uniform(min_shift_y, min_shift_y + 2.0 * h)
-            else:  # 'up'
+            else:
                 shift_x = self.rng.uniform(-0.5, 0.5) * w
                 shift_y = -self.rng.uniform(min_shift_y, min_shift_y + 2.0 * h)
 
@@ -759,12 +709,8 @@ class UAVTrackingDataset(Dataset):
                 image_width=W, image_height=H,
             )
 
-            # ── CRITICAL SAFETY CHECK ─────────────────────────────────────────
-            # The context window is what get_extended_crop will actually crop.
-            # If it overlaps target_clamped, the target is visible → REJECT.
             if self._bboxes_overlap(context, target_clamped):
                 continue
-            # ─────────────────────────────────────────────────────────────────
 
             raw_crop, _, _ = get_extended_crop(
                 image=img, bbox=anchor, context=context,
@@ -773,7 +719,7 @@ class UAVTrackingDataset(Dataset):
             )
             return self._preprocess_image(raw_crop, self._search_transform)
 
-        return None  # exhausted all retries
+        return None
 
     def _build_distractor_negative_search(
         self,
@@ -806,7 +752,7 @@ class UAVTrackingDataset(Dataset):
         _, _, w, h = target_clamped.astype(float)
 
         for _ in range(50):
-            # Random center anywhere in the image
+
             cx_bg = self.rng.uniform(0.0, float(W))
             cy_bg = self.rng.uniform(0.0, float(H))
 
@@ -822,11 +768,8 @@ class UAVTrackingDataset(Dataset):
                 image_width=W, image_height=H,
             )
 
-            # ── CRITICAL SAFETY CHECK ─────────────────────────────────────────
-            # Reject any candidate whose context window contains the target.
             if self._bboxes_overlap(context, target_clamped):
                 continue
-            # ─────────────────────────────────────────────────────────────────
 
             raw_crop, _, _ = get_extended_crop(
                 image=img, bbox=anchor, context=context,
@@ -835,9 +778,7 @@ class UAVTrackingDataset(Dataset):
             )
             return self._preprocess_image(raw_crop, self._search_transform)
 
-        return None  # exhausted all retries
-
-    # ── private template/search helpers (used by _easy_negative if re-enabled) ─
+        return None
 
     def _get_template_crop(
         self, img: np.ndarray, bbox: np.ndarray
@@ -871,37 +812,6 @@ class UAVTrackingDataset(Dataset):
             padding_value=np.mean(img, axis=(0, 1)),
         )
         return self._preprocess_image(crop, self._search_transform)
-
-    # ── easy negative (disabled; requires update before re-enabling) ──────────
-
-    # def _easy_negative(self) -> Dict[str, torch.Tensor]:
-    #     """
-    #     NOTE: This method is NOT up-to-date with the negative sample contract.
-    #     Before re-enabling it in _negative_sample, update it to:
-    #       1. Use _build_shifted_negative_search or _build_distractor_negative_search
-    #          for the search crop (with the explicit overlap check).
-    #       2. Supply proper dynamic_template and dynamic_search from the same
-    #          intermediate positive frame (not jitter of template/search).
-    #     """
-    #     for _ in range(30):
-    #         seq_a, seq_b = self.rng.sample(self.sequences, 2)
-    #         t_idx = seq_a.sample_valid_frame(self.rng)
-    #         s_idx = seq_b.sample_valid_frame(self.rng)
-    #         if t_idx is None or s_idx is None:
-    #             continue
-    #         t_img  = self._load_image(seq_a.frame_path(t_idx))
-    #         s_img  = self._load_image(seq_b.frame_path(s_idx))
-    #         t_bbox = seq_a.get_bbox(t_idx)
-    #         s_bbox = seq_b.get_bbox(s_idx)
-    #
-    #         t_crop = self._get_template_crop(t_img, t_bbox)
-    #         s_crop = self._get_search_crop(s_img, s_bbox)
-    #         if t_crop is None or s_crop is None:
-    #             continue
-    #         # !! dynamic_template and dynamic_search are missing here !!
-    #     return self._dummy_negative()
-
-    # ── packing ───────────────────────────────────────────────────────────────
 
     def _pack(
         self,
@@ -940,8 +850,6 @@ class UAVTrackingDataset(Dataset):
             "is_positive": torch.tensor(False, dtype=torch.bool),
             "path": "None",
         }
-
-    # ── utilities ─────────────────────────────────────────────────────────────
 
     @staticmethod
     def _load_image(path: str) -> np.ndarray:
@@ -1022,5 +930,4 @@ class UAVTrackingDataset(Dataset):
         )
 
 
-# Keep the old name alive so existing call-sites don't break
 UAV123TrackingDataset = UAVTrackingDataset

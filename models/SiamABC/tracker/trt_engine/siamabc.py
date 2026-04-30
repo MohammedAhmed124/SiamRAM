@@ -58,10 +58,10 @@ import torch
 import torch.nn as nn
 import torch_tensorrt
 
-from ...model import constants
-from ...model.adaptive_batch_norm import AdaptiveBatchNorm
 from .connector import _build_connect_engines, _dispatch_connect
 from .trt_utils import _AttentionNeck, _FeatureExtractorModule, _cast_module
+from ...model import constants
+from ...model.adaptive_batch_norm import AdaptiveBatchNorm
 
 log = logging.getLogger(__name__)
 logging.getLogger("torch_tensorrt").setLevel(logging.ERROR)
@@ -100,7 +100,6 @@ class TRTSiamABCNet:
         adjust_channels: int = 256,
     ) -> None:
 
-        # self._model = model.eval()
         self._norm_lambda = norm_lambda
         self._device = torch.device(f"cuda:{cuda_id}")
         self._fp16 = fp16
@@ -112,9 +111,6 @@ class TRTSiamABCNet:
             {torch.float16} if fp16 else {torch.float32}
         )
 
-        # ------------------------------------------------------------------ #
-        # Probe output shapes (needed for connect engine + attention warmup)  #
-        # ------------------------------------------------------------------ #
         with torch.no_grad():
             _t = torch.randn(opt_batch, 3, template_size, template_size,
                              device=self._device, dtype=torch.float32)
@@ -126,9 +122,6 @@ class TRTSiamABCNet:
         _, C, h_t, w_t = t_feat_shape
         _, _, h_s, w_s = s_feat_shape
 
-        # ------------------------------------------------------------------ #
-        # Single dynamic-shape TRT backbone engine (TorchScript backend)     #
-        # ------------------------------------------------------------------ #
         self._trt_feat = self._compile_feat(
             model,
             min_hw=template_size,
@@ -140,22 +133,15 @@ class TRTSiamABCNet:
             enabled_precisions=enabled_precisions,
         )
 
-        # ------------------------------------------------------------------ #
-        # Attention + neck — torch.compile, FP32, dynamic shape              #
-        # ------------------------------------------------------------------ #
         _attn_mod = _AttentionNeck(model).eval().to(self._device).float()
         self._trt_attn = torch.compile(_attn_mod, dynamic=True, fullgraph=True)
 
-        # Warm both sizes eagerly so Inductor compiles both specializations now
         with torch.no_grad():
             for hw in (h_t, h_s):
                 _dummy = torch.randn(1, adjust_channels * 2, hw, hw,
                                      device=self._device, dtype=torch.float32)
                 self._trt_attn(_dummy)
 
-        # ------------------------------------------------------------------ #
-        # BoxTower connect engines (FP32)                                     #
-        # ------------------------------------------------------------------ #
         self._connect_engines = _build_connect_engines(
             model,
             s_feat_shape=s_feat_shape,
@@ -163,10 +149,6 @@ class TRTSiamABCNet:
             norm_lambda=norm_lambda,
             device=self._device,
         )
-
-    # ---------------------------------------------------------------------- #
-    # Compilation helpers                                                     #
-    # ---------------------------------------------------------------------- #
 
     def _compile_feat(
         self,
@@ -212,10 +194,6 @@ class TRTSiamABCNet:
             truncate_long_and_double=True,
         )
 
-    # ---------------------------------------------------------------------- #
-    # Interface expected by SiamABCTracker                                   #
-    # ---------------------------------------------------------------------- #
-
     def get_features(self, crop: torch.Tensor) -> torch.Tensor:
         """
         Mirrors SiamABCNet.get_features(crop).
@@ -244,16 +222,13 @@ class TRTSiamABCNet:
         def _cast(t: torch.Tensor) -> torch.Tensor:
             return t.to(dtype=self._dtype, device=self._device)
 
-        sf  = _cast(search_features)
+        sf = _cast(search_features)
         dsf = _cast(dynamic_search_features)
-        tf  = _cast(template_features)
+        tf = _cast(template_features)
         dtf = _cast(dynamic_template_features)
 
-        # .float()      → FP32 for attention engine
-        # .contiguous() → enforce NCHW; TRT/Inductor can emit channel-last
-        #                  tensors which silently corrupt downstream conv ops
-        t_combined = torch.cat([tf.float(),  dtf.float()], dim=1).contiguous()
-        s_combined = torch.cat([dsf.float(), sf.float()],  dim=1).contiguous()
+        t_combined = torch.cat([tf.float(), dtf.float()], dim=1).contiguous()
+        s_combined = torch.cat([dsf.float(), sf.float()], dim=1).contiguous()
 
         t_mixed = self._trt_attn(t_combined).contiguous()
         s_mixed = self._trt_attn(s_combined).contiguous()
@@ -269,16 +244,10 @@ class TRTSiamABCNet:
 
         return {
             constants.TARGET_REGRESSION_LABEL_KEY: bbox_pred.float(),
-            constants.TARGET_CLASSIFICATION_KEY:   cls_pred.float(),
+            constants.TARGET_CLASSIFICATION_KEY: cls_pred.float(),
             constants.TRACKER_TARGET_SEARCH_SIM_SCORE: None,
-            constants.TRACKER_ATTENTION_MAP:        s_mixed.float(),
+            constants.TRACKER_ATTENTION_MAP: s_mixed.float(),
         }
-
-    # def modules(self):
-    #     """Delegated to original FP32 model for AdaptiveBatchNorm discovery."""
-    #     return self._model.modules()
-
-
 
     def modules(self):
         """
@@ -295,10 +264,6 @@ class TRTSiamABCNet:
     def invalidate_template_cache(self) -> None:
         """No-op — TRT engines are stateless."""
 
-
-# --------------------------------------------------------------------------- #
-# Factory                                                                      #
-# --------------------------------------------------------------------------- #
 
 def get_trt_tracker(
     config,
@@ -318,7 +283,7 @@ def get_trt_tracker(
     from hydra.utils import instantiate
     from pytorch_toolbelt.utils import transfer_weights
 
-    from ..SiamABC_Tracker import SiamABCTracker  # noqa: F401
+    from ..SiamABC_Tracker import SiamABCTracker
 
     model: nn.Module = instantiate(
         config["model"], inference_mode=True, norm_lambda=lambda_tta

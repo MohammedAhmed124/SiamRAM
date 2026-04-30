@@ -39,30 +39,23 @@ import torch
 import torch.nn as nn
 
 from . import constants
-
-# from blocks import Encoder, AdjustLayer, BoxTower, SpatialSelfCrossAttention
-# TARGET_CLASSIFICATION_KEY = "TARGET_CLASSIFICATION_KEY"
-# TARGET_REGRESSION_LABEL_KEY = "TARGET_REGRESSION_LABEL_KEY"
-# SIMSIAM_SEARCH_OUT_KEY = "SIMSIAM_SEARCH_OUT_KEY"
-# SIMSIAM_DYNAMIC_OUT_KEY = "SIMSIAM_DYNAMIC_OUT_KEY"
 from .blocks import AdjustLayer, BoxTower, Encoder, EncoderResNet, FastParallelPolarizedSelfAttention
 
-# Comprehensive fix for Python 3.10+ compatibility with older libraries
-collections.Mapping = collections.abc.Mapping  # type: ignore
-collections.MutableMapping = collections.abc.MutableMapping  # type: ignore
-collections.Iterable = collections.abc.Iterable  # type: ignore
-collections.Iterator = collections.abc.Iterator  # type: ignore
-collections.Sequence = collections.abc.Sequence  # type: ignore
-collections.MutableSequence = collections.abc.MutableSequence  # type: ignore
-collections.Set = collections.abc.Set  # type: ignore
-collections.MutableSet = collections.abc.MutableSet  # type: ignore
-collections.Callable = collections.abc.Callable  # type: ignore
-collections.Hashable = collections.abc.Hashable  # type: ignore
-collections.Sized = collections.abc.Sized  # type: ignore
-collections.Container = collections.abc.Container  # type: ignore
-collections.ValuesView = collections.abc.ValuesView  # type: ignore
-collections.KeysView = collections.abc.KeysView  # type: ignore
-collections.ItemsView = collections.abc.ItemsView  # type: ignore
+collections.Mapping = collections.abc.Mapping
+collections.MutableMapping = collections.abc.MutableMapping
+collections.Iterable = collections.abc.Iterable
+collections.Iterator = collections.abc.Iterator
+collections.Sequence = collections.abc.Sequence
+collections.MutableSequence = collections.abc.MutableSequence
+collections.Set = collections.abc.Set
+collections.MutableSet = collections.abc.MutableSet
+collections.Callable = collections.abc.Callable
+collections.Hashable = collections.abc.Hashable
+collections.Sized = collections.abc.Sized
+collections.Container = collections.abc.Container
+collections.ValuesView = collections.abc.ValuesView
+collections.KeysView = collections.abc.KeysView
+collections.ItemsView = collections.abc.ItemsView
 
 
 class SiamABCNet(nn.Module):
@@ -254,7 +247,6 @@ class SiamABCNet(nn.Module):
                 lam: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor | List[torch.Tensor]]:
         template, dynamic_template, search, dynamic_search = x
 
-        # lam defaults to 0 (TTA off) when not supplied, e.g. during training.
         if lam is None:
             lam = torch.zeros(1, device=template.device)
 

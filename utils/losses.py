@@ -71,6 +71,7 @@ class TrackingHeadLoss(nn.Module):
     Computes Focal Loss for the classification map and IoU Loss (masked by
     positive labels) for the regression map.
     """
+
     def __init__(self, cls_weight=1.0, bbox_weight=1.0,
                  focal_alpha=0.25, focal_gamma=2.0):
         """
@@ -106,7 +107,7 @@ class TrackingHeadLoss(nn.Module):
             bce = self.bce(pred[idx], lbl)
 
             p_t = p * lbl + (1 - p) * (
-                1 - lbl)  # high when model is confident and correect, low when confident and wrong
+                1 - lbl)
             alpha_t = self.focal_alpha * lbl + (1 - self.focal_alpha) * (1 - lbl)
             focal_w = alpha_t * (1 - p_t) ** self.focal_gamma
 

@@ -16,7 +16,6 @@ from numpy._typing import NDArray
 from ultralytics import YOLO
 
 from utils.utils import _cos_sim, _extract_descriptor, _iou
-
 from .SiamABC.tracker.SiamABC_Tracker import SiamABCTracker
 from .motion_model import BBoxEKF
 from .ram_memory import AppearanceMemory
@@ -53,9 +52,7 @@ class DRMKwargs(TypedDict):
 
 
 class SiamRAMTracker:
-
-    _MAX_PROC_LONG_EDGE: int = 1280   # cap for ALL processing after frame entry
-
+    _MAX_PROC_LONG_EDGE: int = 1280
 
     def __init__(
         self,
@@ -292,8 +289,7 @@ class SiamRAMTracker:
         self.tiny_search_expand_growth_every = tiny_search_expand_growth_every
         self.tiny_search_expand_max = tiny_search_expand_max
 
-        self.disable_camera_motion = disable_camera_motion 
-
+        self.disable_camera_motion = disable_camera_motion
 
         self.memory = AppearanceMemory(
             capacity=mem_capacity,
@@ -344,8 +340,6 @@ class SiamRAMTracker:
         self._last_H_reliable: bool = False
         self._FLOW_LONG_EDGE = 300
 
-
-
         self._cached_pts: Optional[np.ndarray] = None
         self._cached_shape: Optional[tuple[int, int]] = None
 
@@ -363,12 +357,12 @@ class SiamRAMTracker:
             proc-frame (scaled) coordinates from the start.
         3. The caller-supplied bbox (full-frame pixels) is scaled down before
             being stored or passed to the underlying tracker.
-    
+
         After this call every piece of internal state — EKF, conf_history,
         size_history, current_bbox, held_box, tracker.tracking_state.bbox —
         is in proc-frame pixel coordinates.  update() scales the output back.
         """
-        # ── 1. Compute frame scale FIRST ────────────────────────────────────────
+
         h_fr, w_fr = frame.shape[:2]
         long_edge = max(h_fr, w_fr)
         self._frame_scale = (
@@ -376,16 +370,13 @@ class SiamRAMTracker:
             if long_edge > self._MAX_PROC_LONG_EDGE
             else 1.0
         )
-    
+
         proc_frame = self._prescale_frame(frame)
-    
-        # Scale the caller-supplied bbox into proc-frame coordinates.
+
         bbox = np.round(
             np.array(bbox, dtype=float) * self._frame_scale
         ).astype(int)
-    
-        # ── 2. Everything below is identical to the original initialize() ────────
-        #    except `frame` → `proc_frame` and `bbox` is already scaled.
+
         self.tracker.enable_tta()
         self.tracker.initialize(proc_frame, bbox)
         self.current_bbox = bbox.copy()
@@ -393,13 +384,11 @@ class SiamRAMTracker:
         self.in_occlusion = False
         self.frame_idx = 0
         self.velocity = np.zeros(2)
-    
-        # _estimate_homography now works on proc_frame, so prev_gray must also
-        # live at proc resolution.  _flow_scale is recomputed from proc_frame dims.
+
         h_p, w_p = proc_frame.shape[:2]
         self._flow_scale = min(
             0.5,
-             self._FLOW_LONG_EDGE/ max(h_p, w_p),
+            self._FLOW_LONG_EDGE / max(h_p, w_p),
         )
         small_init = cv2.resize(
             proc_frame,
@@ -407,10 +396,10 @@ class SiamRAMTracker:
             interpolation=cv2.INTER_LINEAR,
         )
         self.prev_gray = cv2.cvtColor(small_init, cv2.COLOR_BGR2GRAY)
-    
-        self.init_frame = proc_frame.copy()   # stored at proc resolution (saves RAM)
-        self.init_bbox  = bbox.copy()         # proc-frame coordinates
-    
+
+        self.init_frame = proc_frame.copy()
+        self.init_bbox = bbox.copy()
+
         self._distractor_bank = deque(maxlen=self._distractor_bank_maxlen)
         self._out_of_frame = False
         self._exit_edge = None
@@ -428,32 +417,28 @@ class SiamRAMTracker:
         self._last_H = None
         self._last_H_reliable = False
         self._last_yolo = []
-    
+
         self._entry_streak = 0
         self._cand_frames = []
         self._occ_cam_vels = []
-    
+
         self._target_class_id = None
         self._class_warmup_done = False
-    
+
         self.ekf = BBoxEKF(
             bbox,
             process_noise=self.ekf_process_noise,
             meas_noise=self.ekf_meas_noise,
         )
-    
+
         from utils.utils import _extract_descriptor
         desc = _extract_descriptor(proc_frame, bbox)
-    
+
         self._vel_history.clear()
         self._center_history.clear()
         self._cam_vel_history.clear()
         if desc is not None:
             self.memory.try_admit(bbox, desc, bbox)
-    
-    
-    # ── Replacement update() ─────────────────────────────────────────────────────
-
 
     def update(self, frame: np.ndarray) -> Tuple[np.ndarray, float, bool, List]:
         """
@@ -464,52 +449,47 @@ class SiamRAMTracker:
             receives proc_frame.  None of them ever touch the full-res frame.
         • The returned bbox and _last_yolo detections are scaled back to
             full-frame coordinates before being handed to the caller.
-    
+
         Internally all coordinates remain in proc-frame space.
         """
-        # ── Prescale once — the only place the full frame is ever read ──────────
+
         proc_frame = self._prescale_frame(frame)
-    
-        # ── Everything below is the original update() with frame → proc_frame ───
+
         self.frame_idx += 1
         self._last_yolo = []
         self._yolo_cache = []
         ekf = self.ekf
         assert ekf is not None
-    
+
         H, H_reliable, current_gray = self._estimate_homography(proc_frame)
         self._last_H = H
         self._last_H_reliable = H_reliable
-    
+
         if self.in_occlusion and self._out_of_frame:
             ekf.P = ekf.P + ekf.Q
         else:
             ekf.predict(H=H, H_reliable=H_reliable)
-    
+
         if self.in_occlusion:
             bbox, score = self._occlusion_update(proc_frame)
         else:
             bbox, score = self._normal_update(proc_frame)
-    
+
         self.prev_gray = current_gray
-    
-        # ── Scale outputs back to full-frame coordinates ─────────────────────────
-        scale_inv = 1.0 / self._frame_scale   # == 1.0 when no prescaling was needed
-    
+
+        scale_inv = 1.0 / self._frame_scale
+
         if self.in_occlusion:
             return np.zeros(4, dtype=int), 0.0, True, self._last_yolo
-    
+
         bbox_out = np.round(np.array(bbox, dtype=float) * scale_inv).astype(int)
-    
-        # Also scale any YOLO detections that were collected this frame.
+
         yolo_out = [
             np.round(np.array(b, dtype=float) * scale_inv).astype(int)
             for b in self._last_yolo
         ]
-    
-        return bbox_out, float(score), self.in_occlusion, yolo_out
-    
 
+        return bbox_out, float(score), self.in_occlusion, yolo_out
 
     def _normal_update(self, frame: np.ndarray) -> Tuple[np.ndarray, float]:
         """
@@ -833,7 +813,7 @@ class SiamRAMTracker:
 
         else:
             obj_w, obj_h = self._get_median_size()
-            oof_margin = float(max(obj_w, obj_h)) * 0.5  # must be half an object-width outside
+            oof_margin = float(max(obj_w, obj_h)) * 0.5
             if (self._search_cx < -oof_margin or self._search_cx >= w_fr + oof_margin or
                 self._search_cy < -oof_margin or self._search_cy >= h_fr + oof_margin):
                 if self._search_cx >= w_fr + oof_margin:
@@ -1175,9 +1155,6 @@ class SiamRAMTracker:
         final_scored = []
         for (drm_bbox, drm_score) in drm_results:
             cand_idx = _find_cand_idx(drm_bbox)
-            # vel = (cand_vels[cand_idx]
-            #        if cand_idx is not None and cand_idx < len(cand_vels)
-            #        else None)
 
             vel = (cand_vels[cand_idx]
                    if cand_idx is not None and cand_idx < len(cand_vels)
@@ -1609,7 +1586,6 @@ class SiamRAMTracker:
         small = cv2.resize(frame, None, fx=SCALE, fy=SCALE,
                            interpolation=cv2.INTER_LINEAR)
         gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-
 
         if self.disable_camera_motion:
             return None, False, gray
@@ -2354,12 +2330,6 @@ class SiamRAMTracker:
             if sum([e1[edge], e2[edge], e3[edge]]) >= 2:
                 return True, edge
 
-        # for edge in ('right', 'left', 'bottom', 'top'):
-        #     # Proximity (e1) must be one of the agreeing votes.
-        #     # Tests 2+3 alone are unreliable during entry-streak drift.
-        #     if e1[edge] and (e2[edge] or e3[edge]):
-        #         return True, edge
-
         if lx2 >= w_fr:
             return True, 'right'
         if lx1 <= 0:
@@ -2568,12 +2538,10 @@ class SiamRAMTracker:
         engine_path = weights_path.replace(".pt", ".engine")
 
         if not os.path.exists(engine_path) or force_recompile:
-            # Use a print statement to keep it consistent with your previous logs
             print("Compiling YOLO model using TensorRT at 320x320 (may take a minute)...")
 
             model = YOLO(weights_path)
 
-            # Add imgsz=320 here to lock the engine to that resolution
             model.export(
                 format="engine",
                 half=True,
@@ -2582,14 +2550,12 @@ class SiamRAMTracker:
             )
 
         return YOLO(engine_path)
-    
-
 
     def _prescale_frame(self, frame: np.ndarray) -> np.ndarray:
         """
         Downscale frame to at most _MAX_PROC_LONG_EDGE on the long axis.
         Uses self._frame_scale set once during initialize().
-    
+
         Returns the original frame unchanged if _frame_scale == 1.0 (no copy,
         no allocation — zero cost for inputs already at or below the cap).
         """
@@ -2601,7 +2567,6 @@ class SiamRAMTracker:
             (int(w * self._frame_scale), int(h * self._frame_scale)),
             interpolation=cv2.INTER_LINEAR,
         )
-
 
     @property
     def running_dynamic_bbox(self):

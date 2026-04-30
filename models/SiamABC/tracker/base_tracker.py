@@ -32,6 +32,7 @@ class TrackingState:
         pred_score (float): Confidence score of the last prediction.
         paths (Deque): Historical sequence of predicted bounding boxes.
     """
+
     def __init__(self) -> None:
         """
         Initialise an empty TrackingState.
@@ -64,6 +65,7 @@ class Tracker(ABC):
     Provides common utilities for image preprocessing, device management,
     and state handling that are shared across different tracker variants.
     """
+
     def __init__(self, model: nn.Module, cuda_id: Union[int, str] = 0, **tracking_config: Any) -> None:
         """
         Initialise the base tracker.
@@ -144,21 +146,17 @@ class Tracker(ABC):
         return process
 
     def _rescale_bbox(self, bbox: np.array, padded_box) -> np.array:
-        # 1. Calculate scales first
+
         instance_size = self.tracking_config["instance_size"]
         w_scale = padded_box[2] / instance_size
         h_scale = padded_box[3] / instance_size
 
-        # 2. Safety check: Ensure scales and bbox values are valid numbers
-        # This prevents the "OverflowError: cannot convert float infinity to integer"
         if not all(math.isfinite(x) for x in [w_scale, h_scale] + list(bbox)):
-            return [0, 0, 3, 3] 
+            return [0, 0, 3, 3]
 
-        # 3. Apply scales and enforce a minimum size of 3 pixels
-        # This ensures round() never receives a 0 or Inf that breaks the tracker
         new_w = max(3, round(bbox[2] * w_scale))
         new_h = max(3, round(bbox[3] * h_scale))
-        
+
         new_x = round(bbox[0] * w_scale + padded_box[0])
         new_y = round(bbox[1] * h_scale + padded_box[1])
 
@@ -169,15 +167,7 @@ class Tracker(ABC):
         image: np.ndarray,
         transform: Optional[Callable[..., Any]] = None,
     ) -> torch.Tensor:
-        # Single CPU copy path:
-        #   torch.from_numpy shares memory (no copy).
-        #   .permute(2,0,1) changes strides only (no copy).
-        #   .unsqueeze(0) adds a dim (no copy).
-        #   .float() does the single necessary copy: uint8 HWC → float32 CHW.
-        #   .to(device) is the GPU transfer.
-        #
-        # Previous version called .copy() before transpose (1 extra CPU copy),
-        # then .float() (another copy) = 2 CPU copies total for every crop.
+
         x = (
             torch.from_numpy(image[:, :, :3])
             .permute(2, 0, 1)

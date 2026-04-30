@@ -5,7 +5,6 @@ This module provides helper functions to load model checkpoints and
 instantiate tracker objects with appropriate configurations.
 """
 
-
 from typing import Optional, Union
 
 import torch
@@ -44,11 +43,6 @@ def load_model(
     return model
 
 
-
-
-
-
-
 def get_tracker(config, weights_path: str, lambda_tta: float = 0.1, continuous=False) -> SiamABCTracker:
     """
     Initialise a SiamABCTracker instance from a configuration.
@@ -63,9 +57,6 @@ def get_tracker(config, weights_path: str, lambda_tta: float = 0.1, continuous=F
         SiamABCTracker: An initialised tracker instance.
     """
 
-    # inference_mode=True causes SiamABCNet to instantiate the BatchNorm layers inside
-    # connect_model (cls_dw, reg_dw, bbox_tower, cls_tower) directly as AdaptiveBatchNorm,
-    # so no post-hoc layer replacement is needed.
     model = instantiate(config["model"], inference_mode=True, norm_lambda=lambda_tta)
 
     model = load_model(model, weights_path, strict=False).cuda().eval()

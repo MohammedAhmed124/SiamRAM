@@ -26,6 +26,7 @@ class BoxCoder(ABC):
     Handles the conversion of bounding boxes to spatial maps for training
     and the decoding of network outputs back into image-coordinate boxes.
     """
+
     def __init__(self, tracker_config: Dict[str, Any]) -> None:
         """
         Initialise the BoxCoder with a tracker configuration.
@@ -87,6 +88,7 @@ class SiamABCBoxCoder(BoxCoder):
     Implements the encoding of boxes into 4-channel regression maps (l, t, r, b)
     and single-channel classification labels.
     """
+
     def __init__(self, tracker_config: Dict[str, Any]) -> None:
         """
         Initialise the SiamABCBoxCoder.
@@ -114,7 +116,6 @@ class SiamABCBoxCoder(BoxCoder):
         classification_label = (regression_map_min.unsqueeze(1) > 0).float()
         return TrackerEncodeResult(regression_map=regression_map, classification_label=classification_label)
 
-
     @torch.no_grad()
     def decode(self, regression_map, classification_map, use_sigmoid=True, pred_location=None):
         """
@@ -131,7 +132,7 @@ class SiamABCBoxCoder(BoxCoder):
         """
         if use_sigmoid:
             classification_map = classification_map.float().sigmoid()
-        cls_map = classification_map[0, 0]  # [H, W] — skip batch dim, no loop
+        cls_map = classification_map[0, 0]
 
         if pred_location is None:
             pred_location = torch.stack([
@@ -140,17 +141,18 @@ class SiamABCBoxCoder(BoxCoder):
                 self.grid_x + regression_map[:, 2],
                 self.grid_y + regression_map[:, 3],
             ], dim=1)
-        loc = pred_location[0] 
+        loc = pred_location[0]
 
         flat_idx = torch.argmax(cls_map)
         H, W = cls_map.shape
         r_max = (flat_idx // W).item()
-        c_max = (flat_idx  % W).item()
+        c_max = (flat_idx % W).item()
 
-        x1, y1, x2, y2 = loc[:, r_max, c_max]  # shape [4] — one index op
+        x1, y1, x2, y2 = loc[:, r_max, c_max]
         bbox = torch.stack([x1, y1, x2 - x1, y2 - y1])
 
         return TrackerDecodeResult(bbox=bbox.unsqueeze(0), pred_coords=[(r_max, c_max)])
+
 
 def get_box_coder(tracker_config: Dict[str, Any], tracker_name: str = "SiamABC") -> Optional[BoxCoder]:
     """
@@ -162,8 +164,6 @@ def get_box_coder(tracker_config: Dict[str, Any], tracker_name: str = "SiamABC")
     if tracker_name == "SiamABC":
         return SiamABCBoxCoder(tracker_config=tracker_config)
     return None
-
-
 
 
 def gauss_1d(sz, sigma, center, end_pad=0, density=False) -> torch.Tensor:
@@ -187,7 +187,6 @@ def gauss_1d(sz, sigma, center, end_pad=0, density=False) -> torch.Tensor:
     return gauss
 
 
-
 def gauss_2d(sz, sigma, center, end_pad=(0, 0), density=False) -> torch.Tensor:
     """
     Generate a 2D Gaussian distribution.
@@ -205,15 +204,14 @@ def gauss_2d(sz, sigma, center, end_pad=(0, 0), density=False) -> torch.Tensor:
     if isinstance(sigma, (float, int)):
         sigma = (sigma, sigma)
     return gauss_1d(sz[0].item(), sigma[0], center[:, 0], end_pad[0], density).reshape(center.shape[0], 1, -1) * \
-           gauss_1d(sz[1].item(), sigma[1], center[:, 1], end_pad[1], density).reshape(center.shape[0], -1, 1)
+        gauss_1d(sz[1].item(), sigma[1], center[:, 1], end_pad[1], density).reshape(center.shape[0], -1, 1)
 
 
-
-
-def gaussian_label_function(target_bb, sigma_factor=0.1, kernel_sz=1, feat_sz=16, image_sz=256, end_pad_if_even=True, density=False, uni_bias=0) -> torch.Tensor:
+def gaussian_label_function(target_bb, sigma_factor=0.1, kernel_sz=1, feat_sz=16, image_sz=256, end_pad_if_even=True,
+                            density=False, uni_bias=0) -> torch.Tensor:
     """Construct Gaussian label function.
     target_bb: [b x [x1,y1,x2,y2]]
-    
+
     """
 
     if isinstance(kernel_sz, (float, int)):
@@ -226,7 +224,7 @@ def gaussian_label_function(target_bb, sigma_factor=0.1, kernel_sz=1, feat_sz=16
     image_sz = torch.Tensor(image_sz)
     feat_sz = torch.Tensor(feat_sz)
 
-    target_center = (target_bb[:, 0:2] +target_bb[:, 2:4]) * 0.5 
+    target_center = (target_bb[:, 0:2] + target_bb[:, 2:4]) * 0.5
     target_center_norm = (target_center - image_sz / 2) / image_sz
 
     center = feat_sz * target_center_norm + 0.5 * \
@@ -247,14 +245,15 @@ def gaussian_label_function(target_bb, sigma_factor=0.1, kernel_sz=1, feat_sz=16
         label = gauss_label + uni_bias
     return label
 
+
 if __name__ == '__main__':
     tracker_config = {
         "score_size": 16,
         "total_stride": 16,
         "instance_size": 256
     }
-    
+
     box_coder = SiamABCBoxCoder(tracker_config=tracker_config)
     bboxes = torch.tensor([[54, 60, 84, 90]])
-    encoded  = box_coder.encode(bboxes)
+    encoded = box_coder.encode(bboxes)
     print()

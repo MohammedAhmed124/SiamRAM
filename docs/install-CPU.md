@@ -75,18 +75,38 @@ Expected result: CUDA available is `False`.
 ## Option 3: Local Installation with uv
 
 Use this path if you want to run directly on your host Python environment.
-Plain `uv sync` defaults to CPU torch. The command below keeps CPU explicit with the CPU group.
+CPU installs in this repo are defined in `pyproject.cpu.toml`.
 
 ### Step 1: Install project dependencies
 
+Linux/macOS:
+
 ```bash
-uv sync --group cpu
+cp pyproject.cpu.toml pyproject.toml
+uv sync
+```
+
+Windows PowerShell:
+
+```powershell
+Copy-Item pyproject.cpu.toml pyproject.toml -Force
+uv sync
 ```
 
 ### Step 2: Verify environment
 
 ```bash
 uv run python test.py
+```
+
+Expected result: CUDA available is `False`.
+
+### Step 3: Restore GPU pyproject (optional)
+
+If you want to switch back to the CUDA-default setup:
+
+```bash
+git checkout -- pyproject.toml uv.lock
 ```
 
 ## Troubleshooting

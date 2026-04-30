@@ -316,7 +316,11 @@ def get_trt_tracker(
     model: nn.Module = instantiate(
         config["model"], inference_mode=True, norm_lambda=lambda_tta
     )
-    checkpoint = torch.load(weights_path, map_location=f"cuda:{cuda_id}")
+    checkpoint = torch.load(
+        weights_path,
+        map_location=f"cuda:{cuda_id}",
+        weights_only=False,
+    )
     state_dict = {
         k.lstrip("module").lstrip("."): v
         for k, v in checkpoint.items()

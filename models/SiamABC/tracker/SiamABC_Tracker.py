@@ -14,12 +14,28 @@ from .base_tracker import Tracker
 
 
 class SiamABCTracker(Tracker):
+    """
+    Siamese Actor-Critic based Tracker.
+
+    This tracker uses dynamic templates and memory windows to maintain tracking robustly.
+    It manages the tracking state, handles dynamic updates, and coordinates with
+    a box coder to decode network outputs into bounding boxes.
+    """
+
     def __init__(
         self,
         model,
         cuda_id=0,
         **tracking_config,
     ):
+        """
+        Initialize the SiamABCTracker.
+
+        Args:
+            model (torch.nn.Module): The underlying SiamABC neural network model.
+            cuda_id (int, optional): The ID of the CUDA device to use. Defaults to 0.
+            **tracking_config: Dictionary containing arbitrary tracking configurations.
+        """
         super().__init__(model, cuda_id, **tracking_config)
 
         self._norm_lambda_tta: float = next(
@@ -38,6 +54,16 @@ class SiamABCTracker(Tracker):
         tracking_config,
         cuda_id: str | int = 0,
     ):
+        """
+        Create and return the bounding box coder for decoding network outputs.
+
+        Args:
+            tracking_config (dict): The configuration dictionary for the tracker.
+            cuda_id (str | int, optional): The CUDA device ID. Defaults to 0.
+
+        Returns:
+            SiamABCBoxCoder: An instance of the box coder initialized with the configuration.
+        """
         return SiamABCBoxCoder(tracking_config)
 
     def initialize(
@@ -47,10 +73,20 @@ class SiamABCTracker(Tracker):
         **kwargs,
     ) -> None:
         """
-        args:
-            img(np.ndarray): RGB image
-            bbox(list): [x, y, width, height]
-                        x, y need to be 0-based
+        Initialize the tracker state with the first frame and bounding box.
+
+        This sets up the initial template and search features by calling
+        `get_template_features()` and `get_search_features()`. It also resets
+        history buffers and tracking states.
+
+        Args:
+            image (NDArray): The initial RGB image frame.
+            rect (NDArray): The initial bounding box as [x, y, width, height],
+                where x and y are 0-based.
+            **kwargs: Additional arguments.
+
+        Returns:
+            None
         """
 
         self.smooth_pred = self.tracking_config["smooth"]
@@ -100,6 +136,16 @@ class SiamABCTracker(Tracker):
         image,
         rect,
     ):
+        """
+        Extract template features for a specific bounding box in an image.
+
+        Args:
+            image (NDArray): The source image array.
+            rect (NDArray): The bounding box [x, y, w, h] indicating the template region.
+
+        Returns:
+            torch.Tensor: The extracted features for the template crop.
+        """
         context = extend_bbox(
             rect,
             offset=self.tracking_config["template_bbox_offset"],
@@ -123,6 +169,19 @@ class SiamABCTracker(Tracker):
         image,
         bbox,
     ):
+        """
+        Extract search features and compute search context mapping for a bounding box.
+
+        Args:
+            image (NDArray): The search image array.
+            bbox (NDArray): The bounding box [x, y, w, h] to extract features around.
+
+        Returns:
+            Tuple[torch.Tensor, NDArray, NDArray]:
+                - Extracted features for the search crop.
+                - The scaled bounding box within the crop.
+                - The padded search context used for mapping coordinates back.
+        """
 
         context = extend_bbox(
             bbox,
@@ -146,6 +205,16 @@ class SiamABCTracker(Tracker):
         bbox_window,
         bbox,
     ):
+        """
+        Check if a bounding box is fully contained within another window bounding box.
+
+        Args:
+            bbox_window (Sequence[float]): The reference bounding box [x, y, right, bottom].
+            bbox (Sequence[float]): The bounding box to check [x, y, right, bottom].
+
+        Returns:
+            bool: True if `bbox` is inside `bbox_window`, False otherwise.
+        """
         return (
             bbox[0] >= bbox_window[0]
             and bbox[1] >= bbox_window[1]
@@ -159,9 +228,17 @@ class SiamABCTracker(Tracker):
         evicting: bool,
     ) -> None:
         """
-        O(1) amortized best-index maintenance.
-        Only O(window_size) on the rare event the best element is evicted.
-        Must be called AFTER appending to both deques.
+        Update the index of the best score in the classification memory window.
+
+        Maintains O(1) amortized tracking of the highest score index.
+        Called by `_maybe_store_frame()`.
+
+        Args:
+            pred_score (float): The newly added classification score.
+            evicting (bool): Whether the memory deque has reached capacity and is evicting the oldest element.
+
+        Returns:
+            None
         """
         if evicting:
             if self._best_idx == 0:
@@ -188,7 +265,20 @@ class SiamABCTracker(Tracker):
         pred_bbox: np.ndarray,
         pred_score: float,
     ) -> None:
-        """Append to memory and keep best-index consistent. Single responsibility."""
+        """
+        Optionally store the current frame in memory if conditions are met.
+
+        This appends the frame to `all_memory_imgs`, the score to `classification_scores`,
+        and manages the best index using `_update_best_index()`.
+
+        Args:
+            search (np.ndarray): The current image frame.
+            pred_bbox (np.ndarray): The predicted bounding box.
+            pred_score (float): The prediction confidence score.
+
+        Returns:
+            None
+        """
         evicting = len(self.classification_scores) == self.memory_window_size
         self.all_memory_imgs.append([search, pred_bbox])
         self.classification_scores.append(pred_score)
@@ -197,6 +287,16 @@ class SiamABCTracker(Tracker):
     def select_representatives(
         self,
     ) -> None:
+        """
+        Select the best memory frame and update dynamic tracking features.
+
+        Calls `get_template_features()` and `get_search_features()` on the best
+        stored frame to update dynamic representative features if its score exceeds
+        `dynamic_update_threshold`.
+
+        Returns:
+            None
+        """
         if not self.classification_scores:
             return
         if self._best_score < self.dynamic_update_threshold:
@@ -217,6 +317,24 @@ class SiamABCTracker(Tracker):
         search: NDArray,
         *kw,
     ):
+        """
+        Update the tracker using the current frame, generating the next bounding box.
+
+        This invokes `run_track()` to perform the tracking step, evaluates conditions
+        like IoU with `_compute_iou()` and stores confident frames using
+        `_maybe_store_frame()`. Finally, it occasionally updates dynamic features
+        via `select_representatives()`.
+
+        Args:
+            search (NDArray): The current image frame array.
+            *kw: Additional unused positional arguments.
+
+        Returns:
+            Tuple[NDArray, float, float]:
+                - The predicted bounding box.
+                - The predicted classification score.
+                - The similarity score.
+        """
         pred_bbox, pred_score, sim_score = self.run_track(search)
 
         self.tracking_state.bbox = pred_bbox
@@ -266,6 +384,21 @@ class SiamABCTracker(Tracker):
         self,
         search,
     ):
+        """
+        Run the fundamental tracking sequence for a search frame.
+
+        Extracts search features using `get_search_features()`, forwards them to `track()`,
+        and rescales the output bounding box back to image coordinates.
+
+        Args:
+            search (NDArray): The search image frame array.
+
+        Returns:
+            Tuple[NDArray, float, float]:
+                - The predicted bounding box in image coordinates.
+                - The classification score.
+                - The similarity score.
+        """
         search_features, search_bbox, search_context = self.get_search_features(
             search, self.tracking_state.bbox
         )
@@ -287,6 +420,19 @@ class SiamABCTracker(Tracker):
         dynamic_search_features,
         dynamic_template_features,
     ):
+        """
+        Execute the core neural network tracking operation and postprocess results.
+
+        Passes features to `self.net.track()` and hands the raw output to `_postprocess()`.
+
+        Args:
+            search_features (torch.Tensor): Current frame search features.
+            dynamic_search_features (torch.Tensor): Best historical search features.
+            dynamic_template_features (torch.Tensor): Best historical template features.
+
+        Returns:
+            Tuple[NDArray, float, float, torch.Tensor]: Outputs derived from `_postprocess()`.
+        """
         track_result = self.net.track(
             search_features=search_features,
             dynamic_search_features=dynamic_search_features,
@@ -301,6 +447,22 @@ class SiamABCTracker(Tracker):
         self,
         track_result: Dict[str, torch.Tensor],
     ) -> Tuple[NDArray, float, Union[int, float, bool], torch.Tensor]:
+        """
+        Post-process raw tracking network output into actionable bounding boxes and scores.
+
+        Uses the box coder to decode classification and regression maps, applying
+        penalties as necessary.
+
+        Args:
+            track_result (Dict[str, torch.Tensor]): The raw output tensor dictionary from the tracking network.
+
+        Returns:
+            Tuple[NDArray, float, Union[int, float, bool], torch.Tensor]:
+                - The predicted bounding box within the crop.
+                - The maximum classification score.
+                - The similarity score.
+                - The attention map.
+        """
         cls_score = track_result[constants.TARGET_CLASSIFICATION_KEY].float().sigmoid()
         regression_map = (
             track_result[constants.TARGET_REGRESSION_LABEL_KEY].detach().float()
@@ -335,6 +497,20 @@ class SiamABCTracker(Tracker):
         search: np.ndarray,
         candidate_bbox: np.ndarray,
     ):
+        """
+        Temporarily set tracking state to a candidate bbox and run tracking.
+
+        Evaluates a hypothesis candidate by injecting its bounding box into
+        tracking state and invoking `run_track()`. Restores state afterward.
+
+        Args:
+            search (np.ndarray): The search image frame array.
+            candidate_bbox (np.ndarray): The hypothesized bounding box [x, y, w, h].
+
+        Returns:
+            Tuple[NDArray, float, float]: The predicted bounding box, score, and
+            similarity score as returned by `run_track()`.
+        """
         cand_x, cand_y, cand_w, cand_h = [float(v) for v in candidate_bbox]
 
         h_fr, w_fr = search.shape[:2]
@@ -365,18 +541,40 @@ class SiamABCTracker(Tracker):
         self,
         enabled: bool,
     ) -> None:
-        """Enable or disable TTA by updating the lam tensor passed to the net."""
+        """
+        Enable or disable Test-Time Augmentation (TTA).
+
+        Updates the `_tta_lam` tensor parameter.
+
+        Args:
+            enabled (bool): Whether TTA should be enabled.
+
+        Returns:
+            None
+        """
         val = self._norm_lambda_tta if enabled else 0.0
         self._tta_lam.fill_(val)
 
     def enable_tta(
         self,
     ) -> None:
+        """
+        Enable Test-Time Augmentation by calling `set_tta(True)`.
+
+        Returns:
+            None
+        """
         self.set_tta(True)
 
     def disable_tta(
         self,
     ) -> None:
+        """
+        Disable Test-Time Augmentation by calling `set_tta(False)`.
+
+        Returns:
+            None
+        """
         self.set_tta(False)
 
     @staticmethod
@@ -384,6 +582,16 @@ class SiamABCTracker(Tracker):
         boxA,
         boxB,
     ) -> float:
+        """
+        Calculate the Intersection over Union (IoU) of two bounding boxes.
+
+        Args:
+            boxA (Sequence[float]): First bounding box [x, y, w, h].
+            boxB (Sequence[float]): Second bounding box [x, y, w, h].
+
+        Returns:
+            float: The IoU ratio ranging from 0.0 to 1.0.
+        """
         ix1 = max(boxA[0], boxB[0])
         iy1 = max(boxA[1], boxB[1])
         ix2 = min(boxA[0] + boxA[2], boxB[0] + boxB[2])

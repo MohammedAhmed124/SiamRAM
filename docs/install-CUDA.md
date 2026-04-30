@@ -29,6 +29,7 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
 
 ### GPU requirement (important)
 
+> [!CAUTION]
 > **Important:** This project uses CUDA 12.8 + cuDNN runtime. Your host NVIDIA driver must be **>= 570.x**.
 
 Check your driver:
@@ -76,7 +77,8 @@ poe gpu_run test.py
 
 1. Install [Docker Desktop](https://www.docker.com/products/docker-desktop/)
 2. Install [Visual Studio Code](https://code.visualstudio.com/)
-3. Install the [Dev Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers)
+3. Install
+   the [Dev Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers)
 
 ### Step 2: Open the project in devcontainer
 

@@ -2613,7 +2613,7 @@ class SiamRAMTracker:
 
             model = YOLO(weights_path)
 
-            model.export(format="engine", half=True, device=0, imgsz=320)
+            model.export(format="engine", half=False, device=0, imgsz=320)
 
         return YOLO(engine_path)
 

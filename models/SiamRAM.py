@@ -54,6 +54,17 @@ class DRMKwargs(TypedDict):
 
 
 class SiamRAMTracker:
+    """
+    SiamRAM Tracker.
+
+    A robust hybrid tracker that combines SiamABC for short-term tracking
+    with a YOLO-based re-detection system and an Extended Kalman Filter (EKF)
+    for occlusion recovery and motion modeling.
+
+    This class orchestrates tracking by calling the underlying SiamABCTracker
+    methods like `update()` and `run_track_for_candidate()`, while managing
+    its own appearance memory and states to handle object disappearance.
+    """
     _MAX_PROC_LONG_EDGE: int = 1280
 
     def __init__(
@@ -134,82 +145,75 @@ class SiamRAMTracker:
         disable_camera_motion: bool = False,
     ):
         """
-        Inputs:
-            siam_tracker                     - the underlying SiamABC tracker instance (ORTrack)
-            yolo_weights                     - path to YOLO weights file used for re-detection
-            conf_threshold                   - tracker score below this triggers the entry streak counter
-            reacq_threshold                  - minimum tracker score to accept a candidate as the target during phase 0
-            yolo_conf                        - minimum YOLO detection confidence
-            yolo_iou                         - NMS IoU threshold passed to YOLO
-            app_match_threshold              - minimum DRM score required to accept a reacquisition
-            nudge_alpha                      - interpolation weight used when nudging held_box toward a nearby detection
-            tau_occ                          - IoU threshold above which a detection overlaps held_box enough to be flagged as a distractor
-            beta                             - unused decay constant reserved for future use
-            mem_capacity                     - max number of frames stored in the short-term RAM appearance memory
-            tau_iou                          - IoU gate inside AppearanceMemory for admission
-            tau_area                         - area ratio gate inside AppearanceMemory for admission
-            drm_capacity                     - max number of reference descriptors kept in the DRM bank
-            drm_tau_sim                      - cosine similarity threshold for DRM bank admission
-            drm_window_W                     - temporal window used by DRM when computing motion consistency
-            drm_mmin                         - minimum number of DRM bank entries required before DRM is trusted
-            drm_lam_iou/app/mot/time         - per-component weights of the DRM scoring formula
-            drm_alpha                        - DRM bank update learning rate
-            drm_gamma                        - DRM temporal decay exponent
-            drm_margin                       - DRM acceptance margin above the distractor bank score
-            drm_top_k                        - number of top DRM candidates forwarded to tracker verification
-            drm_skip_threshold               - DRM score above which a candidate is accepted without verification
-            drm_lam_dist                     - weight of the Gaussian distance penalty in the DRM score
-            drm_dist_sigma_factor            - scales the Gaussian sigma by max(obj_w, obj_h)
-            drm_lam_cand_dir                 - weight of direction consistency in DRM scoring (phase 0 and final)
-            drm_lam_cand_vel                 - weight of full velocity consistency term in the final DRM phase
-            vel_score_min_speed              - if the EKF velocity magnitude is below this (px/frame) velocity scoring is skipped (returns neutral 0.5)
-            ekf_process_noise                - EKF process noise covariance scalar
-            ekf_meas_noise                   - EKF measurement noise covariance scalar
-            homo_max_corners                 - max feature points extracted for homography estimation (unused directly; grid is used)
-            homo_inlier_threshold            - minimum RANSAC inlier ratio to mark a homography as reliable
-            shrinkage_min_drop_frac          - minimum fractional area drop to trigger shrinkage detection
-            shrinkage_max_lookback           - how many frames back shrinkage and drift detection looks
-            velocity_lookback                - how many frames back finite-difference velocity is computed over
-            velocity_smooth_alpha            - EMA weight for smoothing velocity updates
-            distractor_bank_maxlen           - max number of distractor descriptors kept
-            velocity_decay                   - unused decay constant reserved for future use
-            search_expand_growth_factor      - how much the ROI grows per growth interval during occlusion
-            search_expand_growth_every       - number of occlusion frames between each ROI growth step
-            search_expand_max                - maximum ROI expansion factor for normal-size objects
-            long_distance_conf_threshold     - score threshold used instead of conf_threshold when target is tiny/far
-            long_distance_area_fraction      - object area / frame area ratio below which long-distance mode activates
-            long_distance_mode               - force long-distance mode on regardless of area fraction
-            enter_occlusion_on_loss          - if False the tracker never enters the occlusion recovery path
-            velocity_window_average          - window length for robust velocity estimation at occlusion entry
-            occlusion_patience               - unused legacy parameter (replaced by entry_patience)
-            occlusion_hysteresis             - unused legacy parameter reserved for future use
-            tiny_roi_start_expand            - starting ROI expansion factor when the object is tiny/far
-            tiny_yolo_search_expand          - maximum ROI expansion for tiny objects
-            tiny_search_expand_growth_factor - ROI growth factor per interval for tiny objects
-            tiny_search_expand_growth_every  - growth interval (frames) for tiny object ROI
-            tiny_search_expand_max           - hard cap on tiny-object ROI expansion
-            entry_patience                   - consecutive low-score frames required before declaring occlusion
-            cand_collection_frames           - number of YOLO collection frames before the final DRM phase
-            vel_dir_hard_gate                - if cosine similarity between candidate and expected velocity is below -this, velocity score is floored to 0.05
-            yolo_filter_class                - if True, YOLO detections are filtered to the target's class after warm-up
-            yolo_class_detect_frames         - stride used during the class warm-up period
+        Stores every configuration parameter and builds all the runtime state
+                    containers — histories, the DRM kwargs dict, the appearance memory,
+                    the EKF placeholder, and the phase/hysteresis counters. No computation
+                    happens here beyond storing values and constructing empty deques.
 
-        What it does:
-            Stores every configuration parameter and builds all the runtime state
-            containers — histories, the DRM kwargs dict, the appearance memory,
-            the EKF placeholder, and the phase/hysteresis counters. No computation
-            happens here beyond storing values and constructing empty deques.
-
-        Outputs:
-            None. Produces a fully configured but uninitialised tracker instance.
-            initialize() must be called before update().
-
-        Why / where:
-            This is the single configuration point for the entire tracker. Every
-            behavioural knob lives here so callers can tune the tracker without
-            touching the implementation. Keeping all defaults sane means it works
-            out of the box for most scenarios while still being fully adjustable.
-        """
+        This is the single configuration point for the entire tracker. Every
+                    behavioural knob lives here so callers can tune the tracker without
+                    touching the implementation. Keeping all defaults sane means it works
+                    out of the box for most scenarios while still being fully adjustable.
+        Args:
+            siam_tracker (any): the underlying SiamABC tracker instance (ORTrack)
+            yolo_weights (any): path to YOLO weights file used for re-detection
+            conf_threshold (any): tracker score below this triggers the entry streak counter
+            reacq_threshold (any): minimum tracker score to accept a candidate as the target during phase 0
+            yolo_conf (any): minimum YOLO detection confidence
+            yolo_iou (any): NMS IoU threshold passed to YOLO
+            app_match_threshold (any): minimum DRM score required to accept a reacquisition
+            nudge_alpha (any): interpolation weight used when nudging held_box toward a nearby detection
+            tau_occ (any): IoU threshold above which a detection overlaps held_box enough to be flagged as a distractor
+            beta (any): unused decay constant reserved for future use
+            mem_capacity (any): max number of frames stored in the short-term RAM appearance memory
+            tau_iou (any): IoU gate inside AppearanceMemory for admission
+            tau_area (any): area ratio gate inside AppearanceMemory for admission
+            drm_capacity (any): max number of reference descriptors kept in the DRM bank
+            drm_tau_sim (any): cosine similarity threshold for DRM bank admission
+            drm_window_W (any): temporal window used by DRM when computing motion consistency
+            drm_mmin (any): minimum number of DRM bank entries required before DRM is trusted
+            drm_lam_iou/app/mot/time (any): per-component weights of the DRM scoring formula
+            drm_alpha (any): DRM bank update learning rate
+            drm_gamma (any): DRM temporal decay exponent
+            drm_margin (any): DRM acceptance margin above the distractor bank score
+            drm_top_k (any): number of top DRM candidates forwarded to tracker verification
+            drm_skip_threshold (any): DRM score above which a candidate is accepted without verification
+            drm_lam_dist (any): weight of the Gaussian distance penalty in the DRM score
+            drm_dist_sigma_factor (any): scales the Gaussian sigma by max(obj_w, obj_h)
+            drm_lam_cand_dir (any): weight of direction consistency in DRM scoring (phase 0 and final)
+            drm_lam_cand_vel (any): weight of full velocity consistency term in the final DRM phase
+            vel_score_min_speed (any): if the EKF velocity magnitude is below this (px/frame) velocity scoring is skipped (returns neutral 0.5)
+            ekf_process_noise (any): EKF process noise covariance scalar
+            ekf_meas_noise (any): EKF measurement noise covariance scalar
+            homo_max_corners (any): max feature points extracted for homography estimation (unused directly; grid is used)
+            homo_inlier_threshold (any): minimum RANSAC inlier ratio to mark a homography as reliable
+            shrinkage_min_drop_frac (any): minimum fractional area drop to trigger shrinkage detection
+            shrinkage_max_lookback (any): how many frames back shrinkage and drift detection looks
+            velocity_lookback (any): how many frames back finite-difference velocity is computed over
+            velocity_smooth_alpha (any): EMA weight for smoothing velocity updates
+            distractor_bank_maxlen (any): max number of distractor descriptors kept
+            velocity_decay (any): unused decay constant reserved for future use
+            search_expand_growth_factor (any): how much the ROI grows per growth interval during occlusion
+            search_expand_growth_every (any): number of occlusion frames between each ROI growth step
+            search_expand_max (any): maximum ROI expansion factor for normal-size objects
+            long_distance_conf_threshold (any): score threshold used instead of conf_threshold when target is tiny/far
+            long_distance_area_fraction (any): object area / frame area ratio below which long-distance mode activates
+            long_distance_mode (any): force long-distance mode on regardless of area fraction
+            enter_occlusion_on_loss (any): if False the tracker never enters the occlusion recovery path
+            velocity_window_average (any): window length for robust velocity estimation at occlusion entry
+            occlusion_patience (any): unused legacy parameter (replaced by entry_patience)
+            occlusion_hysteresis (any): unused legacy parameter reserved for future use
+            tiny_roi_start_expand (any): starting ROI expansion factor when the object is tiny/far
+            tiny_yolo_search_expand (any): maximum ROI expansion for tiny objects
+            tiny_search_expand_growth_factor (any): ROI growth factor per interval for tiny objects
+            tiny_search_expand_growth_every (any): growth interval (frames) for tiny object ROI
+            tiny_search_expand_max (any): hard cap on tiny-object ROI expansion
+            entry_patience (any): consecutive low-score frames required before declaring occlusion
+            cand_collection_frames (any): number of YOLO collection frames before the final DRM phase
+            vel_dir_hard_gate (any): if cosine similarity between candidate and expected velocity is below -this, velocity score is floored to 0.05
+            yolo_filter_class (any): if True, YOLO detections are filtered to the target's class after warm-up
+            yolo_class_detect_frames (any): stride used during the class warm-up period
+    """
         self.tracker: SiamABCTracker = siam_tracker
 
         if copile_yolo:
@@ -504,34 +508,30 @@ class SiamRAMTracker:
         frame: np.ndarray,
     ) -> Tuple[np.ndarray, float]:
         """
-        Inputs:
-            frame - current video frame as a numpy BGR array
+        Runs the SiamABC tracker to get a predicted bbox and score, optionally
+                    runs class warm-up detection during the first few frames, then decides
+                    whether to enter occlusion. Occlusion entry requires the score to stay
+                    below the effective threshold for `entry_patience` consecutive frames
+                    (hysteresis). When the streak is long enough, this method computes how
+                    many corrupted history frames to skip, rebuilds the EKF from clean
+                    history, sets up the search centre, and immediately hands off to
+                    _occlusion_update for the first recovery frame.
 
-        What it does:
-            Runs the SiamABC tracker to get a predicted bbox and score, optionally
-            runs class warm-up detection during the first few frames, then decides
-            whether to enter occlusion. Occlusion entry requires the score to stay
-            below the effective threshold for `entry_patience` consecutive frames
-            (hysteresis). When the streak is long enough, this method computes how
-            many corrupted history frames to skip, rebuilds the EKF from clean
-            history, sets up the search centre, and immediately hands off to
-            _occlusion_update for the first recovery frame.
+                    If tracking is healthy, it updates the EKF, records camera displacement,
+                    appends the current centre and velocity to their histories, conditionally
+                    admits a new appearance descriptor to memory, and stores the full
+                    history entry.
 
-            If tracking is healthy, it updates the EKF, records camera displacement,
-            appends the current centre and velocity to their histories, conditionally
-            admits a new appearance descriptor to memory, and stores the full
-            history entry.
-
-        Outputs:
-            pred_bbox - np.ndarray [x, y, w, h] from SiamABC
-            score     - float confidence from SiamABC
-
-        Why / where:
-            This is the hot path — it runs every frame when the target is visible.
-            It owns all the bookkeeping that makes occlusion recovery reliable:
-            clean history, accurate velocity, up-to-date appearance memory, and
-            correct EKF state. If this bookkeeping is wrong, recovery will fail.
-        """
+        This is the hot path — it runs every frame when the target is visible.
+                    It owns all the bookkeeping that makes occlusion recovery reliable:
+                    clean history, accurate velocity, up-to-date appearance memory, and
+                    correct EKF state. If this bookkeeping is wrong, recovery will fail.
+        Args:
+            frame (any): current video frame as a numpy BGR array
+        Returns:
+            pred_bbox: np.ndarray [x, y, w, h] from SiamABC
+            score: float confidence from SiamABC
+    """
         pred_bbox, score, _ = self.tracker.update(frame)
         pred_bbox = np.array(pred_bbox, dtype=int)
 
@@ -691,30 +691,26 @@ class SiamRAMTracker:
         smooth_alpha: Optional[float] = None,
     ) -> np.ndarray:
         """
-        Inputs:
-            current_bbox  - np.ndarray [x, y, w, h] of the bbox at the current frame
-            lookback      - how many frames back to measure displacement over;
-                            defaults to self.velocity_lookback
-            smooth_alpha  - EMA weight for blending new measurement into current velocity;
-                            defaults to self.velocity_smooth_alpha
+        Looks `lookback` frames back in _conf_history, measures the centre
+                    displacement between that frame and the current bbox, divides by
+                    lookback to get px/frame, then blends into the running velocity
+                    estimate with an exponential moving average. Handles the case where
+                    the history is shorter than lookback gracefully.
 
-        What it does:
-            Looks `lookback` frames back in _conf_history, measures the centre
-            displacement between that frame and the current bbox, divides by
-            lookback to get px/frame, then blends into the running velocity
-            estimate with an exponential moving average. Handles the case where
-            the history is shorter than lookback gracefully.
-
-        Outputs:
+        Called every frame in _normal_update. The velocity it produces is used
+                    by the EKF as a prior when occlusion starts, by DRM for motion
+                    consistency scoring, and by the exit direction detector. Getting this
+                    right matters a lot — bad velocity estimates cause the EKF to
+                    extrapolate the wrong direction during occlusion.
+        Args:
+            current_bbox (any): np.ndarray [x, y, w, h] of the bbox at the current frame
+            lookback (any): how many frames back to measure displacement over;
+            defaults to self.velocity_lookback
+            smooth_alpha (any): EMA weight for blending new measurement into current velocity;
+            defaults to self.velocity_smooth_alpha
+        Returns:
             np.ndarray of shape (2,) — (vx, vy) in pixels per frame
-
-        Why / where:
-            Called every frame in _normal_update. The velocity it produces is used
-            by the EKF as a prior when occlusion starts, by DRM for motion
-            consistency scoring, and by the exit direction detector. Getting this
-            right matters a lot — bad velocity estimates cause the EKF to
-            extrapolate the wrong direction during occlusion.
-        """
+    """
         lb = lookback if lookback is not None else self.velocity_lookback
         alpha = smooth_alpha if smooth_alpha is not None else self.velocity_smooth_alpha
 
@@ -745,27 +741,21 @@ class SiamRAMTracker:
         skip_override=None,
     ) -> None:
         """
-        Inputs:
-            skip_override - int or None; if given, this many frames are dropped
-                            from the tail of _conf_history before reading the last
-                            clean bbox. If None, self.history_skip_last is used.
+        Reads the last clean history entry (after skipping corrupted tail frames)
+                    and stores its centre as _search_cx / _search_cy. If the history is
+                    entirely consumed by the skip, falls back to the current bbox centre.
 
-        What it does:
-            Reads the last clean history entry (after skipping corrupted tail frames)
-            and stores its centre as _search_cx / _search_cy. If the history is
-            entirely consumed by the skip, falls back to the current bbox centre.
-
-        Outputs:
-            None. Sets self._search_cx and self._search_cy in place.
-
-        Why / where:
-            Called at the moment occlusion is declared, immediately before phase 0
-            starts. The search centre is the anchor for _get_yolo_search_roi —
-            it is where the EKF says the target should be and is what every
-            subsequent ROI is built around. Planting it at a clean position rather
-            than at the last (possibly corrupted) bbox is what keeps the search
-            area honest at the start of recovery.
-        """
+        Called at the moment occlusion is declared, immediately before phase 0
+                    starts. The search centre is the anchor for _get_yolo_search_roi —
+                    it is where the EKF says the target should be and is what every
+                    subsequent ROI is built around. Planting it at a clean position rather
+                    than at the last (possibly corrupted) bbox is what keeps the search
+                    area honest at the start of recovery.
+        Args:
+            skip_override (any): int or None; if given, this many frames are dropped
+            from the tail of _conf_history before reading the last
+            clean bbox. If None, self.history_skip_last is used.
+    """
         history = list(self._conf_history)
         skip = (
             min(self.history_skip_last, len(history) - 1)
@@ -789,31 +779,27 @@ class SiamRAMTracker:
         frame: np.ndarray,
     ) -> Tuple[np.ndarray, float]:
         """
-        Inputs:
-            frame - current video frame as a numpy BGR array
+        Dispatcher for all three occlusion recovery phases. At each call it
+                    pulls the latest EKF prediction to update the search centre and
+                    held_box, increments the occlusion frame counter, and handles all
+                    out-of-frame edge pinning and re-entry logic (e.g. if the target
+                    exited right, the search centre is pinned to the right edge until
+                    the EKF velocity turns inward). Then routes to:
+                        phase 0       → _occ_phase_siam (SiamABC fast attempt)
+                        phase 1…N     → _occ_phase_collect (YOLO candidate collection)
+                        phase N+1+    → _occ_phase_final_drm (velocity-scored DRM + verify)
 
-        What it does:
-            Dispatcher for all three occlusion recovery phases. At each call it
-            pulls the latest EKF prediction to update the search centre and
-            held_box, increments the occlusion frame counter, and handles all
-            out-of-frame edge pinning and re-entry logic (e.g. if the target
-            exited right, the search centre is pinned to the right edge until
-            the EKF velocity turns inward). Then routes to:
-                phase 0       → _occ_phase_siam (SiamABC fast attempt)
-                phase 1…N     → _occ_phase_collect (YOLO candidate collection)
-                phase N+1+    → _occ_phase_final_drm (velocity-scored DRM + verify)
-
-        Outputs:
-            held_box - np.ndarray [x, y, w, h] last known / EKF-predicted position
-            score    - float; 0.0 when no reacquisition happened
-
-        Why / where:
-            Called every frame while in_occlusion is True. It owns the
-            out-of-frame state machine and the phase routing. Centralising both
-            here means neither individual phase method has to worry about edge
-            pinning or out-of-frame transitions — they just run their own logic
-            and return.
-        """
+        Called every frame while in_occlusion is True. It owns the
+                    out-of-frame state machine and the phase routing. Centralising both
+                    here means neither individual phase method has to worry about edge
+                    pinning or out-of-frame transitions — they just run their own logic
+                    and return.
+        Args:
+            frame (any): current video frame as a numpy BGR array
+        Returns:
+            held_box: np.ndarray [x, y, w, h] last known / EKF-predicted position
+            score: float; 0.0 when no reacquisition happened
+    """
         h_fr, w_fr = frame.shape[:2]
         ekf = self.ekf
         assert ekf is not None
@@ -880,31 +866,26 @@ class SiamRAMTracker:
         frame: np.ndarray,
     ) -> Tuple[np.ndarray, float]:
         """
-        Inputs:
-            frame - current video frame as a numpy BGR array
+        Phase 0 of occlusion recovery — the fast path. Computes the search
+                    ROI, plants a seed bbox there at the object's median size, runs
+                    SiamABC, and if the score clears reacq_threshold, runs a DRM check
+                    augmented with a single-frame direction score. If both pass, calls
+                    _commit_reacquisition and exits occlusion immediately. If either
+                    fails, resets the SiamABC state to held_box and advances to phase 1
+                    (candidate collection).
 
-        What it does:
-            Phase 0 of occlusion recovery — the fast path. Computes the search
-            ROI, plants a seed bbox there at the object's median size, runs
-            SiamABC, and if the score clears reacq_threshold, runs a DRM check
-            augmented with a single-frame direction score. If both pass, calls
-            _commit_reacquisition and exits occlusion immediately. If either
-            fails, resets the SiamABC state to held_box and advances to phase 1
-            (candidate collection).
-
-        Outputs:
-            held_box - np.ndarray [x, y, w, h] if recovery failed this frame
-            score    - float SiamABC confidence
-
+        This is the cheapest recovery attempt — one tracker forward pass,
+                    one DRM call. When the target reappears quickly (e.g. brief occlusion
+                    by a thin object), this phase catches it without ever invoking YOLO,
+                    keeping latency low. Only if this fails do we pay the cost of YOLO
+                    candidate collection.
+        Args:
+            frame (any): current video frame as a numpy BGR array
+        Returns:
+            held_box: np.ndarray [x, y, w, h] if recovery failed this frame
+            score: float SiamABC confidence
             OR, on success, returns the output of _commit_reacquisition.
-
-        Why / where:
-            This is the cheapest recovery attempt — one tracker forward pass,
-            one DRM call. When the target reappears quickly (e.g. brief occlusion
-            by a thin object), this phase catches it without ever invoking YOLO,
-            keeping latency low. Only if this fails do we pay the cost of YOLO
-            candidate collection.
-        """
+    """
         held_box = self.held_box
         assert held_box is not None
 
@@ -1014,30 +995,26 @@ class SiamRAMTracker:
         frame: np.ndarray,
     ) -> Tuple[np.ndarray, float]:
         """
-        Inputs:
-            frame - current video frame as a numpy BGR array
+        Runs YOLO on the search ROI for this frame, extracts appearance
+                    descriptors for every detection, and appends (bbox, desc) pairs to
+                    _cand_frames. Also records the camera velocity vector for this frame
+                    in _occ_cam_vels so the final phase can camera-compensate each
+                    per-step displacement. Updates the distractor bank with any detection
+                    that heavily overlaps held_box. Advances _occ_phase by 1 each call;
+                    when _occ_phase exceeds cand_collection_frames, the dispatcher will
+                    automatically route to the final phase next frame.
 
-        What it does:
-            Runs YOLO on the search ROI for this frame, extracts appearance
-            descriptors for every detection, and appends (bbox, desc) pairs to
-            _cand_frames. Also records the camera velocity vector for this frame
-            in _occ_cam_vels so the final phase can camera-compensate each
-            per-step displacement. Updates the distractor bank with any detection
-            that heavily overlaps held_box. Advances _occ_phase by 1 each call;
-            when _occ_phase exceeds cand_collection_frames, the dispatcher will
-            automatically route to the final phase next frame.
-
-        Outputs:
-            held_box - np.ndarray [x, y, w, h] — no position update this frame
-            0.0      - score is always 0.0 during collection; no reacquisition here
-
-        Why / where:
-            Runs for `cand_collection_frames` consecutive frames (default 3) after
-            phase 0 fails. Gathering candidates across multiple frames rather than
-            a single frame is what makes velocity scoring possible — without a
-            multi-frame track we can't measure how fast and in what direction each
-            candidate is moving.
-        """
+        Runs for `cand_collection_frames` consecutive frames (default 3) after
+                    phase 0 fails. Gathering candidates across multiple frames rather than
+                    a single frame is what makes velocity scoring possible — without a
+                    multi-frame track we can't measure how fast and in what direction each
+                    candidate is moving.
+        Args:
+            frame (any): current video frame as a numpy BGR array
+        Returns:
+            held_box: np.ndarray [x, y, w, h] — no position update this frame
+            0.0: score is always 0.0 during collection; no reacquisition here
+    """
         cam_vel = self._cam_vel_from_H(frame)
         self._occ_cam_vels.append(cam_vel)
 
@@ -1077,43 +1054,39 @@ class SiamRAMTracker:
         frame: np.ndarray,
     ) -> Tuple[np.ndarray, float]:
         """
-        Inputs:
-            frame - current video frame as a numpy BGR array
+        The full reacquisition phase. Works through these steps:
 
-        What it does:
-            The full reacquisition phase. Works through these steps:
+                    1. Finds the last non-empty collection frame and uses its detections
+                       as the candidate pool.
+                    2. Calls _build_candidate_velocities to trace each candidate back
+                       through all earlier collection frames. Candidates that cannot be
+                       matched across every prior frame are dropped — they have no
+                       reliable velocity measurement.
+                    3. Runs DRM matching on the surviving fully-tracked candidates using
+                       an EKF-uncertainty-aware dist_sigma.
+                    4. Augments each DRM score with a direction/velocity consistency term
+                       (lam_cand_dir). If the target is out-of-frame or tiny, this term
+                       is reduced or zeroed.
+                    5. Sorts candidates by augmented score and verifies the top-k with
+                       the SiamABC tracker (motion-compensated by one frame of EKF velocity
+                       to account for the candidates being from a prior frame).
+                    6. The first candidate that clears reacq_threshold is committed via
+                       _commit_reacquisition. If all fail, resets to phase 0 and returns
+                       held_box.
 
-            1. Finds the last non-empty collection frame and uses its detections
-               as the candidate pool.
-            2. Calls _build_candidate_velocities to trace each candidate back
-               through all earlier collection frames. Candidates that cannot be
-               matched across every prior frame are dropped — they have no
-               reliable velocity measurement.
-            3. Runs DRM matching on the surviving fully-tracked candidates using
-               an EKF-uncertainty-aware dist_sigma.
-            4. Augments each DRM score with a direction/velocity consistency term
-               (lam_cand_dir). If the target is out-of-frame or tiny, this term
-               is reduced or zeroed.
-            5. Sorts candidates by augmented score and verifies the top-k with
-               the SiamABC tracker (motion-compensated by one frame of EKF velocity
-               to account for the candidates being from a prior frame).
-            6. The first candidate that clears reacq_threshold is committed via
-               _commit_reacquisition. If all fail, resets to phase 0 and returns
-               held_box.
-
-        Outputs:
+        This is the expensive but high-quality recovery path. It only runs
+                    once after the collection window closes, so its cost is amortised
+                    across the collection frames. Velocity scoring is the key advantage
+                    over a single-frame DRM match — a candidate that moves in the same
+                    direction and at roughly the same speed as the EKF-predicted target
+                    gets a boost; one moving the wrong way gets penalised, reducing
+                    false reacquisitions on distractors.
+        Args:
+            frame (any): current video frame as a numpy BGR array
+        Returns:
             On success  → output of _commit_reacquisition (ekf_bbox, verify_score)
             On failure  → held_box, 0.0  and phase reset to 0
-
-        Why / where:
-            This is the expensive but high-quality recovery path. It only runs
-            once after the collection window closes, so its cost is amortised
-            across the collection frames. Velocity scoring is the key advantage
-            over a single-frame DRM match — a candidate that moves in the same
-            direction and at roughly the same speed as the EKF-predicted target
-            gets a boost; one moving the wrong way gets penalised, reducing
-            false reacquisitions on distractors.
-        """
+    """
 
         def _reset():
             self._occ_phase = 0
@@ -1285,33 +1258,29 @@ class SiamRAMTracker:
         score: float,
     ) -> Tuple[np.ndarray, float]:
         """
-        Inputs:
-            frame - current video frame as a numpy BGR array
-            bbox  - np.ndarray [x, y, w, h] of the verified reacquired position
-            desc  - appearance descriptor for the reacquired bbox, or None
-            score - tracker confidence at the reacquired position
+        Shared exit point for all three recovery phases. Updates the EKF
+                    with the confirmed bbox, then resets every occlusion-related flag
+                    and counter — in_occlusion, out_of_frame, exit_edge, occ_frames,
+                    occ_phase, cand_frames, entry_streak. Re-enables TTA and dynamic
+                    update on the SiamABC tracker. Admits the new descriptor to memory
+                    if available, syncs current_bbox / held_box / tracker state to the
+                    EKF output, and appends a history entry so _normal_update starts
+                    with a clean slate on the very next frame.
 
-        What it does:
-            Shared exit point for all three recovery phases. Updates the EKF
-            with the confirmed bbox, then resets every occlusion-related flag
-            and counter — in_occlusion, out_of_frame, exit_edge, occ_frames,
-            occ_phase, cand_frames, entry_streak. Re-enables TTA and dynamic
-            update on the SiamABC tracker. Admits the new descriptor to memory
-            if available, syncs current_bbox / held_box / tracker state to the
-            EKF output, and appends a history entry so _normal_update starts
-            with a clean slate on the very next frame.
-
-        Outputs:
-            ekf_bbox - np.ndarray [x, y, w, h] EKF-smoothed position after update
-            score    - float passed through from the caller unchanged
-
-        Why / where:
-            Every successful reacquisition path funnels through here. Centralising
-            the teardown means none of the three phase methods has to individually
-            worry about leaving stale state — one call cleans everything up. Any
-            bug in the reset logic would affect all three phases equally, making
-            it easy to test and audit.
-        """
+        Every successful reacquisition path funnels through here. Centralising
+                    the teardown means none of the three phase methods has to individually
+                    worry about leaving stale state — one call cleans everything up. Any
+                    bug in the reset logic would affect all three phases equally, making
+                    it easy to test and audit.
+        Args:
+            frame (any): current video frame as a numpy BGR array
+            bbox (any): np.ndarray [x, y, w, h] of the verified reacquired position
+            desc (any): appearance descriptor for the reacquired bbox, or None
+            score (any): tracker confidence at the reacquired position
+        Returns:
+            ekf_bbox: np.ndarray [x, y, w, h] EKF-smoothed position after update
+            score: float passed through from the caller unchanged
+    """
         ekf = self.ekf
         assert ekf is not None
         ekf.update(bbox)
@@ -1375,24 +1344,20 @@ class SiamRAMTracker:
         self,
     ) -> Tuple[int, int]:
         """
-        Inputs:
+        Computes the median width and height of the tracked object across all
+                    entries in _size_history. Falls back to held_box dimensions if the
+                    history is empty.
+
+        Used in _occ_phase_siam to build the seed bbox, and in
+                    _get_yolo_search_roi to scale the ROI. Using the median rather than
+                    the most recent size makes both the seed and the ROI robust to frames
+                    where the tracker was drifting or locking onto something of the wrong
+                    scale.
+        Args:
             None. Reads self._size_history internally.
-
-        What it does:
-            Computes the median width and height of the tracked object across all
-            entries in _size_history. Falls back to held_box dimensions if the
-            history is empty.
-
-        Outputs:
-            (w, h) - tuple of two ints, median object size in pixels, minimum 1px each
-
-        Why / where:
-            Used in _occ_phase_siam to build the seed bbox, and in
-            _get_yolo_search_roi to scale the ROI. Using the median rather than
-            the most recent size makes both the seed and the ROI robust to frames
-            where the tracker was drifting or locking onto something of the wrong
-            scale.
-        """
+        Returns:
+            (w, h): tuple of two ints, median object size in pixels, minimum 1px each
+    """
         if self._size_history:
             w = max(1, int(np.median([s[0] for s in self._size_history])))
             h = max(1, int(np.median([s[1] for s in self._size_history])))
@@ -1408,24 +1373,20 @@ class SiamRAMTracker:
         frame: np.ndarray,
     ) -> np.ndarray:
         """
-        Inputs:
-            frame - current video frame (used only for its shape)
+        Projects the frame centre through self._last_H and returns the
+                    displacement (dx, dy) as the camera velocity vector for this frame.
+                    Returns zeros if _last_H is None.
 
-        What it does:
-            Projects the frame centre through self._last_H and returns the
-            displacement (dx, dy) as the camera velocity vector for this frame.
-            Returns zeros if _last_H is None.
-
-        Outputs:
+        Called in _occ_phase_collect and _build_candidate_velocities to
+                    camera-compensate candidate displacements. Without this, a candidate
+                    that is stationary but appears to move because the camera panned would
+                    receive an undeserved velocity score and might beat a genuinely moving
+                    true target.
+        Args:
+            frame (any): current video frame (used only for its shape)
+        Returns:
             np.ndarray of shape (2,) — (dx, dy) camera motion in pixels this frame
-
-        Why / where:
-            Called in _occ_phase_collect and _build_candidate_velocities to
-            camera-compensate candidate displacements. Without this, a candidate
-            that is stationary but appears to move because the camera panned would
-            receive an undeserved velocity score and might beat a genuinely moving
-            true target.
-        """
+    """
         if self._last_H is None:
             return np.zeros(2)
         h_fr, w_fr = frame.shape[:2]
@@ -1449,30 +1410,26 @@ class SiamRAMTracker:
         frame: np.ndarray,
     ) -> float:
         """
-        Inputs:
-            frame - current video frame (used only for its shape via _get_median_size
-                    and _is_long_distance)
+        Computes the Gaussian distance penalty sigma for the DRM scoring
+                    function. Takes the larger of two candidates:
+                        size_sigma = drm_dist_sigma_factor × max(obj_w, obj_h)
+                        ekf_sigma  = ekf.get_uncertainty() × 1.5
+                    When the EKF is very uncertain (large covariance = long occlusion),
+                    ekf_sigma dominates and the penalty softens, allowing correct
+                    candidates that have drifted far from the stale EKF prediction to
+                    still score well.
 
-        What it does:
-            Computes the Gaussian distance penalty sigma for the DRM scoring
-            function. Takes the larger of two candidates:
-                size_sigma = drm_dist_sigma_factor × max(obj_w, obj_h)
-                ekf_sigma  = ekf.get_uncertainty() × 1.5
-            When the EKF is very uncertain (large covariance = long occlusion),
-            ekf_sigma dominates and the penalty softens, allowing correct
-            candidates that have drifted far from the stale EKF prediction to
-            still score well.
-
-        Outputs:
-            float - sigma in pixels to pass as dist_sigma to drm_match
-
-        Why / where:
-            Passed to drm_match in both _occ_phase_siam and _occ_phase_final_drm.
-            A fixed sigma would over-penalise spatially displaced candidates after
-            a long occlusion. This adaptive version ensures the spatial penalty
-            stays meaningful early (tight sigma) and relaxes late (wide sigma)
-            automatically, without any manual tuning per sequence.
-        """
+        Passed to drm_match in both _occ_phase_siam and _occ_phase_final_drm.
+                    A fixed sigma would over-penalise spatially displaced candidates after
+                    a long occlusion. This adaptive version ensures the spatial penalty
+                    stays meaningful early (tight sigma) and relaxes late (wide sigma)
+                    automatically, without any manual tuning per sequence.
+        Args:
+            frame (any): current video frame (used only for its shape via _get_median_size
+            and _is_long_distance)
+        Returns:
+            float: sigma in pixels to pass as dist_sigma to drm_match
+    """
         obj_w, obj_h = self._get_median_size()
         size_sigma = self._drm_dist_sigma_factor * float(max(obj_w, obj_h))
         ekf = self.ekf
@@ -1485,37 +1442,33 @@ class SiamRAMTracker:
         last_idx: int,
     ) -> List[Optional[np.ndarray]]:
         """
-        Inputs:
-            last_idx - index into _cand_frames pointing to the last non-empty
-                       collection frame; candidates from this frame are the ones
-                       being scored
+        For each candidate in _cand_frames[last_idx], tries to match it back
+                    through every prior collection frame (0 … last_idx-1) using a combined
+                    IoU + cosine similarity score. If the candidate cannot be matched in
+                    any one prior frame, it is marked as None (will be excluded from DRM).
 
-        What it does:
-            For each candidate in _cand_frames[last_idx], tries to match it back
-            through every prior collection frame (0 … last_idx-1) using a combined
-            IoU + cosine similarity score. If the candidate cannot be matched in
-            any one prior frame, it is marked as None (will be excluded from DRM).
+                    For candidates that survive all frames, computes per-step displacements,
+                    subtracts the camera velocity at each step from _occ_cam_vels, and
+                    returns the mean camera-compensated velocity vector over the full track.
 
-            For candidates that survive all frames, computes per-step displacements,
-            subtracts the camera velocity at each step from _occ_cam_vels, and
-            returns the mean camera-compensated velocity vector over the full track.
+                    Special case: if last_idx == 0 (only one collection frame), no prior
+                    frames exist so no matching is attempted — every candidate gets None
+                    (neutral score, not excluded).
 
-            Special case: if last_idx == 0 (only one collection frame), no prior
-            frames exist so no matching is attempted — every candidate gets None
-            (neutral score, not excluded).
-
-        Outputs:
+        Called once per final DRM phase from _occ_phase_final_drm. The
+                    velocities it produces are what separate "this detection is moving
+                    like the target" from "this is a distractor that just happens to look
+                    similar." Without cross-frame tracking, the velocity score would be
+                    meaningless single-frame noise.
+        Args:
+            last_idx (any): index into _cand_frames pointing to the last non-empty
+            collection frame; candidates from this frame are the ones
+            being scored
+        Returns:
             List of Optional[np.ndarray] — one entry per candidate in last_frame.
             Each is either a (2,) velocity vector [vx, vy] in px/frame,
             or None if the candidate was not found in every prior frame.
-
-        Why / where:
-            Called once per final DRM phase from _occ_phase_final_drm. The
-            velocities it produces are what separate "this detection is moving
-            like the target" from "this is a distractor that just happens to look
-            similar." Without cross-frame tracking, the velocity score would be
-            meaningless single-frame noise.
-        """
+    """
         last_frame = self._cand_frames[last_idx]
         if not last_frame:
             return []
@@ -1595,35 +1548,31 @@ class SiamRAMTracker:
         expected_vel,
     ) -> float:
         """
-        Inputs:
-            cand_vel     - np.ndarray (2,) camera-compensated velocity of a candidate
-                           in pixels per frame
-            expected_vel - np.ndarray (2,) EKF-predicted target velocity in px/frame
+        Computes a scalar score in [0, 1] measuring how well the candidate's
+                    observed motion matches the expected target motion:
 
-        What it does:
-            Computes a scalar score in [0, 1] measuring how well the candidate's
-            observed motion matches the expected target motion:
+                    - If expected speed < vel_score_min_speed → returns 0.5 (neutral;
+                      the EKF is essentially stationary, so velocity is unreliable).
+                    - Computes cosine similarity between the two vectors, maps it to [0,1]
+                      as dir_score = (cos + 1) / 2.
+                    - Computes speed_score = clip(1 - |speed_ratio - 1|, 0, 1); set to 0
+                      if cosine < 0 (wrong direction, speed match is a coincidence).
+                    - Combines as 0.80 * dir_score + 0.20 * speed_score.
+                    - Applies a hard gate: if cos < -vel_dir_hard_gate, clamps the score
+                      to 0.05, ensuring strongly opposite candidates cannot slip through.
 
-            - If expected speed < vel_score_min_speed → returns 0.5 (neutral;
-              the EKF is essentially stationary, so velocity is unreliable).
-            - Computes cosine similarity between the two vectors, maps it to [0,1]
-              as dir_score = (cos + 1) / 2.
-            - Computes speed_score = clip(1 - |speed_ratio - 1|, 0, 1); set to 0
-              if cosine < 0 (wrong direction, speed match is a coincidence).
-            - Combines as 0.80 * dir_score + 0.20 * speed_score.
-            - Applies a hard gate: if cos < -vel_dir_hard_gate, clamps the score
-              to 0.05, ensuring strongly opposite candidates cannot slip through.
-
-        Outputs:
+        Called in _occ_phase_siam (for the single-frame direction augmentation)
+                    and in _occ_phase_final_drm (for each fully-tracked candidate). Its
+                    output is scaled by lam_cand_dir and added to the DRM score, biasing
+                    selection toward candidates that actually move with the target rather
+                    than just look like it.
+        Args:
+            cand_vel (any): np.ndarray (2,) camera-compensated velocity of a candidate
+            in pixels per frame
+            expected_vel (any): np.ndarray (2,) EKF-predicted target velocity in px/frame
+        Returns:
             float in [0.05, 1.0] — higher means the candidate moves more like the target
-
-        Why / where:
-            Called in _occ_phase_siam (for the single-frame direction augmentation)
-            and in _occ_phase_final_drm (for each fully-tracked candidate). Its
-            output is scaled by lam_cand_dir and added to the DRM score, biasing
-            selection toward candidates that actually move with the target rather
-            than just look like it.
-        """
+    """
         expected_speed = float(np.linalg.norm(expected_vel))
         cand_speed = float(np.linalg.norm(cand_vel))
         if expected_speed < self._vel_score_min_speed:
@@ -1652,34 +1601,30 @@ class SiamRAMTracker:
         frame: np.ndarray,
     ) -> Tuple[Optional[np.ndarray], bool, np.ndarray]:
         """
-        Inputs:
-            frame - current video frame as a numpy BGR array
+        Estimates the 2D rigid background motion between the previous frame
+                    and the current frame using sparse optical flow (LK) on a regular
+                    grid of background points (excluding the region around the tracked
+                    object). Fits an affine-partial-2D homography via RANSAC and marks it
+                    as reliable if the inlier ratio exceeds homo_inlier_threshold.
 
-        What it does:
-            Estimates the 2D rigid background motion between the previous frame
-            and the current frame using sparse optical flow (LK) on a regular
-            grid of background points (excluding the region around the tracked
-            object). Fits an affine-partial-2D homography via RANSAC and marks it
-            as reliable if the inlier ratio exceeds homo_inlier_threshold.
+                    Operates at half resolution (SCALE=0.5) for speed. Rescales the
+                    translation components of the resulting matrix back to full resolution.
+                    Caches the grid of feature points so they are not recomputed when the
+                    frame size is unchanged.
 
-            Operates at half resolution (SCALE=0.5) for speed. Rescales the
-            translation components of the resulting matrix back to full resolution.
-            Caches the grid of feature points so they are not recomputed when the
-            frame size is unchanged.
-
-        Outputs:
-            H         - 3×3 np.ndarray homography matrix, or None if estimation failed
-            reliable  - bool True when inlier ratio >= homo_inlier_threshold
-            gray      - downscaled grayscale frame (stored as prev_gray next call)
-
-        Why / where:
-            Called at the top of every update() before either _normal_update or
-            _occlusion_update runs. The homography is consumed in three places:
-            the EKF predict step (to motion-compensate the state), _cam_vel_from_H
-            (to compute camera velocity for score compensation), and
-            _h_translation_magnitude (to classify loss cause). Everything related
-            to camera motion compensation depends on this being accurate.
-        """
+        Called at the top of every update() before either _normal_update or
+                    _occlusion_update runs. The homography is consumed in three places:
+                    the EKF predict step (to motion-compensate the state), _cam_vel_from_H
+                    (to compute camera velocity for score compensation), and
+                    _h_translation_magnitude (to classify loss cause). Everything related
+                    to camera motion compensation depends on this being accurate.
+        Args:
+            frame (any): current video frame as a numpy BGR array
+        Returns:
+            H: 3×3 np.ndarray homography matrix, or None if estimation failed
+            reliable: bool True when inlier ratio >= homo_inlier_threshold
+            gray: downscaled grayscale frame (stored as prev_gray next call)
+    """
         _LK_PARAMS = dict(
             winSize=(20, 20),
             maxLevel=2,
@@ -1784,29 +1729,25 @@ class SiamRAMTracker:
         detections: List[np.ndarray],
     ) -> np.ndarray:
         """
-        Inputs:
-            frame      - current video frame as a numpy BGR array
-            detections - list of np.ndarray [x, y, w, h] YOLO detections
+        When no candidate survives to DRM matching, this prevents held_box
+                    from freezing completely. It finds the detection closest to held_box,
+                    weighted by appearance similarity to the best memory descriptor if
+                    one is available, then moves held_box a small step (nudge_alpha)
+                    toward that detection while keeping the box dimensions unchanged.
+                    The result is clamped to the frame.
 
-        What it does:
-            When no candidate survives to DRM matching, this prevents held_box
-            from freezing completely. It finds the detection closest to held_box,
-            weighted by appearance similarity to the best memory descriptor if
-            one is available, then moves held_box a small step (nudge_alpha)
-            toward that detection while keeping the box dimensions unchanged.
-            The result is clamped to the frame.
-
-        Outputs:
+        Called in _occ_phase_final_drm when no fully-tracked candidates exist
+                    but raw YOLO detections are available. Without this the EKF would keep
+                    extrapolating uncorrected. A gentle nudge toward the most plausible
+                    nearby detection biases the EKF search centre in roughly the right
+                    direction while keeping the tracker conservative enough not to commit
+                    to an unverified candidate.
+        Args:
+            frame (any): current video frame as a numpy BGR array
+            detections (any): list of np.ndarray [x, y, w, h] YOLO detections
+        Returns:
             np.ndarray [x, y, w, h] — nudged held_box position
-
-        Why / where:
-            Called in _occ_phase_final_drm when no fully-tracked candidates exist
-            but raw YOLO detections are available. Without this the EKF would keep
-            extrapolating uncorrected. A gentle nudge toward the most plausible
-            nearby detection biases the EKF search centre in roughly the right
-            direction while keeping the tracker conservative enough not to commit
-            to an unverified candidate.
-        """
+    """
         ref = self.memory.best_descriptor()
         held_box = self.held_box
         assert held_box is not None
@@ -1849,35 +1790,31 @@ class SiamRAMTracker:
         frame: np.ndarray,
     ) -> Tuple[int, int, int, int]:
         """
-        Inputs:
-            frame - current video frame (used for its shape and _is_long_distance)
+        Computes a [x, y, w, h] search region in which YOLO will be run.
+                    The region grows over time during occlusion based on _occ_frames and
+                    the growth parameters. Two parameter sets exist:
+                        normal objects   → roi_start_expand, yolo_search_expand, etc.
+                        tiny/far objects → tiny_roi_start_expand, tiny_yolo_search_expand, etc.
 
-        What it does:
-            Computes a [x, y, w, h] search region in which YOLO will be run.
-            The region grows over time during occlusion based on _occ_frames and
-            the growth parameters. Two parameter sets exist:
-                normal objects   → roi_start_expand, yolo_search_expand, etc.
-                tiny/far objects → tiny_roi_start_expand, tiny_yolo_search_expand, etc.
+                    During the first 30 frames or after a failed recovery (recovered_early_occlusion=False),
+                    a wide centred region (40% of frame each axis) is used to give the
+                    tracker time to stabilise.
 
-            During the first 30 frames or after a failed recovery (recovered_early_occlusion=False),
-            a wide centred region (40% of frame each axis) is used to give the
-            tracker time to stabilise.
+                    For out-of-frame targets, the ROI is a strip pinned to the relevant edge.
+                    For in-frame targets, the ROI is a square centred on the EKF search centre,
+                    expanding geometrically with time. Everything is clamped to the frame.
 
-            For out-of-frame targets, the ROI is a strip pinned to the relevant edge.
-            For in-frame targets, the ROI is a square centred on the EKF search centre,
-            expanding geometrically with time. Everything is clamped to the frame.
-
-        Outputs:
-            (x, y, w, h) - tuple of ints defining the YOLO search region
-
-        Why / where:
-            Called in _occ_phase_siam and _occ_phase_collect to crop the frame
-            before running YOLO. Running YOLO on a cropped region rather than the
-            full frame reduces false detections (fewer distractors in view), speeds
-            up inference, and keeps the search area semantically relevant. The
-            growing ROI ensures that even after many occlusion frames the true
-            target can eventually fall back inside the search window.
-        """
+        Called in _occ_phase_siam and _occ_phase_collect to crop the frame
+                    before running YOLO. Running YOLO on a cropped region rather than the
+                    full frame reduces false detections (fewer distractors in view), speeds
+                    up inference, and keeps the search area semantically relevant. The
+                    growing ROI ensures that even after many occlusion frames the true
+                    target can eventually fall back inside the search window.
+        Args:
+            frame (any): current video frame (used for its shape and _is_long_distance)
+        Returns:
+            (x, y, w, h): tuple of ints defining the YOLO search region
+    """
         h_fr, w_fr = frame.shape[:2]
         max_side = min(w_fr, h_fr)
 
@@ -1957,28 +1894,24 @@ class SiamRAMTracker:
         frame: np.ndarray,
     ) -> List[np.ndarray]:
         """
-        Inputs:
-            frame - current video frame as a numpy BGR array
+        Calls _get_yolo_search_roi to get the search crop, runs YOLO predict
+                    on that crop at imgsz=320, then translates all resulting bounding
+                    boxes back to full-frame coordinates. Optionally filters detections
+                    to _target_class_id when yolo_filter_class=True and the class has
+                    been committed. Stores results in _yolo_cache so _yolo_detect_cached
+                    can skip a redundant call within the same frame.
 
-        What it does:
-            Calls _get_yolo_search_roi to get the search crop, runs YOLO predict
-            on that crop at imgsz=320, then translates all resulting bounding
-            boxes back to full-frame coordinates. Optionally filters detections
-            to _target_class_id when yolo_filter_class=True and the class has
-            been committed. Stores results in _yolo_cache so _yolo_detect_cached
-            can skip a redundant call within the same frame.
-
-        Outputs:
-            list of np.ndarray [x, y, w, h] in full-frame pixel coordinates.
+        The only place in the system that runs YOLO. Called during candidate
+                    collection (phases 1…N) and referenced by the phase 0 ROI logic.
+                    Keeping detection isolated here means the ROI logic, class filtering,
+                    and coordinate translation all live in one place. The 320px imgsz
+                    keeps YOLO inference fast enough to run on embedded/edge hardware.
+        Args:
+            frame (any): current video frame as a numpy BGR array
+        Returns:
+            list of np.ndarray [x, y, w, h] in full: frame pixel coordinates.
             Empty list if the crop is invalid or YOLO finds nothing.
-
-        Why / where:
-            The only place in the system that runs YOLO. Called during candidate
-            collection (phases 1…N) and referenced by the phase 0 ROI logic.
-            Keeping detection isolated here means the ROI logic, class filtering,
-            and coordinate translation all live in one place. The 320px imgsz
-            keeps YOLO inference fast enough to run on embedded/edge hardware.
-        """
+    """
         rx, ry, rw, rh = self._get_yolo_search_roi(frame)
         crop = frame[ry: ry + rh, rx: rx + rw]
         if crop.size == 0:
@@ -2013,23 +1946,19 @@ class SiamRAMTracker:
         frame: np.ndarray,
     ) -> List[np.ndarray]:
         """
-        Inputs:
-            frame - current video frame as a numpy BGR array
+        Returns the cached YOLO detections from _yolo_cache if they are
+                    non-empty (i.e. YOLO was already run this frame). Falls through
+                    to _yolo_detect otherwise.
 
-        What it does:
-            Returns the cached YOLO detections from _yolo_cache if they are
-            non-empty (i.e. YOLO was already run this frame). Falls through
-            to _yolo_detect otherwise.
-
-        Outputs:
+        Some code paths can trigger YOLO more than once per frame. This
+                    wrapper prevents duplicate inference calls within the same frame
+                    by serving the already-computed results. Saves inference time
+                    proportional to how many times it would have been called redundantly.
+        Args:
+            frame (any): current video frame as a numpy BGR array
+        Returns:
             list of np.ndarray [x, y, w, h] — same format as _yolo_detect
-
-        Why / where:
-            Some code paths can trigger YOLO more than once per frame. This
-            wrapper prevents duplicate inference calls within the same frame
-            by serving the already-computed results. Saves inference time
-            proportional to how many times it would have been called redundantly.
-        """
+    """
         if self._yolo_cache:
             return self._yolo_cache
         return self._yolo_detect(frame)
@@ -2040,26 +1969,22 @@ class SiamRAMTracker:
         frame: np.ndarray,
     ) -> np.ndarray:
         """
-        Inputs:
-            bbox  - np.ndarray [x, y, w, h] potentially out of frame bounds
-            frame - current video frame (used only for its shape)
+        Clips width and height to [1, frame_dimension], then clips x and y
+                    to [-w, frame_w] and [-h, frame_h] respectively. This allows the
+                    box to be partially off-screen (which is intentional for out-of-frame
+                    targets) while preventing completely degenerate zero-size boxes.
 
-        What it does:
-            Clips width and height to [1, frame_dimension], then clips x and y
-            to [-w, frame_w] and [-h, frame_h] respectively. This allows the
-            box to be partially off-screen (which is intentional for out-of-frame
-            targets) while preventing completely degenerate zero-size boxes.
-
-        Outputs:
+        Called throughout the occlusion code — after seed bbox construction,
+                    after EKF output, and when building the motion-compensated adjusted
+                    bbox for tracker verification. Without this, negative or zero-size
+                    bounding boxes would crash OpenCV crop operations downstream.
+        Args:
+            bbox (any): np.ndarray [x, y, w, h] potentially out of frame bounds
+            frame (any): current video frame (used only for its shape)
+        Returns:
             np.ndarray [x, y, w, h] dtype int, all values within the permissive
             bounds described above
-
-        Why / where:
-            Called throughout the occlusion code — after seed bbox construction,
-            after EKF output, and when building the motion-compensated adjusted
-            bbox for tracker verification. Without this, negative or zero-size
-            bounding boxes would crash OpenCV crop operations downstream.
-        """
+    """
         h_fr, w_fr = frame.shape[:2]
         x, y, w, h = bbox
         w = int(np.clip(w, 1, w_fr))
@@ -2074,25 +1999,21 @@ class SiamRAMTracker:
         frame: np.ndarray,
     ) -> float:
         """
-        Inputs:
-            H     - 3×3 homography matrix or None
-            frame - current video frame (used only for its shape)
+        Projects the frame centre through H and returns the Euclidean distance
+                    between the original and projected centres as a scalar pixel magnitude.
+                    Returns 0.0 if H is None.
 
-        What it does:
-            Projects the frame centre through H and returns the Euclidean distance
-            between the original and projected centres as a scalar pixel magnitude.
-            Returns 0.0 if H is None.
-
-        Outputs:
+        Called every frame in _normal_update and stored in _cam_disp_history.
+                    _classify_loss_cause uses the weighted average of this history to
+                    decide whether loss was caused by camera motion (fast camera pan) or
+                    by the target being occluded. A high and sustained displacement suggests
+                    the camera moved faster than the tracker could follow.
+        Args:
+            H (any): 3×3 homography matrix or None
+            frame (any): current video frame (used only for its shape)
+        Returns:
             float — camera displacement magnitude in pixels this frame
-
-        Why / where:
-            Called every frame in _normal_update and stored in _cam_disp_history.
-            _classify_loss_cause uses the weighted average of this history to
-            decide whether loss was caused by camera motion (fast camera pan) or
-            by the target being occluded. A high and sustained displacement suggests
-            the camera moved faster than the tracker could follow.
-        """
+    """
         if H is None:
             return 0.0
         h, w = frame.shape[:2]
@@ -2108,32 +2029,28 @@ class SiamRAMTracker:
         area_shrink_threshold: float = -0.005,
     ) -> str:
         """
-        Inputs:
-            cam_disp_threshold    - weighted mean camera displacement (px) above
-                                    which motion is classified as camera_motion
-            area_shrink_threshold - normalised area slope below which object is
-                                    classified as shrinking (i.e. not camera motion)
+        Casts two independent votes — one from area trend, one from camera
+                    displacement history — and returns 'camera_motion' only when both agree.
+                    Area vote: fits a linear slope to the bbox area history; a non-negative
+                    slope means the object was not shrinking before loss, suggesting camera
+                    motion rather than occlusion. Camera vote: computes an exponentially
+                    weighted mean of _cam_disp_history; high displacement confirms camera
+                    motion.
 
-        What it does:
-            Casts two independent votes — one from area trend, one from camera
-            displacement history — and returns 'camera_motion' only when both agree.
-            Area vote: fits a linear slope to the bbox area history; a non-negative
-            slope means the object was not shrinking before loss, suggesting camera
-            motion rather than occlusion. Camera vote: computes an exponentially
-            weighted mean of _cam_disp_history; high displacement confirms camera
-            motion.
-
-        Outputs:
+        Called once at occlusion entry from _normal_update. Its return value
+                    controls effective_skip: camera_motion and out_of_frame losses get
+                    skip=0 (the history is clean), while occlusion losses get
+                    skip=max(dynamic_skip, entry_streak). Using the wrong skip wastes good
+                    history entries or retains corrupted ones, both of which hurt EKF
+                    reconstruction accuracy.
+        Args:
+            cam_disp_threshold (any): weighted mean camera displacement (px) above
+            which motion is classified as camera_motion
+            area_shrink_threshold (any): normalised area slope below which object is
+            classified as shrinking (i.e. not camera motion)
+        Returns:
             str — either 'camera_motion' or 'occlusion'
-
-        Why / where:
-            Called once at occlusion entry from _normal_update. Its return value
-            controls effective_skip: camera_motion and out_of_frame losses get
-            skip=0 (the history is clean), while occlusion losses get
-            skip=max(dynamic_skip, entry_streak). Using the wrong skip wastes good
-            history entries or retains corrupted ones, both of which hurt EKF
-            reconstruction accuracy.
-        """
+    """
         history = list(self._conf_history)
         cam_hist = list(self._cam_disp_history)
 
@@ -2165,27 +2082,23 @@ class SiamRAMTracker:
         frame: np.ndarray,
     ) -> bool:
         """
-        Inputs:
-            frame - current video frame (used only for its shape)
+        Returns True if the object is classified as tiny or far away.
+                    This is the case when long_distance_mode is explicitly set to True,
+                    or when the object's median area from _size_history is below
+                    long_distance_area_fraction of the total frame area. Returns False
+                    if _size_history is empty (can't judge yet).
 
-        What it does:
-            Returns True if the object is classified as tiny or far away.
-            This is the case when long_distance_mode is explicitly set to True,
-            or when the object's median area from _size_history is below
-            long_distance_area_fraction of the total frame area. Returns False
-            if _size_history is empty (can't judge yet).
-
-        Outputs:
-            bool — True means the target is tiny/far and tiny-object parameter
-                   sets should be used
-
-        Why / where:
-            Called in _normal_update (to switch confidence threshold and search
-            context), in _get_yolo_search_roi (to pick the ROI parameter set),
-            and in _occ_phase_final_drm (to halve lam_cand_dir). Tiny objects
-            have unreliable velocity measurements and need wider ROIs, so
-            separating them here avoids polluting the normal-scale parameters.
-        """
+        Called in _normal_update (to switch confidence threshold and search
+                    context), in _get_yolo_search_roi (to pick the ROI parameter set),
+                    and in _occ_phase_final_drm (to halve lam_cand_dir). Tiny objects
+                    have unreliable velocity measurements and need wider ROIs, so
+                    separating them here avoids polluting the normal-scale parameters.
+        Args:
+            frame (any): current video frame (used only for its shape)
+        Returns:
+            bool — True means the target is tiny/far and tiny: object parameter
+            sets should be used
+    """
         if self.long_distance_mode:
             return True
         if not self._size_history:
@@ -2202,29 +2115,25 @@ class SiamRAMTracker:
         skip_override=None,
     ) -> BBoxEKF:
         """
-        Inputs:
-            skip_override - int or None; how many tail entries to drop before
-                            replaying history. If None, uses self.history_skip_last.
+        Creates a brand-new BBoxEKF seeded at the oldest clean history entry,
+                    then replays all clean history entries through predict + update to get
+                    a physically consistent state estimate at the last clean frame. After
+                    replay, injects the robust velocity estimate from _robust_velocity_from_history
+                    directly into the EKF state vector with a moderately high covariance
+                    so the filter has a sensible prior but is not overconfident about
+                    velocity at the start of occlusion.
 
-        What it does:
-            Creates a brand-new BBoxEKF seeded at the oldest clean history entry,
-            then replays all clean history entries through predict + update to get
-            a physically consistent state estimate at the last clean frame. After
-            replay, injects the robust velocity estimate from _robust_velocity_from_history
-            directly into the EKF state vector with a moderately high covariance
-            so the filter has a sensible prior but is not overconfident about
-            velocity at the start of occlusion.
-
-        Outputs:
-            BBoxEKF instance — fresh, consistent, velocity-seeded, ready to predict
-
-        Why / where:
-            Called at occlusion entry from _normal_update. The existing EKF has
-            been running on live SiamABC output which may have been noisy or
-            drifting during the entry_streak frames. Replaying only the clean
-            portion from scratch gives a much cleaner velocity estimate and
-            eliminates EKF state contamination from bad tracker outputs.
-        """
+        Called at occlusion entry from _normal_update. The existing EKF has
+                    been running on live SiamABC output which may have been noisy or
+                    drifting during the entry_streak frames. Replaying only the clean
+                    portion from scratch gives a much cleaner velocity estimate and
+                    eliminates EKF state contamination from bad tracker outputs.
+        Args:
+            skip_override (any): int or None; how many tail entries to drop before
+            replaying history. If None, uses self.history_skip_last.
+        Returns:
+            BBoxEKF instance — fresh, consistent, velocity: seeded, ready to predict
+    """
         history = list(self._conf_history)
         raw_skip = self.history_skip_last if skip_override is None else skip_override
         skip = min(raw_skip, max(0, len(history) - 2))
@@ -2266,33 +2175,29 @@ class SiamRAMTracker:
         smooth_k: int = 3,
     ) -> int:
         """
-        Inputs:
-            max_lookback  - maximum number of tail frames to scan backward
-            min_drop_frac - minimum fractional area drop relative to 95th
-                            percentile area to count a frame as shrinking
-            smooth_k      - rolling median window applied to areas before analysis
+        Scans _conf_history from newest to oldest looking for frames where the
+                    smoothed bounding box area fell below (1 - min_drop_frac) × ref_area,
+                    where ref_area is the 95th percentile area across all history. Counts
+                    a contiguous block of shrinking frames (with a small gap budget of 3
+                    to allow isolated glitches) and returns the count as the recommended
+                    skip depth. Caps at max_lookback and runs a sanity check — if the
+                    average area of the flagged frames is not actually below threshold,
+                    returns 0.
 
-        What it does:
-            Scans _conf_history from newest to oldest looking for frames where the
-            smoothed bounding box area fell below (1 - min_drop_frac) × ref_area,
-            where ref_area is the 95th percentile area across all history. Counts
-            a contiguous block of shrinking frames (with a small gap budget of 3
-            to allow isolated glitches) and returns the count as the recommended
-            skip depth. Caps at max_lookback and runs a sanity check — if the
-            average area of the flagged frames is not actually below threshold,
-            returns 0.
-
-        Outputs:
+        Called at occlusion entry from _normal_update alongside
+                    _detect_center_drift_skip. When a target is being occluded gradually,
+                    the tracker bbox often shrinks before the score drops below threshold.
+                    Skipping those shrinking frames prevents the EKF from being seeded with
+                    a velocity that points into the occluder instead of tracking the target.
+        Args:
+            max_lookback (any): maximum number of tail frames to scan backward
+            min_drop_frac (any): minimum fractional area drop relative to 95th
+            percentile area to count a frame as shrinking
+            smooth_k (any): rolling median window applied to areas before analysis
+        Returns:
             int — number of tail history frames that appear corrupted by shrinkage;
-                  0 if no shrinkage detected
-
-        Why / where:
-            Called at occlusion entry from _normal_update alongside
-            _detect_center_drift_skip. When a target is being occluded gradually,
-            the tracker bbox often shrinks before the score drops below threshold.
-            Skipping those shrinking frames prevents the EKF from being seeded with
-            a velocity that points into the occluder instead of tracking the target.
-        """
+            0 if no shrinkage detected
+    """
         history = list(self._conf_history)
         n = len(history)
         if n < 4:
@@ -2340,30 +2245,26 @@ class SiamRAMTracker:
         spike_factor: float = 2.5,
     ) -> int:
         """
-        Inputs:
-            max_lookback - maximum number of tail frames to scan backward
-            spike_factor - how many times the median speed a frame must exceed
-                           to be flagged as a drift spike
+        Computes per-frame centre speeds from _center_history, estimates a
+                    reference speed from the first two thirds of the history, then scans
+                    backward from the newest frame looking for speeds above
+                    spike_factor × reference. Counts a contiguous spike block (with a
+                    small gap budget of 2) and returns the count. Unlike shrinkage
+                    detection this does not apply a sanity cap — any spike block is
+                    returned as-is.
 
-        What it does:
-            Computes per-frame centre speeds from _center_history, estimates a
-            reference speed from the first two thirds of the history, then scans
-            backward from the newest frame looking for speeds above
-            spike_factor × reference. Counts a contiguous spike block (with a
-            small gap budget of 2) and returns the count. Unlike shrinkage
-            detection this does not apply a sanity cap — any spike block is
-            returned as-is.
-
-        Outputs:
+        Called at occlusion entry alongside _detect_shrinkage_onset. A centre
+                    drift spike usually means the tracker jumped to a distractor just
+                    before losing the target — those frames will have bad velocity that
+                    would corrupt the EKF rebuild if not skipped. Together, shrinkage and
+                    drift detection give the EKF the cleanest possible initial conditions.
+        Args:
+            max_lookback (any): maximum number of tail frames to scan backward
+            spike_factor (any): how many times the median speed a frame must exceed
+            to be flagged as a drift spike
+        Returns:
             int — number of tail history frames flagged as drift spikes; 0 if none
-
-        Why / where:
-            Called at occlusion entry alongside _detect_shrinkage_onset. A centre
-            drift spike usually means the tracker jumped to a distractor just
-            before losing the target — those frames will have bad velocity that
-            would corrupt the EKF rebuild if not skipped. Together, shrinkage and
-            drift detection give the EKF the cleanest possible initial conditions.
-        """
+    """
         hist = list(self._center_history)
         if len(hist) < 4:
             return 0
@@ -2400,34 +2301,30 @@ class SiamRAMTracker:
         margin_factor: float = 0.5,
     ) -> Tuple[bool, Optional[str]]:
         """
-        Inputs:
-            frame            - current video frame (used only for its shape)
-            lookahead_frames - how many frames forward velocity/trend is extrapolated
-            trend_frames     - how many history frames are used to fit the linear trend
-            margin_factor    - fraction of max(obj_w, obj_h) used as proximity margin
+        Runs three parallel tests to decide if the target is exiting the frame
+                    and in which direction:
+                    1. Proximity + velocity: is the bbox near an edge and moving toward it?
+                    2. Velocity extrapolation: does current_bbox + velocity × lookahead go off-frame?
+                    3. Trend extrapolation: does a linear fit to recent history × lookahead go off-frame?
+                    If two out of three tests agree on an edge, that edge is returned as
+                    the exit direction. Also accepts the case where the bbox is literally
+                    already off-screen on any side.
 
-        What it does:
-            Runs three parallel tests to decide if the target is exiting the frame
-            and in which direction:
-            1. Proximity + velocity: is the bbox near an edge and moving toward it?
-            2. Velocity extrapolation: does current_bbox + velocity × lookahead go off-frame?
-            3. Trend extrapolation: does a linear fit to recent history × lookahead go off-frame?
-            If two out of three tests agree on an edge, that edge is returned as
-            the exit direction. Also accepts the case where the bbox is literally
-            already off-screen on any side.
-
-        Outputs:
+        Called at occlusion entry from _normal_update. If exit is detected,
+                    loss_cause is overridden to 'out_of_frame', effective_skip is set to 0,
+                    and _out_of_frame + _exit_edge are set. The occlusion dispatcher then
+                    pins the search centre to that edge and switches to edge-strip ROIs.
+                    Without this, a target that walked off frame would be searched for in
+                    the centre of the image — almost certainly finding the wrong object.
+        Args:
+            frame (any): current video frame (used only for its shape)
+            lookahead_frames (any): how many frames forward velocity/trend is extrapolated
+            trend_frames (any): how many history frames are used to fit the linear trend
+            margin_factor (any): fraction of max(obj_w, obj_h) used as proximity margin
+        Returns:
             (bool, Optional[str]) — (is_exiting, edge)
             edge is one of 'right', 'left', 'bottom', 'top', or None
-
-        Why / where:
-            Called at occlusion entry from _normal_update. If exit is detected,
-            loss_cause is overridden to 'out_of_frame', effective_skip is set to 0,
-            and _out_of_frame + _exit_edge are set. The occlusion dispatcher then
-            pins the search centre to that edge and switches to edge-strip ROIs.
-            Without this, a target that walked off frame would be searched for in
-            the centre of the image — almost certainly finding the wrong object.
-        """
+    """
         h_fr, w_fr = frame.shape[:2]
 
         current_bbox = self.current_bbox
@@ -2509,32 +2406,28 @@ class SiamRAMTracker:
         clip_percentile=80.0,
     ) -> np.ndarray:
         """
-        Inputs:
-            skip            - number of tail entries to discard from both
-                              _center_history and _cam_vel_history before computing
-            window          - maximum number of frames to look back
-            decay           - per-frame weight decay; recent frames get higher weight
-            clip_percentile - per-frame speed percentile used as a magnitude cap
+        Computes a weighted average of per-frame centre displacements from
+                    _center_history, subtracts the correspondingly weighted camera velocity
+                    to get ego-motion-compensated target velocity, then caps the magnitude
+                    at the clip_percentile of all per-frame speeds to suppress outlier
+                    frames (e.g. a single frame where the tracker jumped). Returns the
+                    current self.velocity if fewer than 2 history points exist after
+                    trimming.
 
-        What it does:
-            Computes a weighted average of per-frame centre displacements from
-            _center_history, subtracts the correspondingly weighted camera velocity
-            to get ego-motion-compensated target velocity, then caps the magnitude
-            at the clip_percentile of all per-frame speeds to suppress outlier
-            frames (e.g. a single frame where the tracker jumped). Returns the
-            current self.velocity if fewer than 2 history points exist after
-            trimming.
-
-        Outputs:
-            np.ndarray (2,) — robust camera-compensated velocity in px/frame
-
-        Why / where:
-            Called inside _rebuild_ekf_from_clean_history to seed the EKF
-            velocity state at occlusion entry. A simple finite-difference velocity
-            would be corrupted by any tracker jump at the end of the sequence.
-            The decay weighting and magnitude clipping together produce a velocity
-            that reflects stable long-term motion rather than the last noisy frame.
-        """
+        Called inside _rebuild_ekf_from_clean_history to seed the EKF
+                    velocity state at occlusion entry. A simple finite-difference velocity
+                    would be corrupted by any tracker jump at the end of the sequence.
+                    The decay weighting and magnitude clipping together produce a velocity
+                    that reflects stable long-term motion rather than the last noisy frame.
+        Args:
+            skip (any): number of tail entries to discard from both
+            _center_history and _cam_vel_history before computing
+            window (any): maximum number of frames to look back
+            decay (any): per-frame weight decay; recent frames get higher weight
+            clip_percentile (any): per-frame speed percentile used as a magnitude cap
+        Returns:
+            np.ndarray (2,) — robust camera: compensated velocity in px/frame
+    """
         hist = list(self._center_history)
         if len(hist) < 2:
             return self.velocity.copy()
@@ -2582,27 +2475,21 @@ class SiamRAMTracker:
         frame: np.ndarray,
     ) -> None:
         """
-        Inputs:
-            frame - current video frame as a numpy BGR array
+        Runs YOLO on a padded crop around the current bbox, finds the
+                    detection with the highest IoU overlap with that bbox, and adds a
+                    vote for that detection's class ID into self._class_votes. Does
+                    nothing if no detection clears 0.3 IoU.
 
-        What it does:
-            Runs YOLO on a padded crop around the current bbox, finds the
-            detection with the highest IoU overlap with that bbox, and adds a
-            vote for that detection's class ID into self._class_votes. Does
-            nothing if no detection clears 0.3 IoU.
-
-        Outputs:
-            None. Updates self._class_votes in place.
-
-        Why / where:
-            Called every yolo_class_detect_frames frames during the first
-            yolo_class_detect_frames × 3 frames when yolo_filter_class=True.
-            It runs before _maybe_commit_target_class. The idea is to observe
-            which class YOLO consistently assigns to the target area during
-            healthy tracking, then lock the filter to that class before entering
-            any occlusion — so YOLO won't waste DRM budget on detections from
-            unrelated classes during recovery.
-        """
+        Called every yolo_class_detect_frames frames during the first
+                    yolo_class_detect_frames × 3 frames when yolo_filter_class=True.
+                    It runs before _maybe_commit_target_class. The idea is to observe
+                    which class YOLO consistently assigns to the target area during
+                    healthy tracking, then lock the filter to that class before entering
+                    any occlusion — so YOLO won't waste DRM budget on detections from
+                    unrelated classes during recovery.
+        Args:
+            frame (any): current video frame as a numpy BGR array
+    """
         if self.current_bbox is None:
             return
         x, y, w, h = self.current_bbox
@@ -2641,26 +2528,20 @@ class SiamRAMTracker:
         self,
     ) -> None:
         """
-        Inputs:
+        Checks whether any single class has received at least 60% of all votes
+                    in _class_votes. If yes, commits that class as _target_class_id and
+                    sets _class_warmup_done=True so the warm-up loop stops. If no class
+                    has 60% consensus, does nothing and leaves _target_class_id as None
+                    so YOLO detections remain unfiltered until consensus is reached.
+
+        Called from _normal_update after every _try_detect_target_class call,
+                    starting at frame yolo_class_detect_frames × 2. The 60% threshold
+                    prevents premature commitment on sequences where YOLO is inconsistent
+                    about the target's class in the first few frames, while still locking
+                    quickly enough to be useful before the first occlusion typically occurs.
+        Args:
             None. Reads self._class_votes internally.
-
-        What it does:
-            Checks whether any single class has received at least 60% of all votes
-            in _class_votes. If yes, commits that class as _target_class_id and
-            sets _class_warmup_done=True so the warm-up loop stops. If no class
-            has 60% consensus, does nothing and leaves _target_class_id as None
-            so YOLO detections remain unfiltered until consensus is reached.
-
-        Outputs:
-            None. Sets self._target_class_id and self._class_warmup_done in place.
-
-        Why / where:
-            Called from _normal_update after every _try_detect_target_class call,
-            starting at frame yolo_class_detect_frames × 2. The 60% threshold
-            prevents premature commitment on sequences where YOLO is inconsistent
-            about the target's class in the first few frames, while still locking
-            quickly enough to be useful before the first occlusion typically occurs.
-        """
+    """
         votes = self._class_votes
         if not votes:
             return
@@ -2712,6 +2593,16 @@ class SiamRAMTracker:
         weights_path,
         force_recompile=False,
     ):
+        """
+        Load a TensorRT compiled YOLO engine, compiling it if necessary.
+
+        Args:
+            weights_path (str): Path to the PyTorch YOLO weights (.pt).
+            force_recompile (bool, optional): Whether to force recompilation. Defaults to False.
+
+        Returns:
+            YOLO: The loaded YOLO model using the TensorRT engine.
+        """
         engine_path = weights_path.replace(".pt", ".engine")
 
         if not os.path.exists(engine_path) or force_recompile:
@@ -2758,6 +2649,12 @@ class SiamRAMTracker:
     def running_dynamic_image(
         self,
     ):
+        """
+        Get the image used for the dynamic template.
+
+        Returns:
+            np.ndarray: The running dynamic image from the underlying tracker.
+        """
         return self.tracker.running_dynamic_image
 
     @property

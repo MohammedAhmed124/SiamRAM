@@ -2595,7 +2595,7 @@ class SiamRAMTracker:
 
     @property
     def running_dynamic_image(self):
-        return self.tracker.running_dynamic_crop
+        return self.tracker.running_dynamic_image
 
     @property
     def tracking_config(self):

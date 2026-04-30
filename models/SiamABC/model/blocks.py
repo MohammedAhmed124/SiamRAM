@@ -17,7 +17,11 @@ from torchvision.models.resnet import resnet50
 from .adaptive_batch_norm import AdaptiveBatchNorm
 
 
-def _make_norm(num_features: int, inference_mode: bool, norm_lambda: float = 0.1) -> nn.Module:
+def _make_norm(
+    num_features: int,
+    inference_mode: bool,
+    norm_lambda: float = 0.1,
+) -> nn.Module:
     """Return AdaptiveBatchNorm when building for inference, plain BatchNorm2d otherwise."""
     if inference_mode:
         return AdaptiveBatchNorm(num_features, norm_lambda=norm_lambda)
@@ -34,7 +38,11 @@ class AdaptiveSequential(nn.Sequential):
     at graph-build time (``isinstance`` is resolved at compile time).
     """
 
-    def forward(self, x: torch.Tensor, lam: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        lam: torch.Tensor,
+    ) -> torch.Tensor:
         for module in self:
             if isinstance(module, AdaptiveBatchNorm):
                 x = module(x, lam)
@@ -43,7 +51,17 @@ class AdaptiveSequential(nn.Sequential):
         return x
 
 
-def conv_2d(inp, oup, kernel_size=3, stride=1, padding=0, groups=1, bias=False, norm=True, act=True):
+def conv_2d(
+    inp,
+    oup,
+    kernel_size=3,
+    stride=1,
+    padding=0,
+    groups=1,
+    bias=False,
+    norm=True,
+    act=True,
+):
     """
     Utility function to create a sequential 2D convolution block.
 
@@ -62,11 +80,14 @@ def conv_2d(inp, oup, kernel_size=3, stride=1, padding=0, groups=1, bias=False, 
         nn.Sequential: A sequential container of the constructed layers.
     """
     conv = nn.Sequential()
-    conv.add_module('conv', nn.Conv2d(inp, oup, kernel_size, stride, padding, bias=bias, groups=groups))
+    conv.add_module(
+        "conv",
+        nn.Conv2d(inp, oup, kernel_size, stride, padding, bias=bias, groups=groups),
+    )
     if norm:
-        conv.add_module('BatchNorm2d', nn.BatchNorm2d(oup))
+        conv.add_module("BatchNorm2d", nn.BatchNorm2d(oup))
     if act:
-        conv.add_module('Activation', nn.SiLU())
+        conv.add_module("Activation", nn.SiLU())
     return conv
 
 
@@ -79,7 +100,11 @@ class FastParallelPolarizedSelfAttention(nn.Module):
     resolution spatial context and long-range channel dependencies efficiently.
     """
 
-    def __init__(self, channel=256, squeeze=2):
+    def __init__(
+        self,
+        channel=256,
+        squeeze=2,
+    ):
         """
         Initialise the FastParallelPolarizedSelfAttention module.
 
@@ -103,7 +128,10 @@ class FastParallelPolarizedSelfAttention(nn.Module):
 
         self.agp = nn.AdaptiveAvgPool2d((1, 1))
 
-    def forward(self, x1):
+    def forward(
+        self,
+        x1,
+    ):
         """
         Apply polarized self-attention to the input feature map.
 
@@ -121,11 +149,16 @@ class FastParallelPolarizedSelfAttention(nn.Module):
         channel_wq = self.ch_wq(x1)
         channel_wq = channel_wq.reshape(b, -1, 1)
         channel_wq = self.softmax_channel(channel_wq)
-        channel_wz = torch.sum(wv * channel_wq.permute(0, 2, 1), dim=2).unsqueeze(-1).unsqueeze(-1)
-        channel_weight = self.ln(self.ch_wz(channel_wz).reshape(b, c, 1).permute(0, 2, 1)).permute(0, 2, 1).reshape(b,
-                                                                                                                    c,
-                                                                                                                    1,
-                                                                                                                    1)
+        channel_wz = (
+            torch.sum(wv * channel_wq.permute(0, 2, 1), dim=2)
+            .unsqueeze(-1)
+            .unsqueeze(-1)
+        )
+        channel_weight = (
+            self.ln(self.ch_wz(channel_wz).reshape(b, c, 1).permute(0, 2, 1))
+            .permute(0, 2, 1)
+            .reshape(b, c, 1, 1)
+        )
 
         spatial_wq = self.sp_wq(x1)
         spatial_wq = self.agp(spatial_wq)
@@ -148,7 +181,10 @@ class EncoderResNet(nn.Module):
     for object tracking.
     """
 
-    def __init__(self, pretrained: bool = True) -> None:
+    def __init__(
+        self,
+        pretrained: bool = True,
+    ) -> None:
         """
         Initialise the EncoderResNet.
 
@@ -161,11 +197,15 @@ class EncoderResNet(nn.Module):
         self.model = self._load_model()
         self.layers = self._get_layers()
 
-    def _load_model(self) -> Any:
+    def _load_model(
+        self,
+    ) -> Any:
         model = resnet50(pretrained=self.pretrained)
         return model
 
-    def _get_layers(self) -> List[Any]:
+    def _get_layers(
+        self,
+    ) -> List[Any]:
         layers = [
             self.model.conv1,
             self.model.bn1,
@@ -174,11 +214,13 @@ class EncoderResNet(nn.Module):
             self.model.layer1,
             self.model.layer2,
             self.model.layer3,
-
         ]
         return layers
 
-    def forward(self, x: Any) -> List[Any]:
+    def forward(
+        self,
+        x: Any,
+    ) -> List[Any]:
         """
         Extract features from the ResNet backbone.
 
@@ -203,7 +245,10 @@ class Encoder(nn.Module):
     uses an FBNet architecture to extract hierarchical features.
     """
 
-    def __init__(self, pretrained: bool = True) -> None:
+    def __init__(
+        self,
+        pretrained: bool = True,
+    ) -> None:
         """
         Initialise the Encoder.
 
@@ -222,12 +267,16 @@ class Encoder(nn.Module):
             "layer4": 16,
         }
 
-    def _load_model(self) -> Any:
+    def _load_model(
+        self,
+    ) -> Any:
         model_name = "fbnet_c"
         model = fbnet(model_name, pretrained=self.pretrained)
         return model
 
-    def _get_stages(self) -> List[Any]:
+    def _get_stages(
+        self,
+    ) -> List[Any]:
         stages = [
             self.model.backbone.stages[:2],
             self.model.backbone.stages[2:5],
@@ -237,7 +286,10 @@ class Encoder(nn.Module):
         ]
         return stages
 
-    def forward(self, x: Any) -> List[Any]:
+    def forward(
+        self,
+        x: Any,
+    ) -> List[Any]:
         """
         Extract features from the FBNet backbone.
 
@@ -298,7 +350,10 @@ class ConvBlock(nn.Module):
         )
         self.pointwise = nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=bias)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+    ) -> torch.Tensor:
         """
         Pass the input through the depthwise and pointwise layers.
 
@@ -322,7 +377,12 @@ class AdjustLayer(nn.Module):
     regression heads.
     """
 
-    def __init__(self, in_channels: int, out_channels: int, crop_rate: int = 4):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        crop_rate: int = 4,
+    ):
         """
         Initialise the AdjustLayer.
 
@@ -339,7 +399,10 @@ class AdjustLayer(nn.Module):
         self.size_threshold = 20
         self.crop_rate = crop_rate
 
-    def forward(self, x):
+    def forward(
+        self,
+        x,
+    ):
         """
         Pass features through the adjustment projection.
 
@@ -383,21 +446,35 @@ class BoxTower(nn.Module):
         tower = []
         cls_tower = []
 
-        self.cls_encode = EncodeBackbone(in_channels=inchannels, out_channels=outchannels, conv_block=conv_block)
-        self.reg_encode = EncodeBackbone(in_channels=inchannels, out_channels=outchannels, conv_block=conv_block)
+        self.cls_encode = EncodeBackbone(
+            in_channels=inchannels, out_channels=outchannels, conv_block=conv_block
+        )
+        self.reg_encode = EncodeBackbone(
+            in_channels=inchannels, out_channels=outchannels, conv_block=conv_block
+        )
 
-        self.cls_dw = CorrelationConcatAtt(num_channels=outchannels,
-                                           inference_mode=inference_mode, norm_lambda=norm_lambda)
-        self.reg_dw = CorrelationConcatAtt(num_channels=outchannels,
-                                           inference_mode=inference_mode, norm_lambda=norm_lambda)
+        self.cls_dw = CorrelationConcatAtt(
+            num_channels=outchannels,
+            inference_mode=inference_mode,
+            norm_lambda=norm_lambda,
+        )
+        self.reg_dw = CorrelationConcatAtt(
+            num_channels=outchannels,
+            inference_mode=inference_mode,
+            norm_lambda=norm_lambda,
+        )
 
         for i in range(4):
-            tower.append(ConvBlock(outchannels, outchannels, kernel_size=3, stride=1, padding=1))
+            tower.append(
+                ConvBlock(outchannels, outchannels, kernel_size=3, stride=1, padding=1)
+            )
             tower.append(_make_norm(outchannels, inference_mode, norm_lambda))
             tower.append(nn.ReLU())
 
         for i in range(towernum):
-            cls_tower.append(ConvBlock(outchannels, outchannels, kernel_size=3, stride=1, padding=1))
+            cls_tower.append(
+                ConvBlock(outchannels, outchannels, kernel_size=3, stride=1, padding=1)
+            )
             cls_tower.append(_make_norm(outchannels, inference_mode, norm_lambda))
             cls_tower.append(nn.ReLU())
 
@@ -410,7 +487,13 @@ class BoxTower(nn.Module):
         self.adjust = nn.Parameter(0.1 * torch.ones(1))
         self.bias = nn.Parameter(torch.Tensor(1.0 * torch.ones(1, 4, 1, 1)))
 
-    def forward(self, search_org, search, kernel, lam: torch.Tensor):
+    def forward(
+        self,
+        search_org,
+        search,
+        kernel,
+        lam: torch.Tensor,
+    ):
 
         cls_z = kernel.reshape(kernel.size(0), kernel.size(1), -1)
         cls_x = self.cls_encode(search)
@@ -436,7 +519,12 @@ class EncodeBackbone(nn.Module):
     Encode backbone feature
     """
 
-    def __init__(self, in_channels, out_channels, conv_block: str = "regular"):
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        conv_block: str = "regular",
+    ):
         """
         Initialise the EncodeBackbone module.
 
@@ -452,7 +540,10 @@ class EncodeBackbone(nn.Module):
             nn.ReLU(inplace=True),
         )
 
-    def forward(self, x):
+    def forward(
+        self,
+        x,
+    ):
         """
         Encode the backbone features.
 
@@ -470,7 +561,11 @@ class CorrelationConcat(nn.Module):
     Correlation module
     """
 
-    def __init__(self, num_channels: int, num_corr_channels: int = 64):
+    def __init__(
+        self,
+        num_channels: int,
+        num_corr_channels: int = 64,
+    ):
         """
         Initialise the CorrelationConcat module.
 
@@ -487,7 +582,12 @@ class CorrelationConcat(nn.Module):
             nn.ReLU(inplace=True),
         )
 
-    def forward(self, z, x, d):
+    def forward(
+        self,
+        z,
+        x,
+        d,
+    ):
         """
         Perform correlation via matrix multiplication and concatenation.
 
@@ -511,8 +611,13 @@ class CorrelationConcatAtt(nn.Module):
     Correlation module
     """
 
-    def __init__(self, num_channels: int, num_corr_channels: int = 64,
-                 inference_mode: bool = False, norm_lambda: float = 0.1):
+    def __init__(
+        self,
+        num_channels: int,
+        num_corr_channels: int = 64,
+        inference_mode: bool = False,
+        norm_lambda: float = 0.1,
+    ):
         super().__init__()
 
         in_size = num_channels + num_corr_channels
@@ -524,7 +629,13 @@ class CorrelationConcatAtt(nn.Module):
 
         self.att = FastParallelPolarizedSelfAttention(num_channels, 1)
 
-    def forward(self, z, x, d, lam: torch.Tensor):
+    def forward(
+        self,
+        z,
+        x,
+        d,
+        lam: torch.Tensor,
+    ):
         b, c, w, h = x.size()
         s = torch.matmul(z.permute(0, 2, 1), x.view(b, c, -1)).view(b, -1, w, h)
         s = torch.cat([s, d], dim=1)

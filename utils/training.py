@@ -36,12 +36,16 @@ class OptimizerParamGroup(TypedDict):
     """
     Dictionary representing a parameter group for a PyTorch optimizer.
     """
+
     params: list[nn.Parameter]
     lr: float
     name: str
 
 
-def freeze_backbone_only(model, verbose: bool = True) -> None:
+def freeze_backbone_only(
+    model,
+    verbose: bool = True,
+) -> None:
     """
     Freeze the encoder (backbone) and leave everything after it trainable:
         neck, polarized_self_attention, attention_neck,
@@ -79,22 +83,23 @@ def freeze_backbone_only(model, verbose: bool = True) -> None:
             print(f"  {name:<40} {params:>10,} params")
 
 
-def get_trainable_optimizer(model, lr: float = 1e-4,
-                            weight_decay: float = 1e-4):
+def get_trainable_optimizer(
+    model,
+    lr: float = 1e-4,
+    weight_decay: float = 1e-4,
+):
     """
     Build an optimizer that only touches the unfrozen parameters.
     Optionally use different LRs per group (neck vs heads).
     """
     param_groups: list[OptimizerParamGroup] = [
-
         {
-            "params": list(model.neck.parameters()) +
-                      list(model.polarized_self_attention.parameters()) +
-                      list(model.attention_neck.parameters()),
+            "params": list(model.neck.parameters())
+                      + list(model.polarized_self_attention.parameters())
+                      + list(model.attention_neck.parameters()),
             "lr": lr * 0.5,
             "name": "neck_attention",
         },
-
         {
             "params": list(model.connect_model.parameters()),
             "lr": lr,
@@ -103,12 +108,14 @@ def get_trainable_optimizer(model, lr: float = 1e-4,
     ]
 
     if model.build_simsiam_heads:
-        param_groups.append({
-            "params": list(model.classifier.parameters()) +
-                      list(model.predictor.parameters()),
-            "lr": lr,
-            "name": "simsiam_heads",
-        })
+        param_groups.append(
+            {
+                "params": list(model.classifier.parameters())
+                          + list(model.predictor.parameters()),
+                "lr": lr,
+                "name": "simsiam_heads",
+            }
+        )
 
     for group in param_groups:
         group["params"] = [p for p in group["params"] if p.requires_grad]
@@ -117,7 +124,9 @@ def get_trainable_optimizer(model, lr: float = 1e-4,
     return optimizer
 
 
-def set_reg_bn_train(model):
+def set_reg_bn_train(
+    model,
+):
     """
     Set BatchNorm layers in the regression branch to training mode.
     """
@@ -132,7 +141,9 @@ def set_reg_bn_train(model):
                 m.train()
 
 
-def set_bn_eval(model):
+def set_bn_eval(
+    model,
+):
     """
     Set all BatchNorm layers in the model to evaluation mode.
     """
@@ -141,7 +152,9 @@ def set_bn_eval(model):
             m.eval()
 
 
-def set_cls_bn_train(model):
+def set_cls_bn_train(
+    model,
+):
     """
     Set BatchNorm layers in the classification branch to training mode.
     """
@@ -197,7 +210,7 @@ def _train_one_epoch(
 
         nn.utils.clip_grad_norm_(
             [p for p in model.connect_model.parameters() if p.requires_grad],
-            max_norm=5.0
+            max_norm=5.0,
         )
         optimizer.step()
 

@@ -11,12 +11,18 @@ from ...model.SiamABC import SiamABCNet
 class _FeatureExtractorModule(nn.Module):
     """encoder + neck  (deep-copied, dtype-isolated)."""
 
-    def __init__(self, net: nn.Module) -> None:
+    def __init__(
+        self,
+        net: nn.Module,
+    ) -> None:
         super().__init__()
         self.encoder = copy.deepcopy(net.encoder)
         self.neck = copy.deepcopy(net.neck)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+    ) -> torch.Tensor:
         return self.neck(self.encoder(x))
 
 
@@ -36,17 +42,26 @@ class _AttentionNeck(nn.Module):
     original model, which TRT tracing could silently mutate).
     """
 
-    def __init__(self, model: SiamABCNet) -> None:
+    def __init__(
+        self,
+        model: SiamABCNet,
+    ) -> None:
         super().__init__()
 
         self.attn = copy.deepcopy(model.polarized_self_attention)
         self.neck = copy.deepcopy(model.attention_neck)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+    ) -> torch.Tensor:
         return self.neck(self.attn(x))
 
 
-def _cast_module(module: nn.Module, dtype: torch.dtype) -> nn.Module:
+def _cast_module(
+    module: nn.Module,
+    dtype: torch.dtype,
+) -> nn.Module:
     """Cast all params/buffers of *module* to *dtype* in-place and return it."""
     return module.half() if dtype == torch.float16 else module.float()
 

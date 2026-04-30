@@ -13,21 +13,38 @@ from ..model.adaptive_batch_norm import AdaptiveBatchNorm
 
 
 class SiamABCTracker(Tracker):
-    def __init__(self, model, cuda_id=0, **tracking_config):
+    def __init__(
+        self,
+        model,
+        cuda_id=0,
+        **tracking_config,
+    ):
         super().__init__(model, cuda_id, **tracking_config)
 
         self._norm_lambda_tta: float = next(
-            (m._norm_lambda for m in self.net.modules() if isinstance(m, AdaptiveBatchNorm)),
+            (
+                m._norm_lambda
+                for m in self.net.modules()
+                if isinstance(m, AdaptiveBatchNorm)
+            ),
             0.1,
         )
 
         self._tta_lam: torch.Tensor = torch.zeros(1, device=f"cuda:{cuda_id}")
 
-    def get_box_coder(self, tracking_config, cuda_id: str | int = 0):
+    def get_box_coder(
+        self,
+        tracking_config,
+        cuda_id: str | int = 0,
+    ):
         return SiamABCBoxCoder(tracking_config)
 
-    def initialize(self, image: NDArray, rect: NDArray, **kwargs) -> None:
-
+    def initialize(
+        self,
+        image: NDArray,
+        rect: NDArray,
+        **kwargs,
+    ) -> None:
         """
         args:
             img(np.ndarray): RGB image
@@ -35,7 +52,7 @@ class SiamABCTracker(Tracker):
                         x, y need to be 0-based
         """
 
-        self.smooth_pred = self.tracking_config['smooth']
+        self.smooth_pred = self.tracking_config["smooth"]
         self._prev_bbox = rect.copy()
         self.N = self.tracking_config["N"]
         self.dynamic_update = self.tracking_config["dynamic_update"]
@@ -67,7 +84,7 @@ class SiamABCTracker(Tracker):
 
         self.idx = 0
         self.lost_idx = 0
-        self.slection_method = 'mean'
+        self.slection_method = "mean"
 
         self.update_lambda = 0.1
         self.running_confidence = 0.5
@@ -77,10 +94,17 @@ class SiamABCTracker(Tracker):
         self._is_full = False
 
     @torch.no_grad()
-    def get_template_features(self, image, rect):
-        context = extend_bbox(rect,
-                              offset=self.tracking_config["template_bbox_offset"],
-                              image_width=image.shape[1], image_height=image.shape[0])
+    def get_template_features(
+        self,
+        image,
+        rect,
+    ):
+        context = extend_bbox(
+            rect,
+            offset=self.tracking_config["template_bbox_offset"],
+            image_width=image.shape[1],
+            image_height=image.shape[0],
+        )
         template_crop, template_bbox, _ = get_extended_crop(
             image=image,
             bbox=rect,
@@ -93,13 +117,17 @@ class SiamABCTracker(Tracker):
         return self.net.get_features(img)
 
     @torch.no_grad()
-    def get_search_features(self, image, bbox):
+    def get_search_features(
+        self,
+        image,
+        bbox,
+    ):
 
         context = extend_bbox(
             bbox,
             offset=self.tracking_config["search_context"],
             image_width=image.shape[1],
-            image_height=image.shape[0]
+            image_height=image.shape[0],
         )
 
         search_crop, search_bbox, search_context = get_extended_crop(
@@ -107,16 +135,28 @@ class SiamABCTracker(Tracker):
             bbox=bbox,
             crop_size=self.tracking_config["instance_size"],
             padding_value=self.tracking_state.mean_color,
-            context=context
+            context=context,
         )
         search_crop = self._preprocess_image(search_crop, self._search_transform)
         return self.net.get_features(search_crop), search_bbox, search_context
 
-    def check_validity(self, bbox_window, bbox):
-        return bbox[0] >= bbox_window[0] and bbox[1] >= bbox_window[1] and bbox[2] <= bbox_window[2] and bbox[3] <= \
-            bbox_window[3]
+    def check_validity(
+        self,
+        bbox_window,
+        bbox,
+    ):
+        return (
+            bbox[0] >= bbox_window[0]
+            and bbox[1] >= bbox_window[1]
+            and bbox[2] <= bbox_window[2]
+            and bbox[3] <= bbox_window[3]
+        )
 
-    def _update_best_index(self, pred_score: float, evicting: bool) -> None:
+    def _update_best_index(
+        self,
+        pred_score: float,
+        evicting: bool,
+    ) -> None:
         """
         O(1) amortized best-index maintenance.
         Only O(window_size) on the rare event the best element is evicted.
@@ -141,28 +181,41 @@ class SiamABCTracker(Tracker):
                 self._best_score = pred_score
                 self._best_idx = len(self.classification_scores) - 1
 
-    def _maybe_store_frame(self, search: np.ndarray, pred_bbox: np.ndarray, pred_score: float) -> None:
+    def _maybe_store_frame(
+        self,
+        search: np.ndarray,
+        pred_bbox: np.ndarray,
+        pred_score: float,
+    ) -> None:
         """Append to memory and keep best-index consistent. Single responsibility."""
         evicting = len(self.classification_scores) == self.memory_window_size
         self.all_memory_imgs.append([search, pred_bbox])
         self.classification_scores.append(pred_score)
         self._update_best_index(pred_score, evicting)
 
-    def select_representatives(self) -> None:
+    def select_representatives(
+        self,
+    ) -> None:
         if not self.classification_scores:
             return
         if self._best_score < self.dynamic_update_threshold:
             return
         best_img, best_bbox = self.all_memory_imgs[self._best_idx]
         self.dynamic_template_features = self.get_template_features(best_img, best_bbox)
-        self.dynamic_search_features, _, _ = self.get_search_features(best_img, best_bbox)
+        self.dynamic_search_features, _, _ = self.get_search_features(
+            best_img, best_bbox
+        )
         self.running_dynamic_image = best_img.copy()
         self.running_dynamic_bbox = best_bbox.copy()
 
         if hasattr(self.net, "invalidate_template_cache"):
             self.net.invalidate_template_cache()
 
-    def update(self, search: NDArray, *kw):
+    def update(
+        self,
+        search: NDArray,
+        *kw,
+    ):
         pred_bbox, pred_score, sim_score = self.run_track(search)
 
         self.tracking_state.bbox = pred_bbox
@@ -170,14 +223,13 @@ class SiamABCTracker(Tracker):
         self.tracking_state.paths.append(pred_bbox)
         if self.dynamic_update:
             score_ok = (
-                pred_score > self.running_confidence or
-                pred_score >= self.dynamic_update_threshold
+                pred_score > self.running_confidence
+                or pred_score >= self.dynamic_update_threshold
             )
             if score_ok:
-                iou_ok = (
-                    self._compute_iou(pred_bbox, self._prev_bbox)
-                    >= self.tracking_config.get("iou_threshold", 0.3)
-                )
+                iou_ok = self._compute_iou(
+                    pred_bbox, self._prev_bbox
+                ) >= self.tracking_config.get("iou_threshold", 0.3)
                 if iou_ok:
                     self._maybe_store_frame(search, pred_bbox, pred_score)
 
@@ -185,7 +237,9 @@ class SiamABCTracker(Tracker):
 
             if self.warmup_frames > 0 and self.idx == self.warmup_frames - 1:
                 full_imgs = deque(self.all_memory_imgs, maxlen=self.memory_window_size)
-                full_scores = deque(self.classification_scores, maxlen=self.memory_window_size)
+                full_scores = deque(
+                    self.classification_scores, maxlen=self.memory_window_size
+                )
                 self.all_memory_imgs = full_imgs
                 self.classification_scores = full_scores
                 scores = np.array(self.classification_scores, dtype=np.float16)
@@ -201,22 +255,37 @@ class SiamABCTracker(Tracker):
                 self.update_lambda * pred_score
                 + (1 - self.update_lambda) * self.running_confidence
             )
-            self.running_confidence = min(self.running_confidence, self.running_confidence_floor_value)
+            self.running_confidence = min(
+                self.running_confidence, self.running_confidence_floor_value
+            )
 
         return pred_bbox, pred_score, sim_score
 
-    def run_track(self, search):
-        search_features, search_bbox, search_context = self.get_search_features(search, self.tracking_state.bbox)
+    def run_track(
+        self,
+        search,
+    ):
+        search_features, search_bbox, search_context = self.get_search_features(
+            search, self.tracking_state.bbox
+        )
         self.tracking_state.mapping = search_context
         self.tracking_state.prev_size = search_bbox[2:]
-        pred_bbox, pred_score, sim_score, _ = self.track(search_features, self.dynamic_search_features,
-                                                         self.dynamic_template_features)
+        pred_bbox, pred_score, sim_score, _ = self.track(
+            search_features,
+            self.dynamic_search_features,
+            self.dynamic_template_features,
+        )
         pred_bbox = self._rescale_bbox(pred_bbox, self.tracking_state.mapping)
         pred_bbox = clamp_bbox(pred_bbox, search.shape)
         return pred_bbox, pred_score, sim_score
 
     @torch.no_grad()
-    def track(self, search_features, dynamic_search_features, dynamic_template_features):
+    def track(
+        self,
+        search_features,
+        dynamic_search_features,
+        dynamic_template_features,
+    ):
         track_result = self.net.track(
             search_features=search_features,
             dynamic_search_features=dynamic_search_features,
@@ -229,13 +298,14 @@ class SiamABCTracker(Tracker):
 
     def _postprocess(
         self,
-        track_result: Dict[str, torch.Tensor]
+        track_result: Dict[str, torch.Tensor],
     ) -> Tuple[NDArray, float, Union[int, float, bool], torch.Tensor]:
         cls_score = track_result[constants.TARGET_CLASSIFICATION_KEY].float().sigmoid()
-        regression_map = track_result[constants.TARGET_REGRESSION_LABEL_KEY].detach().float()
+        regression_map = (
+            track_result[constants.TARGET_REGRESSION_LABEL_KEY].detach().float()
+        )
         classification_map, penalty, pred_location = self._confidence_postprocess(
-            cls_score=cls_score,
-            regression_map=regression_map
+            cls_score=cls_score, regression_map=regression_map
         )
 
         decoded_info: TrackerDecodeResult = self.box_coder.decode(
@@ -246,13 +316,24 @@ class SiamABCTracker(Tracker):
         )
 
         cls_score = cls_score.squeeze().cpu().numpy()
-        pred_bbox = self._postprocess_bbox(decoded_info=decoded_info, cls_score=cls_score, penalty=penalty)
+        pred_bbox = self._postprocess_bbox(
+            decoded_info=decoded_info, cls_score=cls_score, penalty=penalty
+        )
         r_max, c_max = decoded_info.pred_coords[0]
         sim_score_raw = track_result[constants.TRACKER_TARGET_SEARCH_SIM_SCORE]
         sim_score = sim_score_raw.item() if sim_score_raw is not None else 0.0
-        return pred_bbox, cls_score[r_max, c_max].item(), sim_score, track_result[constants.TRACKER_ATTENTION_MAP]
+        return (
+            pred_bbox,
+            cls_score[r_max, c_max].item(),
+            sim_score,
+            track_result[constants.TRACKER_ATTENTION_MAP],
+        )
 
-    def run_track_for_candidate(self, search: np.ndarray, candidate_bbox: np.ndarray):
+    def run_track_for_candidate(
+        self,
+        search: np.ndarray,
+        candidate_bbox: np.ndarray,
+    ):
         cand_x, cand_y, cand_w, cand_h = [float(v) for v in candidate_bbox]
 
         h_fr, w_fr = search.shape[:2]
@@ -279,19 +360,29 @@ class SiamABCTracker(Tracker):
         finally:
             self.tracking_state.bbox = saved_bbox
 
-    def set_tta(self, enabled: bool) -> None:
+    def set_tta(
+        self,
+        enabled: bool,
+    ) -> None:
         """Enable or disable TTA by updating the lam tensor passed to the net."""
         val = self._norm_lambda_tta if enabled else 0.0
         self._tta_lam.fill_(val)
 
-    def enable_tta(self) -> None:
+    def enable_tta(
+        self,
+    ) -> None:
         self.set_tta(True)
 
-    def disable_tta(self) -> None:
+    def disable_tta(
+        self,
+    ) -> None:
         self.set_tta(False)
 
     @staticmethod
-    def _compute_iou(boxA, boxB) -> float:
+    def _compute_iou(
+        boxA,
+        boxB,
+    ) -> float:
         ix1 = max(boxA[0], boxB[0])
         iy1 = max(boxA[1], boxB[1])
         ix2 = min(boxA[0] + boxA[2], boxB[0] + boxB[2])

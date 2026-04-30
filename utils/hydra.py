@@ -4,6 +4,7 @@ Hydra configuration management utilities.
 This module provides helpers for loading Hydra and YAML configurations,
 and preparing experiments by saving the resolved configuration.
 """
+
 import os
 from typing import Any, Dict, List, Optional
 
@@ -18,7 +19,9 @@ from .logger import create_logger
 logger = create_logger(__name__)
 
 
-def load_hydra_config(hydra_config: DictConfig) -> Dict[str, Any]:
+def load_hydra_config(
+    hydra_config: DictConfig,
+) -> Dict[str, Any]:
     """
     Load hydra config and returns ready-to-use dict.
 
@@ -32,11 +35,16 @@ def load_hydra_config(hydra_config: DictConfig) -> Dict[str, Any]:
 
     """
     os.chdir(get_original_cwd())
-    return yaml.load(OmegaConf.to_yaml(hydra_config, resolve=True), Loader=yaml.FullLoader)
+    return yaml.load(
+        OmegaConf.to_yaml(hydra_config, resolve=True), Loader=yaml.FullLoader
+    )
 
 
-def load_hydra_config_from_path(config_path: str, config_name: str, overrides: Optional[List[str]] = None) \
-    -> Dict[str, Any]:
+def load_hydra_config_from_path(
+    config_path: str,
+    config_name: str,
+    overrides: Optional[List[str]] = None,
+) -> Dict[str, Any]:
     """
     Load a Hydra configuration from a specific file path.
 
@@ -52,10 +60,14 @@ def load_hydra_config_from_path(config_path: str, config_name: str, overrides: O
         overrides = list()
     rel_module_path = os.path.relpath(os.getcwd(), os.path.dirname(__file__))
     with initialize(config_path=os.path.join(rel_module_path, config_path)):
-        return OmegaConf.to_container(compose(config_name=config_name, overrides=overrides), resolve=True)
+        return OmegaConf.to_container(
+            compose(config_name=config_name, overrides=overrides), resolve=True
+        )
 
 
-def load_yaml(yaml_path: str) -> Dict[str, Any]:
+def load_yaml(
+    yaml_path: str,
+) -> Dict[str, Any]:
     """
     Load a YAML file.
 
@@ -69,7 +81,9 @@ def load_yaml(yaml_path: str) -> Dict[str, Any]:
         return yaml.safe_load(f)
 
 
-def prepare_experiment(hydra_config: DictConfig) -> Dict[str, Any]:
+def prepare_experiment(
+    hydra_config: DictConfig,
+) -> Dict[str, Any]:
     """
     Prepare the experiment directory and save the configuration.
 

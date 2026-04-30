@@ -5,6 +5,7 @@ This module provides the main entry point for running the tracker on video
 files, rendering annotated outputs with side-by-side template and search
 crops, and generating detailed latency reports.
 """
+
 import gc
 import os
 from typing import List
@@ -26,7 +27,9 @@ C_UPDATE = (0, 200, 80)
 C_FRAME = (180, 180, 180)
 
 
-def _confidence_color(score: float):
+def _confidence_color(
+    score: float,
+):
     """
     Inputs:
         score - float tracker confidence, expected in [0.0, 1.0]
@@ -48,7 +51,11 @@ def _confidence_color(score: float):
     return (0, int(255 * s), int(255 * (1.0 - s)))
 
 
-def _stamp_panel(panel: np.ndarray, label: str, updated: bool) -> None:
+def _stamp_panel(
+    panel: np.ndarray,
+    label: str,
+    updated: bool,
+) -> None:
     """
     Inputs:
         panel   - np.ndarray (H x W x 3) the side panel image to stamp in place
@@ -74,7 +81,10 @@ def _stamp_panel(panel: np.ndarray, label: str, updated: bool) -> None:
     cv2.putText(panel, label, (5, 15), FONT, 0.38, (255, 255, 255), 1, cv2.LINE_AA)
 
 
-def _resize_into(src: np.ndarray, dst: np.ndarray) -> None:
+def _resize_into(
+    src: np.ndarray,
+    dst: np.ndarray,
+) -> None:
     """
     Inputs:
         src - np.ndarray source image, any size
@@ -96,7 +106,11 @@ def _resize_into(src: np.ndarray, dst: np.ndarray) -> None:
     np.copyto(dst, cv2.resize(src, (dst.shape[1], dst.shape[0])))
 
 
-def _draw_legend(canvas: np.ndarray, x: int, y: int) -> None:
+def _draw_legend(
+    canvas: np.ndarray,
+    x: int,
+    y: int,
+) -> None:
     """
     Inputs:
         canvas - np.ndarray (H x W x 3) the full composite frame to draw onto
@@ -127,11 +141,19 @@ def _draw_legend(canvas: np.ndarray, x: int, y: int) -> None:
     for i, (color, text) in enumerate(entries):
         iy = y + i * 16
         cv2.rectangle(canvas, (x, iy - 9), (x + 12, iy + 3), color, -1)
-        cv2.putText(canvas, text, (x + 16, iy), FONT, 0.35, (210, 210, 210), 1, cv2.LINE_AA)
+        cv2.putText(
+            canvas, text, (x + 16, iy), FONT, 0.35, (210, 210, 210), 1, cv2.LINE_AA
+        )
 
 
-def _refresh_panels(tracker, dyn_image, panel_template, panel_search,
-                    frame_idx, updated):
+def _refresh_panels(
+    tracker,
+    dyn_image,
+    panel_template,
+    panel_search,
+    frame_idx,
+    updated,
+):
     """
     Inputs:
         tracker        - inner SiamABC tracker instance (not the EdgeDAMTracker wrapper)
@@ -162,19 +184,29 @@ def _refresh_panels(tracker, dyn_image, panel_template, panel_search,
     ih, iw = dyn_image.shape[:2]
     pad_val = np.mean(dyn_image, axis=(0, 1))
 
-    t_ctx = extend_bbox(dyn_bbox, image_width=iw, image_height=ih,
-                        offset=cfg["template_bbox_offset"])
-    t_crop, _, _ = get_extended_crop(image=dyn_image, bbox=dyn_bbox, context=t_ctx,
-                                     crop_size=cfg["template_size"],
-                                     padding_value=pad_val)
+    t_ctx = extend_bbox(
+        dyn_bbox, image_width=iw, image_height=ih, offset=cfg["template_bbox_offset"]
+    )
+    t_crop, _, _ = get_extended_crop(
+        image=dyn_image,
+        bbox=dyn_bbox,
+        context=t_ctx,
+        crop_size=cfg["template_size"],
+        padding_value=pad_val,
+    )
     _resize_into(t_crop, panel_template)
     _stamp_panel(panel_template, f"TEMPLATE  F:{frame_idx}", updated=updated)
 
-    s_ctx = extend_bbox(dyn_bbox, image_width=iw, image_height=ih,
-                        offset=cfg["search_context"])
-    s_crop, _, _ = get_extended_crop(image=dyn_image, bbox=dyn_bbox, context=s_ctx,
-                                     crop_size=cfg["instance_size"],
-                                     padding_value=pad_val)
+    s_ctx = extend_bbox(
+        dyn_bbox, image_width=iw, image_height=ih, offset=cfg["search_context"]
+    )
+    s_crop, _, _ = get_extended_crop(
+        image=dyn_image,
+        bbox=dyn_bbox,
+        context=s_ctx,
+        crop_size=cfg["instance_size"],
+        padding_value=pad_val,
+    )
     _resize_into(s_crop, panel_search)
     _stamp_panel(panel_search, "SEARCH CTX", updated=updated)
 
@@ -186,7 +218,7 @@ def run_inference(
     output_path: str = "outputs/tracked_video.mp4",
     output_video: bool = True,
 ):
-    is_dam = hasattr(tracker, 'tracker')
+    is_dam = hasattr(tracker, "tracker")
     inner_tracker = tracker.tracker if is_dam else tracker
 
     initial_bbox = np.array(initial_bbox).astype(int)
@@ -264,19 +296,24 @@ def run_inference(
 
         np.savetxt(bbox_file, tracked_bboxes, fmt="%d", delimiter=" ")
 
-        def _stats_fast(name, arr):
+        def _stats_fast(
+            name,
+            arr,
+        ):
             if not arr:
                 print(f"{name:20s}  no data")
                 return
             a = np.array(arr)
-            print(f"{name:20s}  n={len(a):4d}  "
-                  f"mean={a.mean():.1f}ms  "
-                  f"med={np.median(a):.1f}ms  "
-                  f"p95={np.percentile(a, 95):.1f}ms  "
-                  f"p99={np.percentile(a, 99):.1f}ms  "
-                  f"min={a.min():.1f}ms  "
-                  f"max={a.max():.1f}ms  "
-                  f"fps={1000 / a.mean():.1f}")
+            print(
+                f"{name:20s}  n={len(a):4d}  "
+                f"mean={a.mean():.1f}ms  "
+                f"med={np.median(a):.1f}ms  "
+                f"p95={np.percentile(a, 95):.1f}ms  "
+                f"p99={np.percentile(a, 99):.1f}ms  "
+                f"min={a.min():.1f}ms  "
+                f"max={a.max():.1f}ms  "
+                f"fps={1000 / a.mean():.1f}"
+            )
 
         print("\n─── Latency Report (fast inference) ──────────────────────")
         _stats_fast("ALL FRAMES", frame_times)
@@ -300,14 +337,18 @@ def run_inference(
         canvas = np.zeros((canvas_h, total_w, 3), dtype=np.uint8)
         panel_template = np.zeros((PANEL_W, PANEL_W, 3), dtype=np.uint8)
         panel_search = np.zeros((PANEL_W, PANEL_W, 3), dtype=np.uint8)
-        row_tmpl = np.s_[0: PANEL_W, w: total_w]
-        row_search = np.s_[PANEL_W + GAP: PANEL_W * 2 + GAP, w: total_w]
+        row_tmpl = np.s_[0:PANEL_W, w:total_w]
+        row_search = np.s_[PANEL_W + GAP: PANEL_W * 2 + GAP, w:total_w]
 
         avi_path = os.path.splitext(output_path)[0] + "_tmp.avi"
-        writer = cv2.VideoWriter(avi_path, cv2.VideoWriter_fourcc(*"XVID"),
-                                 fps, (total_w, canvas_h))
+        writer = cv2.VideoWriter(
+            avi_path, cv2.VideoWriter_fourcc(*"XVID"), fps, (total_w, canvas_h)
+        )
 
-        def _draw_status_pill(canvas: np.ndarray, in_occlusion: bool) -> None:
+        def _draw_status_pill(
+            canvas: np.ndarray,
+            in_occlusion: bool,
+        ) -> None:
             """
             Inputs:
                 canvas       - np.ndarray (H x W x 3) the full composite canvas
@@ -340,13 +381,26 @@ def run_inference(
             cv2.circle(canvas, (px + r, py + r), r, color, -1)
             cv2.circle(canvas, (px + pw - r, py + r), r, color, -1)
             (tw, th), _ = cv2.getTextSize(label, FONT, 0.50, 1)
-            cv2.putText(canvas, label,
-                        (px + (pw - tw) // 2, py + (ph + th) // 2 - 1),
-                        FONT, 0.50, C_STATUS_TEXT, 1, cv2.LINE_AA)
+            cv2.putText(
+                canvas,
+                label,
+                (px + (pw - tw) // 2, py + (ph + th) // 2 - 1),
+                FONT,
+                0.50,
+                C_STATUS_TEXT,
+                1,
+                cv2.LINE_AA,
+            )
 
         tracker.initialize(first_bgr, initial_bbox)
-        _refresh_panels(inner_tracker, first_bgr, panel_template, panel_search,
-                        frame_idx=0, updated=True)
+        _refresh_panels(
+            inner_tracker,
+            first_bgr,
+            panel_template,
+            panel_search,
+            frame_idx=0,
+            updated=True,
+        )
 
         canvas.fill(0)
         canvas[y_off: y_off + h, :w] = first_bgr
@@ -355,7 +409,9 @@ def run_inference(
         bx, by, bw, bh = map(int, initial_bbox)
         cv2.rectangle(canvas, (bx, by + y_off), (bx + bw, by + bh + y_off), C_GT, 2)
         _draw_status_pill(canvas, in_occlusion=False)
-        cv2.putText(canvas, "F:0  INIT", (156, y_off + 22), FONT, 0.45, C_FRAME, 1, cv2.LINE_AA)
+        cv2.putText(
+            canvas, "F:0  INIT", (156, y_off + 22), FONT, 0.45, C_FRAME, 1, cv2.LINE_AA
+        )
         _draw_legend(canvas, w + 4, canvas_h - 90)
         writer.write(canvas)
 
@@ -367,6 +423,7 @@ def run_inference(
     tracked_bboxes = [initial_bbox]
 
     import time
+
     times_normal = []
     times_occlusion = []
     frame_times = []
@@ -402,12 +459,21 @@ def run_inference(
                 template_updated = not np.array_equal(cur_dyn_bbox, last_dyn_bbox)
 
                 if template_updated:
-                    _refresh_panels(inner_tracker, cur_dyn_obj, panel_template,
-                                    panel_search, frame_idx=frame_idx, updated=True)
+                    _refresh_panels(
+                        inner_tracker,
+                        cur_dyn_obj,
+                        panel_template,
+                        panel_search,
+                        frame_idx=frame_idx,
+                        updated=True,
+                    )
                     last_dyn_bbox = cur_dyn_bbox.copy()
                 else:
-                    _stamp_panel(panel_template,
-                                 f"Dynamic TEMPLATE  F:{frame_idx - 1}", updated=False)
+                    _stamp_panel(
+                        panel_template,
+                        f"Dynamic TEMPLATE  F:{frame_idx - 1}",
+                        updated=False,
+                    )
                     _stamp_panel(panel_search, "SEARCH CTX", updated=False)
 
                 canvas.fill(0)
@@ -416,9 +482,13 @@ def run_inference(
                 canvas[row_search] = panel_search
 
                 if in_occlusion:
-                    cv2.rectangle(canvas, (w, 0), (total_w - 1, canvas_h - 1), C_OCCLUDED, 3)
+                    cv2.rectangle(
+                        canvas, (w, 0), (total_w - 1, canvas_h - 1), C_OCCLUDED, 3
+                    )
                 elif template_updated:
-                    cv2.rectangle(canvas, (w, 0), (total_w - 1, canvas_h - 1), C_UPDATE, 2)
+                    cv2.rectangle(
+                        canvas, (w, 0), (total_w - 1, canvas_h - 1), C_UPDATE, 2
+                    )
 
                 native_h, native_w = frame.shape[:2]
                 long_edge = max(native_h, native_w)
@@ -438,26 +508,50 @@ def run_inference(
                         (mx, my + y_off),
                         (mx + mw, my + mh + y_off),
                         C_SEARCH,
-                        1
+                        1,
                     )
 
                 if in_occlusion and yolo_dets:
                     held = tracker.held_box if is_dam else None
                     for det in yolo_dets:
                         dx, dy, dw, dh = map(int, det)
-                        is_dist = held is not None and _iou(det, held) >= tracker.tau_occ
+                        is_dist = (
+                            held is not None and _iou(det, held) >= tracker.tau_occ
+                        )
                         color = C_YOLO_DISTRACTOR if is_dist else C_YOLO_CANDIDATE
-                        cv2.rectangle(canvas, (dx, dy + y_off), (dx + dw, dy + dh + y_off),
-                                      color, 1)
-                        cv2.putText(canvas, "D" if is_dist else "Y",
-                                    (dx + 2, dy + y_off + 12), FONT, 0.38, color, 1, cv2.LINE_AA)
+                        cv2.rectangle(
+                            canvas,
+                            (dx, dy + y_off),
+                            (dx + dw, dy + dh + y_off),
+                            color,
+                            1,
+                        )
+                        cv2.putText(
+                            canvas,
+                            "D" if is_dist else "Y",
+                            (dx + 2, dy + y_off + 12),
+                            FONT,
+                            0.38,
+                            color,
+                            1,
+                            cv2.LINE_AA,
+                        )
 
                 bx, by, bw, bh = map(int, bbox)
                 pred_color = C_OCCLUDED if in_occlusion else _confidence_color(score)
-                cv2.rectangle(canvas, (bx, by + y_off), (bx + bw, by + bh + y_off),
-                              pred_color, 2)
-                cv2.putText(canvas, f"{score:.2f}", (bx, max(by + y_off - 4, 12)),
-                            FONT, 0.45, pred_color, 1, cv2.LINE_AA)
+                cv2.rectangle(
+                    canvas, (bx, by + y_off), (bx + bw, by + bh + y_off), pred_color, 2
+                )
+                cv2.putText(
+                    canvas,
+                    f"{score:.2f}",
+                    (bx, max(by + y_off - 4, 12)),
+                    FONT,
+                    0.45,
+                    pred_color,
+                    1,
+                    cv2.LINE_AA,
+                )
 
                 _draw_status_pill(canvas, in_occlusion=in_occlusion)
 
@@ -467,19 +561,31 @@ def run_inference(
                     hud = f"F:{frame_idx}  [TMPL UPDATE]"
                 else:
                     hud = f"F:{frame_idx}"
-                cv2.putText(canvas, hud, (156, y_off + 22), FONT, 0.45, C_FRAME, 1, cv2.LINE_AA)
+                cv2.putText(
+                    canvas, hud, (156, y_off + 22), FONT, 0.45, C_FRAME, 1, cv2.LINE_AA
+                )
 
                 _draw_legend(canvas, w + 4, canvas_h - 90)
 
                 if is_dam and in_occlusion:
                     rx, ry, rw, rh = tracker._get_yolo_search_roi(frame)
-                    cv2.rectangle(canvas,
-                                  (rx, ry + y_off),
-                                  (rx + rw, ry + rh + y_off),
-                                  (0, 165, 255), 1)
-                    cv2.putText(canvas, "YOLO ROI",
-                                (rx + 2, ry + y_off + 12),
-                                FONT, 0.38, (0, 165, 255), 1, cv2.LINE_AA)
+                    cv2.rectangle(
+                        canvas,
+                        (rx, ry + y_off),
+                        (rx + rw, ry + rh + y_off),
+                        (0, 165, 255),
+                        1,
+                    )
+                    cv2.putText(
+                        canvas,
+                        "YOLO ROI",
+                        (rx + 2, ry + y_off + 12),
+                        FONT,
+                        0.38,
+                        (0, 165, 255),
+                        1,
+                        cv2.LINE_AA,
+                    )
 
                 writer.write(canvas)
 
@@ -500,7 +606,10 @@ def run_inference(
     if output_video:
         del canvas, panel_template, panel_search
 
-    def _stats(name, arr):
+    def _stats(
+        name,
+        arr,
+    ):
         """
         Inputs:
             name - str label for this timing group, printed left-aligned
@@ -523,22 +632,26 @@ def run_inference(
             print(f"{name:20s}  no data")
             return
         a = np.array(arr)
-        print(f"{name:20s}  n={len(a):4d}  "
-              f"mean={a.mean():.1f}ms  "
-              f"med={np.median(a):.1f}ms  "
-              f"p95={np.percentile(a, 95):.1f}ms  "
-              f"p99={np.percentile(a, 99):.1f}ms  "
-              f"min={a.min():.1f}ms  "
-              f"max={a.max():.1f}ms  "
-              f"fps={1000 / a.mean():.1f}")
+        print(
+            f"{name:20s}  n={len(a):4d}  "
+            f"mean={a.mean():.1f}ms  "
+            f"med={np.median(a):.1f}ms  "
+            f"p95={np.percentile(a, 95):.1f}ms  "
+            f"p99={np.percentile(a, 99):.1f}ms  "
+            f"min={a.min():.1f}ms  "
+            f"max={a.max():.1f}ms  "
+            f"fps={1000 / a.mean():.1f}"
+        )
 
     print("\n─── Latency Report ───────────────────────────────────────")
     _stats("ALL FRAMES", frame_times)
     _stats("NORMAL TRACK", times_normal)
     _stats("OCCLUSION", times_occlusion)
     if times_occlusion:
-        print(f"  occlusion frames: {len(times_occlusion)} "
-              f"({100 * len(times_occlusion) / len(frame_times):.1f}% of total)")
+        print(
+            f"  occlusion frames: {len(times_occlusion)} "
+            f"({100 * len(times_occlusion) / len(frame_times):.1f}% of total)"
+        )
     print("──────────────────────────────────────────────────────────\n")
 
     gc.collect()

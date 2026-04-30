@@ -4,6 +4,7 @@ IPython display utilities for tracking visualisation.
 This module provides functions to render tracking sequences and annotations
 as HTML5 videos directly within Jupyter/IPython environments.
 """
+
 import os
 
 import matplotlib.patches as patches
@@ -19,7 +20,7 @@ def show_video(
     annotation_path,
     start_end_idx,
     n_frames_to_display=None,
-    figsize=(12, 6)
+    figsize=(12, 6),
 ):
     """
     Render a tracking sequence as an HTML5 video for Jupyter Notebooks.
@@ -35,9 +36,11 @@ def show_video(
         IPython.display.HTML: The rendered HTML5 video object.
     """
     start_frame, end_frame = start_end_idx
-    all_frames = sorted(os.listdir(video_folder_path), key=lambda x: int(x.split('.')[0]))
+    all_frames = sorted(
+        os.listdir(video_folder_path), key=lambda x: int(x.split(".")[0])
+    )
     frames = all_frames[start_frame - 1: end_frame]
-    bboxes = np.loadtxt(annotation_path, delimiter=',')
+    bboxes = np.loadtxt(annotation_path, delimiter=",")
 
     max_valid_frames = min(len(frames), len(bboxes))
 
@@ -47,15 +50,17 @@ def show_video(
         n_frames_to_display = min(n_frames_to_display, max_valid_frames)
 
     fig, ax = plt.subplots(figsize=figsize)
-    ax.axis('off')
+    ax.axis("off")
 
     img_path = os.path.join(video_folder_path, frames[0])
     im = ax.imshow(Image.open(img_path))
 
-    rect = patches.Rectangle((0, 0), 0, 0, linewidth=2, edgecolor='r', facecolor='none')
+    rect = patches.Rectangle((0, 0), 0, 0, linewidth=2, edgecolor="r", facecolor="none")
     ax.add_patch(rect)
 
-    def update(frame_idx):
+    def update(
+        frame_idx,
+    ):
         frame_name = frames[frame_idx]
         img_path = os.path.join(video_folder_path, frame_name)
         with Image.open(img_path) as img:
@@ -67,7 +72,9 @@ def show_video(
         rect.set_height(h)
         return [im, rect]
 
-    ani = animation.FuncAnimation(fig, update, frames=range(n_frames_to_display), interval=50)
+    ani = animation.FuncAnimation(
+        fig, update, frames=range(n_frames_to_display), interval=50
+    )
 
     plt.close()
 

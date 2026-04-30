@@ -5,6 +5,7 @@ This module defines the abstract base class for all trackers in the
 SiamABC package, along with a TrackingState container for keeping
 track of historical frames and bounding boxes.
 """
+
 import math
 from abc import ABC, abstractmethod
 from collections import deque
@@ -33,7 +34,9 @@ class TrackingState:
         paths (Deque): Historical sequence of predicted bounding boxes.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+    ) -> None:
         """
         Initialise an empty TrackingState.
         """
@@ -47,7 +50,10 @@ class TrackingState:
         self.mean_color = None
         self.paths: Deque[NDArray] = deque(maxlen=70)
 
-    def save_frame_shape(self, frame: np.ndarray) -> None:
+    def save_frame_shape(
+        self,
+        frame: np.ndarray,
+    ) -> None:
         """
         Store the dimensions of the input frame.
 
@@ -66,7 +72,12 @@ class Tracker(ABC):
     and state handling that are shared across different tracker variants.
     """
 
-    def __init__(self, model: nn.Module, cuda_id: Union[int, str] = 0, **tracking_config: Any) -> None:
+    def __init__(
+        self,
+        model: nn.Module,
+        cuda_id: Union[int, str] = 0,
+        **tracking_config: Any,
+    ) -> None:
         """
         Initialise the base tracker.
 
@@ -83,38 +94,64 @@ class Tracker(ABC):
         self._norm_std = _std.cuda(cuda_id)
 
         self.cuda_id = cuda_id
-        tracking_config = tracking_config if 'tracking_config' not in tracking_config.keys() else tracking_config[
-            'tracking_config']
+        tracking_config = (
+            tracking_config
+            if "tracking_config" not in tracking_config.keys()
+            else tracking_config["tracking_config"]
+        )
         print(tracking_config)
         self.tracking_config = tracking_config
         self.tracking_state = TrackingState()
         self.net = model
         self.box_coder = self.get_box_coder(tracking_config, cuda_id)
         self._template_features = None
-        self._template_transform = self._get_default_transform(img_size=tracking_config["template_size"])
-        self._search_transform = self._get_default_transform(img_size=tracking_config["instance_size"])
-        self._dynamic_search_transform = self._get_default_transform(img_size=tracking_config["instance_size"])
-        self.window = self._get_tracking_window(tracking_config["windowing"], tracking_config["score_size"])
-        self.memory_window_size = tracking_config["memory_window_size"] if tracking_config["memory_window_size"] else 50
-        self.running_confidence_floor_value = tracking_config["running_confidence_floor_value"]
+        self._template_transform = self._get_default_transform(
+            img_size=tracking_config["template_size"]
+        )
+        self._search_transform = self._get_default_transform(
+            img_size=tracking_config["instance_size"]
+        )
+        self._dynamic_search_transform = self._get_default_transform(
+            img_size=tracking_config["instance_size"]
+        )
+        self.window = self._get_tracking_window(
+            tracking_config["windowing"], tracking_config["score_size"]
+        )
+        self.memory_window_size = (
+            tracking_config["memory_window_size"]
+            if tracking_config["memory_window_size"]
+            else 50
+        )
+        self.running_confidence_floor_value = tracking_config[
+            "running_confidence_floor_value"
+        ]
         self.warmup_frames = tracking_config["warmup_frames"]
         self.warmup_window_size = tracking_config["warmup_window_size"]
         self.to_device(cuda_id)
 
     @staticmethod
-    def _array_to_batch(x: np.ndarray) -> torch.Tensor:
+    def _array_to_batch(
+        x: np.ndarray,
+    ) -> torch.Tensor:
         x = np.transpose(x, (2, 0, 1))
         x = np.expand_dims(x, 0)
         return torch.from_numpy(x)
 
     @abstractmethod
-    def get_box_coder(self, tracking_config, cuda_id: str | int = 0):
+    def get_box_coder(
+        self,
+        tracking_config,
+        cuda_id: str | int = 0,
+    ):
         """
         Abstract method to retrieve the appropriate box coder.
         """
         pass
 
-    def to_device(self, cuda_id):
+    def to_device(
+        self,
+        cuda_id,
+    ):
         """
         Move the tracker and its components to the specified device.
 
@@ -126,26 +163,39 @@ class Tracker(ABC):
         self.box_coder = self.box_coder.to_device(self.cuda_id)
 
     @staticmethod
-    def _get_tracking_window(windowing: str, score_size: int) -> torch.Tensor:
+    def _get_tracking_window(
+        windowing: str,
+        score_size: int,
+    ) -> torch.Tensor:
         if windowing == "cosine":
-            return torch.from_numpy(np.outer(np.hanning(score_size), np.hanning(score_size)))
+            return torch.from_numpy(
+                np.outer(np.hanning(score_size), np.hanning(score_size))
+            )
         return torch.ones(int(score_size), int(score_size))
 
     @staticmethod
-    def _get_default_transform(img_size):
+    def _get_default_transform(
+        img_size,
+    ):
         pipeline = albu.Compose(
             [
                 albu.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
             ]
         )
 
-        def process(a):
+        def process(
+            a,
+        ):
             r = pipeline(image=a)
             return r["image"]
 
         return process
 
-    def _rescale_bbox(self, bbox: np.array, padded_box) -> np.array:
+    def _rescale_bbox(
+        self,
+        bbox: np.array,
+        padded_box,
+    ) -> np.array:
 
         instance_size = self.tracking_config["instance_size"]
         w_scale = padded_box[2] / instance_size
@@ -168,35 +218,49 @@ class Tracker(ABC):
         transform: Optional[Callable[..., Any]] = None,
     ) -> torch.Tensor:
 
-        x = (
-            torch.from_numpy(image[:, :, :3])
-            .permute(2, 0, 1)
-            .unsqueeze(0)
-            .float()
-        )
+        x = torch.from_numpy(image[:, :, :3]).permute(2, 0, 1).unsqueeze(0).float()
         x = x.to(self.cuda_id, non_blocking=True).div_(255.0)
         return x.sub_(self._norm_mean).div_(self._norm_std)
 
-    def reset(self) -> None:
+    def reset(
+        self,
+    ) -> None:
         """
         Clear cached features and reset the tracker to its initial state.
         """
         self._template_features = None
 
-    def initialize(self, image: NDArray, rect: NDArray, **kwargs) -> None:
+    def initialize(
+        self,
+        image: NDArray,
+        rect: NDArray,
+        **kwargs,
+    ) -> None:
         pass
 
-    def update(self, search: NDArray, *kw):
+    def update(
+        self,
+        search: NDArray,
+        *kw,
+    ):
         return {"bbox": self.tracking_state.bbox}
 
-    def _smooth_size(self, size: NDArray, prev_size: NDArray, lr: float) -> Tuple[float, float]:
+    def _smooth_size(
+        self,
+        size: NDArray,
+        prev_size: NDArray,
+        lr: float,
+    ) -> Tuple[float, float]:
         size = size * lr
         prev_size = prev_size * (1 - lr)
         w = prev_size[0] + lr * (size[0] + prev_size[0])
         h = prev_size[1] + lr * (size[1] + prev_size[1])
         return w, h
 
-    def _get_point_offset(self, pred_bbox: NDArray) -> Tuple[float, float]:
+    def _get_point_offset(
+        self,
+        pred_bbox: NDArray,
+    ) -> Tuple[float, float]:
         pred_xs = pred_bbox[0] + (pred_bbox[2] / 2)
         pred_ys = pred_bbox[1] + (pred_bbox[3] / 2)
 
@@ -205,7 +269,10 @@ class Tracker(ABC):
         return diff_xs, diff_ys
 
     def _postprocess_bbox(
-        self, decoded_info: TrackerDecodeResult, cls_score: NDArray, penalty: Any = None
+        self,
+        decoded_info: TrackerDecodeResult,
+        cls_score: NDArray,
+        penalty: Any = None,
     ) -> NDArray:
         pred_bbox = np.squeeze(decoded_info.bbox.cpu().numpy())
         if not self.tracking_config.get("smooth", False):
@@ -214,7 +281,9 @@ class Tracker(ABC):
         prev_size = self.tracking_state.prev_size
         assert prev_size is not None
         r_max, c_max = decoded_info.pred_coords[0]
-        lr = (penalty[r_max, c_max] * cls_score[r_max, c_max] * self.tracking_config["lr"]).item()
+        lr = (
+            penalty[r_max, c_max] * cls_score[r_max, c_max] * self.tracking_config["lr"]
+        ).item()
 
         pred_size = np.array(pred_bbox[2:])
         pred_w, pred_h = self._smooth_size(pred_size, prev_size=prev_size, lr=lr)
@@ -222,30 +291,40 @@ class Tracker(ABC):
         return predicted_bbox
 
     def _confidence_postprocess(
-        self, cls_score: NDArray, regression_map: torch.Tensor
+        self,
+        cls_score: NDArray,
+        regression_map: torch.Tensor,
     ) -> tuple[NDArray, None, None] | tuple[Any, NDArray, Tensor]:
         if not self.tracking_config.get("smooth", False):
             return cls_score, None, None
         prev_size = self.tracking_state.prev_size
         assert prev_size is not None
 
-        pred_location_ = torch.stack([
-            self.box_coder.grid_x - regression_map[:, 0],
-            self.box_coder.grid_y - regression_map[:, 1],
-            self.box_coder.grid_x + regression_map[:, 2],
-            self.box_coder.grid_y + regression_map[:, 3],
-        ], dim=1)
+        pred_location_ = torch.stack(
+            [
+                self.box_coder.grid_x - regression_map[:, 0],
+                self.box_coder.grid_y - regression_map[:, 1],
+                self.box_coder.grid_x + regression_map[:, 2],
+                self.box_coder.grid_y + regression_map[:, 3],
+            ],
+            dim=1,
+        )
 
         pred_location = pred_location_[0]
 
         s_c = limit(
-            squared_size(pred_location[2] - pred_location[0], pred_location[3] - pred_location[1])
+            squared_size(
+                pred_location[2] - pred_location[0], pred_location[3] - pred_location[1]
+            )
             / (squared_size(prev_size[0], prev_size[1]))
         )
 
         r_c = limit(
             (prev_size[0] / prev_size[1])
-            / ((pred_location[2] - pred_location[0]) / (pred_location[3] - pred_location[1]))
+            / (
+                (pred_location[2] - pred_location[0])
+                / (pred_location[3] - pred_location[1])
+            )
         )
 
         penalty = torch.exp(-(r_c * s_c - 1) * self.tracking_config["penalty_k"])

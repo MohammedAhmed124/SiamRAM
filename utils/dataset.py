@@ -63,7 +63,10 @@ _FRAME_PATTERNS = [
 ]
 
 
-def _detect_frame_pattern(seq_path: str, probe_indices: List[int]) -> Optional[str]:
+def _detect_frame_pattern(
+    seq_path: str,
+    probe_indices: List[int],
+) -> Optional[str]:
     """
     Try each pattern in _FRAME_PATTERNS against a handful of probe frame
     indices.  Return the first pattern where ALL probes resolve to existing
@@ -123,7 +126,10 @@ class TrackingSequence:
                         auto-detected from existing files.
     """
 
-    def __init__(self, row: Dict):
+    def __init__(
+        self,
+        row: Dict,
+    ):
         """
         Initialise a TrackingSequence from a dataframe row.
 
@@ -141,7 +147,9 @@ class TrackingSequence:
         self._frame_pattern: Optional[str] = row.get("frame_pattern") or None
         self._bboxes: Optional[List[np.ndarray]] = None
 
-    def _resolve_frame_pattern(self) -> str:
+    def _resolve_frame_pattern(
+        self,
+    ) -> str:
         """
         Auto-detect the frame-naming pattern by probing a few known indices.
         Raises RuntimeError if none of the known patterns match.
@@ -159,7 +167,9 @@ class TrackingSequence:
             )
         return pattern
 
-    def _infer_pattern_from_directory(self) -> Optional[str]:
+    def _infer_pattern_from_directory(
+        self,
+    ) -> Optional[str]:
         """
         Fallback: list the sequence directory (or its 'img/' subdirectory) and
         guess the zero-padding width and extension from the first image found.
@@ -169,7 +179,8 @@ class TrackingSequence:
             if not os.path.isdir(dirpath):
                 continue
             candidates = sorted(
-                f for f in os.listdir(dirpath)
+                f
+                for f in os.listdir(dirpath)
                 if f.lower().endswith((".jpg", ".jpeg", ".png"))
             )
             if not candidates:
@@ -180,7 +191,10 @@ class TrackingSequence:
             return f"{prefix}{{:{width:02d}d}}{ext}"
         return None
 
-    def frame_path(self, frame_idx: int) -> str:
+    def frame_path(
+        self,
+        frame_idx: int,
+    ) -> str:
         """
         Return the absolute path to the image at the given frame index.
 
@@ -194,7 +208,9 @@ class TrackingSequence:
             self._frame_pattern = self._resolve_frame_pattern()
         return os.path.join(self.seq_path, self._frame_pattern.format(frame_idx))
 
-    def _load_bboxes(self) -> None:
+    def _load_bboxes(
+        self,
+    ) -> None:
         if self._bboxes is not None:
             return
         bboxes: List[np.ndarray] = []
@@ -209,11 +225,16 @@ class TrackingSequence:
                     x, y, w, h = (float(v) for v in vals[:4])
                     bboxes.append(np.array([x, y, w, h], dtype=np.float32))
                 except (ValueError, IndexError):
-                    print(f"[warn] failed to parse bbox: {self.annot_path!r} | {line!r}")
+                    print(
+                        f"[warn] failed to parse bbox: {self.annot_path!r} | {line!r}"
+                    )
                     bboxes.append(np.full(4, np.nan, dtype=np.float32))
         self._bboxes = bboxes
 
-    def get_bbox(self, frame_idx: int) -> np.ndarray:
+    def get_bbox(
+        self,
+        frame_idx: int,
+    ) -> np.ndarray:
         """
         Return the ground-truth bounding box for the given frame index.
 
@@ -231,7 +252,9 @@ class TrackingSequence:
         return self._bboxes[local].copy()
 
     @staticmethod
-    def is_valid_bbox(bbox: np.ndarray) -> bool:
+    def is_valid_bbox(
+        bbox: np.ndarray,
+    ) -> bool:
         """
         Check if a bounding box is valid (not NaN, positive dimensions).
 
@@ -268,8 +291,12 @@ class TrackingSequence:
         Returns:
             Optional[int]: Valid frame index or None.
         """
-        lower_end = max(lower_end, self.start_idx) if lower_end is not None else self.start_idx
-        upper_end = min(upper_end, self.end_idx) if upper_end is not None else self.end_idx
+        lower_end = (
+            max(lower_end, self.start_idx) if lower_end is not None else self.start_idx
+        )
+        upper_end = (
+            min(upper_end, self.end_idx) if upper_end is not None else self.end_idx
+        )
         self._load_bboxes()
         indices = list(range(lower_end, upper_end + 1))
         rng.shuffle(indices)
@@ -298,8 +325,12 @@ class TrackingSequence:
             Tuple[Optional[int], Optional[int], Optional[np.ndarray]]:
                 (template_idx, search_idx, search_bbox).
         """
-        lower_end = max(lower_end, self.start_idx) if lower_end is not None else self.start_idx
-        upper_end = min(upper_end, self.end_idx) if upper_end is not None else self.end_idx
+        lower_end = (
+            max(lower_end, self.start_idx) if lower_end is not None else self.start_idx
+        )
+        upper_end = (
+            min(upper_end, self.end_idx) if upper_end is not None else self.end_idx
+        )
 
         failure = (None, None, None)
 
@@ -309,7 +340,9 @@ class TrackingSequence:
 
         lo = max(lower_end, t_idx)
         hi = min(upper_end, t_idx + max_frame_gap)
-        candidates = [i for i in range(lo, hi + 1) if (max_frame_gap == 0 or i != t_idx)]
+        candidates = [
+            i for i in range(lo, hi + 1) if (max_frame_gap == 0 or i != t_idx)
+        ]
         if not candidates:
             return failure
 
@@ -367,9 +400,15 @@ class UAVTrackingDataset(Dataset):
         self.template_image_scale = tracking_config["template_image_scale"]
         self.cuda_id = 0
 
-        self._template_transform = self._get_default_transform(tracking_config["template_size"])
-        self._search_transform = self._get_default_transform(tracking_config["instance_size"])
-        self._dynamic_search_transform = self._get_default_transform(tracking_config["instance_size"])
+        self._template_transform = self._get_default_transform(
+            tracking_config["template_size"]
+        )
+        self._search_transform = self._get_default_transform(
+            tracking_config["instance_size"]
+        )
+        self._dynamic_search_transform = self._get_default_transform(
+            tracking_config["instance_size"]
+        )
 
         self.neg_ratio = neg_ratio
         self.num_samples = num_samples
@@ -395,10 +434,15 @@ class UAVTrackingDataset(Dataset):
             f"score_size={self.score_size}"
         )
 
-    def __len__(self) -> int:
+    def __len__(
+        self,
+    ) -> int:
         return self.num_samples
 
-    def __getitem__(self, _idx: int) -> Dict[str, torch.Tensor]:
+    def __getitem__(
+        self,
+        _idx: int,
+    ) -> Dict[str, torch.Tensor]:
         for attempt in range(5):
             try:
                 if self.rng.random() >= self.neg_ratio:
@@ -410,18 +454,25 @@ class UAVTrackingDataset(Dataset):
                     return self._dummy_negative()
         return self._dummy_negative()
 
-    def _positive_sample(self) -> Dict[str, torch.Tensor]:
+    def _positive_sample(
+        self,
+    ) -> Dict[str, torch.Tensor]:
         for _ in range(10):
             seq = self.rng.choice(self.sequences)
 
-            t_crop, t_idx, template_bbox, s_crop, s_idx, bbox_in_c, ok = \
-                self.sample_search_template_pair(self.rng, seq, max_frame_gap=self.max_frame_gap)
+            t_crop, t_idx, template_bbox, s_crop, s_idx, bbox_in_c, ok = (
+                self.sample_search_template_pair(
+                    self.rng, seq, max_frame_gap=self.max_frame_gap
+                )
+            )
             if not ok:
                 continue
 
             dt_crop, _, _, ds_crop, _, _, ok_dyn = self.sample_search_template_pair(
-                self.rng, seq,
-                lower_end=t_idx, upper_end=s_idx,
+                self.rng,
+                seq,
+                lower_end=t_idx,
+                upper_end=s_idx,
                 max_frame_gap=0,
             )
             if not ok_dyn:
@@ -443,9 +494,15 @@ class UAVTrackingDataset(Dataset):
             ).numpy()
 
             return self._pack(
-                t_crop, dt_crop, s_crop, ds_crop,
-                cls_label, bbox_label, reg_weight,
-                is_positive=True, path=seq.frame_path(s_idx),
+                t_crop,
+                dt_crop,
+                s_crop,
+                ds_crop,
+                cls_label,
+                bbox_label,
+                reg_weight,
+                is_positive=True,
+                path=seq.frame_path(s_idx),
             )
 
         return self._dummy_negative()
@@ -474,8 +531,10 @@ class UAVTrackingDataset(Dataset):
         frame_gap = self.max_frame_gap if max_frame_gap is None else max_frame_gap
 
         t_idx, s_idx, s_bbox = seq.sample_search_template_idx_pair(
-            rng, max_frame_gap=frame_gap,
-            lower_end=lower_end, upper_end=upper_end,
+            rng,
+            max_frame_gap=frame_gap,
+            lower_end=lower_end,
+            upper_end=upper_end,
         )
         if t_idx is None or s_idx is None or s_bbox is None:
             return failure
@@ -489,7 +548,11 @@ class UAVTrackingDataset(Dataset):
 
         return t_crop, t_idx, template_bbox, s_crop, s_idx, bbox_in_c, True
 
-    def get_template_crop(self, image: np.ndarray, rect: np.ndarray):
+    def get_template_crop(
+        self,
+        image: np.ndarray,
+        rect: np.ndarray,
+    ):
         """
         Extract and preprocess a template crop from an image.
 
@@ -501,7 +564,8 @@ class UAVTrackingDataset(Dataset):
             Tuple[torch.Tensor, np.ndarray]: (preprocessed_crop, crop_bbox).
         """
         shifted = self.apply_shift_scale(
-            rect, image.shape,
+            rect,
+            image.shape,
             shift_factor=self.template_image_shift,
             scale_factor=self.template_image_scale,
         )
@@ -509,17 +573,25 @@ class UAVTrackingDataset(Dataset):
             shifted = rect
 
         context = extend_bbox(
-            shifted, offset=self.template_bbox_offset,
-            image_width=image.shape[1], image_height=image.shape[0],
+            shifted,
+            offset=self.template_bbox_offset,
+            image_width=image.shape[1],
+            image_height=image.shape[0],
         )
         crop, template_bbox, _ = get_extended_crop(
-            image=image, bbox=rect, context=context,
+            image=image,
+            bbox=rect,
+            context=context,
             crop_size=self.template_size,
         )
         img = self._preprocess_image(crop, self._template_transform)
         return img, template_bbox
 
-    def get_search_crop(self, image: np.ndarray, bbox: np.ndarray):
+    def get_search_crop(
+        self,
+        image: np.ndarray,
+        bbox: np.ndarray,
+    ):
         """
         Extract and preprocess a search crop from an image.
 
@@ -532,24 +604,31 @@ class UAVTrackingDataset(Dataset):
                 (preprocessed_crop, search_bbox, context_rect).
         """
         shifted = self.apply_shift_scale(
-            bbox, image.shape,
+            bbox,
+            image.shape,
             shift_factor=self.search_image_shift,
             scale_factor=self.search_image_scale,
         )
         bbox_for_crop = clamp_bbox(shifted, shape=image.shape[:2])
         context = extend_bbox(
-            bbox_for_crop, offset=self._get_random_context(),
-            image_width=image.shape[1], image_height=image.shape[0],
+            bbox_for_crop,
+            offset=self._get_random_context(),
+            image_width=image.shape[1],
+            image_height=image.shape[0],
         )
         crop, search_bbox, ctx = get_extended_crop(
-            image=image, bbox=bbox,
-            crop_size=self.instance_size, context=context,
+            image=image,
+            bbox=bbox,
+            crop_size=self.instance_size,
+            context=context,
             padding_value=np.mean(image, axis=(0, 1)),
         )
         img = self._preprocess_image(crop, self._search_transform)
         return img, search_bbox, ctx
 
-    def _negative_sample(self) -> Dict[str, torch.Tensor]:
+    def _negative_sample(
+        self,
+    ) -> Dict[str, torch.Tensor]:
         """
         Build a negative training sample with the following strict structure:
 
@@ -581,9 +660,7 @@ class UAVTrackingDataset(Dataset):
 
             t_crop, _ = self.get_template_crop(t_img, t_bbox)
 
-            dyn_idx = seq.sample_valid_frame(
-                self.rng, lower_end=t_idx, upper_end=s_idx
-            )
+            dyn_idx = seq.sample_valid_frame(self.rng, lower_end=t_idx, upper_end=s_idx)
             if dyn_idx is None:
 
                 dyn_idx = t_idx
@@ -614,15 +691,23 @@ class UAVTrackingDataset(Dataset):
             reg_weight = np.zeros((S, S), dtype=np.float32)
 
             return self._pack(
-                t_crop, dynamic_template, s_crop, dynamic_search,
-                cls_label, bbox_label, reg_weight,
+                t_crop,
+                dynamic_template,
+                s_crop,
+                dynamic_search,
+                cls_label,
+                bbox_label,
+                reg_weight,
                 is_positive=False,
             )
 
         return self._dummy_negative()
 
     @staticmethod
-    def _bboxes_overlap(a: np.ndarray, b: np.ndarray) -> bool:
+    def _bboxes_overlap(
+        a: np.ndarray,
+        b: np.ndarray,
+    ) -> bool:
         """
         Return True if two [x, y, w, h] bounding boxes have any pixel overlap.
 
@@ -682,15 +767,15 @@ class UAVTrackingDataset(Dataset):
         min_shift_y = (1.0 + self.search_context + 0.1) * h
 
         for _ in range(50):
-            direction = self.rng.choice(('left', 'right', 'up', 'down'))
+            direction = self.rng.choice(("left", "right", "up", "down"))
 
-            if direction == 'right':
+            if direction == "right":
                 shift_x = self.rng.uniform(min_shift_x, min_shift_x + 2.0 * w)
                 shift_y = self.rng.uniform(-0.5, 0.5) * h
-            elif direction == 'left':
+            elif direction == "left":
                 shift_x = -self.rng.uniform(min_shift_x, min_shift_x + 2.0 * w)
                 shift_y = self.rng.uniform(-0.5, 0.5) * h
-            elif direction == 'down':
+            elif direction == "down":
                 shift_x = self.rng.uniform(-0.5, 0.5) * w
                 shift_y = self.rng.uniform(min_shift_y, min_shift_y + 2.0 * h)
             else:
@@ -705,15 +790,19 @@ class UAVTrackingDataset(Dataset):
                 continue
 
             context = extend_bbox(
-                anchor, offset=self.search_context,
-                image_width=W, image_height=H,
+                anchor,
+                offset=self.search_context,
+                image_width=W,
+                image_height=H,
             )
 
             if self._bboxes_overlap(context, target_clamped):
                 continue
 
             raw_crop, _, _ = get_extended_crop(
-                image=img, bbox=anchor, context=context,
+                image=img,
+                bbox=anchor,
+                context=context,
                 crop_size=self.instance_size,
                 padding_value=mean_color,
             )
@@ -764,15 +853,19 @@ class UAVTrackingDataset(Dataset):
                 continue
 
             context = extend_bbox(
-                anchor, offset=self.search_context,
-                image_width=W, image_height=H,
+                anchor,
+                offset=self.search_context,
+                image_width=W,
+                image_height=H,
             )
 
             if self._bboxes_overlap(context, target_clamped):
                 continue
 
             raw_crop, _, _ = get_extended_crop(
-                image=img, bbox=anchor, context=context,
+                image=img,
+                bbox=anchor,
+                context=context,
                 crop_size=self.instance_size,
                 padding_value=mean_color,
             )
@@ -781,33 +874,45 @@ class UAVTrackingDataset(Dataset):
         return None
 
     def _get_template_crop(
-        self, img: np.ndarray, bbox: np.ndarray
+        self,
+        img: np.ndarray,
+        bbox: np.ndarray,
     ) -> Optional[torch.Tensor]:
         bbox = clamp_bbox(bbox, img.shape)
         if not self.is_valid_bbox(bbox):
             return None
         context = extend_bbox(
-            bbox, offset=self.template_bbox_offset,
-            image_width=img.shape[1], image_height=img.shape[0],
+            bbox,
+            offset=self.template_bbox_offset,
+            image_width=img.shape[1],
+            image_height=img.shape[0],
         )
         crop, _, _ = get_extended_crop(
-            image=img, bbox=bbox, context=context,
+            image=img,
+            bbox=bbox,
+            context=context,
             crop_size=self.template_size,
         )
         return self._preprocess_image(crop, self._template_transform)
 
     def _get_search_crop(
-        self, img: np.ndarray, bbox: np.ndarray
+        self,
+        img: np.ndarray,
+        bbox: np.ndarray,
     ) -> Optional[torch.Tensor]:
         bbox = clamp_bbox(bbox, img.shape)
         if not self.is_valid_bbox(bbox):
             return None
         context = extend_bbox(
-            bbox, offset=self.search_context,
-            image_width=img.shape[1], image_height=img.shape[0],
+            bbox,
+            offset=self.search_context,
+            image_width=img.shape[1],
+            image_height=img.shape[0],
         )
         crop, _, _ = get_extended_crop(
-            image=img, bbox=bbox, context=context,
+            image=img,
+            bbox=bbox,
+            context=context,
             crop_size=self.instance_size,
             padding_value=np.mean(img, axis=(0, 1)),
         )
@@ -837,7 +942,9 @@ class UAVTrackingDataset(Dataset):
             "path": path if path is not None else "None",
         }
 
-    def _dummy_negative(self) -> Dict[str, torch.Tensor]:
+    def _dummy_negative(
+        self,
+    ) -> Dict[str, torch.Tensor]:
         S, T, i = self.score_size, self.template_size, self.instance_size
         return {
             "template": torch.zeros(3, T, T),
@@ -852,36 +959,55 @@ class UAVTrackingDataset(Dataset):
         }
 
     @staticmethod
-    def _load_image(path: str) -> np.ndarray:
+    def _load_image(
+        path: str,
+    ) -> np.ndarray:
         img = cv2.imread(path)
         if img is None:
             raise FileNotFoundError(f"Could not read image: {path}")
         return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
     @staticmethod
-    def _to_tensor(x) -> torch.Tensor:
+    def _to_tensor(
+        x,
+    ) -> torch.Tensor:
         if isinstance(x, torch.Tensor):
             return x.float()
         return torch.from_numpy(x).float()
 
-    def _preprocess_image(self, image: np.ndarray, transform: Callable) -> torch.Tensor:
+    def _preprocess_image(
+        self,
+        image: np.ndarray,
+        transform: Callable,
+    ) -> torch.Tensor:
         img = transform(image[:, :, :3])
         if image.shape[2] > 3:
             img = np.concatenate([img, image[:, :, 3:]], axis=2)
         return self._array_to_batch(img).float()
 
     @staticmethod
-    def _array_to_batch(x: np.ndarray) -> torch.Tensor:
+    def _array_to_batch(
+        x: np.ndarray,
+    ) -> torch.Tensor:
         return torch.from_numpy(np.transpose(x, (2, 0, 1)))
 
-    def _get_default_transform(self, img_size: int) -> Callable:
-        pipeline = albu.Compose([
-            albu.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        ])
+    def _get_default_transform(
+        self,
+        img_size: int,
+    ) -> Callable:
+        pipeline = albu.Compose(
+            [
+                albu.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ]
+        )
         return lambda a: pipeline(image=a)["image"]
 
     def apply_shift_scale(
-        self, bbox: np.ndarray, img_shape, shift_factor=0.0, scale_factor=0.0
+        self,
+        bbox: np.ndarray,
+        img_shape,
+        shift_factor=0.0,
+        scale_factor=0.0,
     ) -> np.ndarray:
         """
         Apply random translation and scaling to a bounding box.
@@ -907,11 +1033,15 @@ class UAVTrackingDataset(Dataset):
         )
         return clamp_bbox(new_bbox, shape=img_shape[:2])
 
-    def _get_random_context(self) -> float:
+    def _get_random_context(
+        self,
+    ) -> float:
         return np.random.uniform(self.search_context * 0.8, self.search_context * 1.2)
 
     @staticmethod
-    def is_valid_bbox(bbox: np.ndarray) -> bool:
+    def is_valid_bbox(
+        bbox: np.ndarray,
+    ) -> bool:
         """
         Check if a bounding box is valid.
 

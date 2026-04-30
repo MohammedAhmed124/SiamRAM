@@ -16,6 +16,7 @@ All default paths are resolved relative to the repository root (the directory
 that contains this script), so the script works regardless of the working
 directory from which it is invoked.
 """
+
 import argparse
 import json
 import os
@@ -100,18 +101,17 @@ def main():
     config.model.model_size = args.model_size
     if config.make_trt_engine:
         wrapped = get_trt_tracker(
-        config=config,
-        weights_path=args.weights_path,
-        **config.trt_engine  
-    )
+            config=config, weights_path=args.weights_path, **config.trt_engine
+        )
     else:
-        wrapped = get_tracker(config=config, weights_path=args.weights_path, lambda_tta=args.lambda_tta, continuous=False)
+        wrapped = get_tracker(
+            config=config,
+            weights_path=args.weights_path,
+            lambda_tta=args.lambda_tta,
+            continuous=False,
+        )
 
-    tracker = SiamRAMTracker(
-        siam_tracker=wrapped,
-        
-        **config.ram_tracker 
-    )
+    tracker = SiamRAMTracker(siam_tracker=wrapped, **config.ram_tracker)
 
     with open(args.manifest_path, "r") as f:
         manifest = json.load(f)
@@ -121,13 +121,13 @@ def main():
     else:
         data_root = Path(args.data_dir)
         target_datasets = {
-            p.name for p in data_root.iterdir()
-            if p.is_dir() and p.name != "metadata"
+            p.name for p in data_root.iterdir() if p.is_dir() and p.name != "metadata"
         }
         print(f"Auto-discovered datasets: {sorted(target_datasets)}")
 
     test_public_lb = {
-        k: v for k, v in manifest["public_lb"].items()
+        k: v
+        for k, v in manifest["public_lb"].items()
         if v["dataset"] in target_datasets
     }
 
@@ -150,7 +150,7 @@ def main():
             initial_bbox=init_bbox,
             tracker=tracker,
             output_path=output_path,
-            output_video=False
+            output_video=False,
         )
 
     print("\nCompiling submission CSV...")

@@ -3,6 +3,7 @@ Logging utilities for SiamRAM.
 
 Provides a unified logger with optional colored output and custom formatting.
 """
+
 import logging
 import os
 
@@ -32,7 +33,10 @@ def create_logger(
     Returns:
         logging.Logger: Configured logger instance.
     """
-    msg_format = msg_format or "%(asctime)s %(hostname)s %(name)s %(levelname)s - %(message)s - %(filename)s:%(lineno)d"
+    msg_format = (
+        msg_format
+        or "%(asctime)s %(hostname)s %(name)s %(levelname)s - %(message)s - %(filename)s:%(lineno)d"
+    )
     logger = logging.Logger(name)
     console_handler = logging.StreamHandler()
     level = logging.DEBUG if os.environ.get("DEBUG") else logging.INFO

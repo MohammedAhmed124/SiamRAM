@@ -23,9 +23,16 @@ class AdaptiveBatchNorm(nn.BatchNorm2d):
     When λ > 0, it incorporates local batch statistics.
     """
 
-    def __init__(self, num_features, eps=1e-5, momentum=0.1,
-                 affine=True, track_running_stats=True,
-                 contineous=False, norm_lambda=0.1):
+    def __init__(
+        self,
+        num_features,
+        eps=1e-5,
+        momentum=0.1,
+        affine=True,
+        track_running_stats=True,
+        contineous=False,
+        norm_lambda=0.1,
+    ):
         """
         Initialise the AdaptiveBatchNorm layer.
 
@@ -42,7 +49,11 @@ class AdaptiveBatchNorm(nn.BatchNorm2d):
         self.contineous = contineous
         self._norm_lambda = norm_lambda
 
-    def forward(self, x: torch.Tensor, lam: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        lam: torch.Tensor,
+    ) -> torch.Tensor:
         """
         Args:
             x:   input feature map  [B, C, H, W]
@@ -55,8 +66,10 @@ class AdaptiveBatchNorm(nn.BatchNorm2d):
         if self.training:
             return torch.nn.functional.batch_norm(
                 x,
-                self.running_mean, self.running_var,
-                self.weight, self.bias,
+                self.running_mean,
+                self.running_var,
+                self.weight,
+                self.bias,
                 True,
                 self.momentum or (1.0 / float(self.num_batches_tracked + 1)),
                 self.eps,
@@ -68,15 +81,20 @@ class AdaptiveBatchNorm(nn.BatchNorm2d):
         mean = lam * batch_mean + (1.0 - lam) * self.running_mean
         var = lam * batch_var + (1.0 - lam) * self.running_var
 
-        x = (x - mean[None, :, None, None]) \
-            / torch.sqrt(var[None, :, None, None] + self.eps)
+        x = (x - mean[None, :, None, None]) / torch.sqrt(
+            var[None, :, None, None] + self.eps
+        )
 
         if self.affine:
             x = x * self.weight[None, :, None, None] + self.bias[None, :, None, None]
         return x
 
 
-def replace_layers_adaptive_bn(model, norm_lambda, continuous):
+def replace_layers_adaptive_bn(
+    model,
+    norm_lambda,
+    continuous,
+):
     """
     Recursively replace BatchNorm2d layers in a model with AdaptiveBatchNorm.
 
@@ -89,7 +107,9 @@ def replace_layers_adaptive_bn(model, norm_lambda, continuous):
         if len(list(module.children())) > 0:
             replace_layers_adaptive_bn(module, norm_lambda, continuous)
 
-        if isinstance(module, nn.BatchNorm2d) and not isinstance(module, AdaptiveBatchNorm):
+        if isinstance(module, nn.BatchNorm2d) and not isinstance(
+            module, AdaptiveBatchNorm
+        ):
             new_bn = AdaptiveBatchNorm(
                 module.num_features,
                 eps=module.eps,

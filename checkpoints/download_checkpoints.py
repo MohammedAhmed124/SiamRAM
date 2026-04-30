@@ -12,67 +12,53 @@ import argparse
 import re
 import sys
 from pathlib import Path
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+
+import gdown
 
 FILES: dict[str, str] = {
     "head_epoch_000.pth": "1ehwIYvwwIulWNAshYVWm5ashkMmRtcik",
     "yolo11n.pt": "1WUAArjVjMwrluMWBBlTqGO7NBkDy_CMv",
 }
+MIN_BYTES: dict[str, int] = {
+    "head_epoch_000.pth": 1_000_000,
+    "yolo11n.pt": 1_000_000,
+}
 
-BASE_URL = "https://drive.google.com/uc"
 CHUNK_SIZE = 1024 * 1024  # 1MB
 
 
-def _extract_confirm_token(html: str) -> str | None:
-    patterns = [
-        r"confirm=([0-9A-Za-z_]+)",
-        r'name="confirm"\s+value="([0-9A-Za-z_]+)"',
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, html)
-        if match:
-            return match.group(1)
-    return None
+def _looks_like_html(data: bytes) -> bool:
+    prefix = data[:512].lstrip().lower()
+    return prefix.startswith(b"<!doctype html") or prefix.startswith(b"<html")
 
 
-def _open_drive_stream(file_id: str):
-    params = {"export": "download", "id": file_id}
-    url = f"{BASE_URL}?{urlencode(params)}"
-    req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    response = urlopen(req, timeout=120)
-
-    content_type = response.headers.get("Content-Type", "")
-    if "text/html" not in content_type.lower():
-        return response
-
-    html = response.read().decode("utf-8", errors="ignore")
-    token = _extract_confirm_token(html)
-    if not token:
-        raise RuntimeError("Google Drive confirmation token was not found.")
-
-    params["confirm"] = token
-    confirm_url = f"{BASE_URL}?{urlencode(params)}"
-    confirm_req = Request(confirm_url, headers={"User-Agent": "Mozilla/5.0"})
-    return urlopen(confirm_req, timeout=120)
+def _is_valid_checkpoint(path: Path, min_bytes: int) -> bool:
+    if not path.exists() or path.stat().st_size < min_bytes:
+        return False
+    with path.open("rb") as f:
+        head = f.read(512)
+    return not _looks_like_html(head)
 
 
 def _download_file(file_name: str, file_id: str, out_dir: Path, force: bool) -> None:
     destination = out_dir / file_name
-    if destination.exists() and not force:
+    if destination.exists() and _is_valid_checkpoint(destination, MIN_BYTES[file_name]) and not force:
         print(f"[skip] {file_name} already exists")
         return
 
     print(f"[downloading] {file_name}")
-    with _open_drive_stream(file_id) as response, destination.open("wb") as f:
-        downloaded = 0
-        while True:
-            chunk = response.read(CHUNK_SIZE)
-            if not chunk:
-                break
-            f.write(chunk)
-            downloaded += len(chunk)
-            print(f"  {downloaded / (1024 * 1024):.1f} MB", end="\r", flush=True)
+    if destination.exists():
+        destination.unlink()
+    url = f"https://drive.google.com/uc?id={file_id}"
+    output = gdown.download(url=url, output=str(destination), quiet=False)
+    if not output:
+        raise RuntimeError(f"gdown failed to download {file_name}.")
+
+    if not _is_valid_checkpoint(destination, MIN_BYTES[file_name]):
+        raise RuntimeError(
+            f"Downloaded file looks invalid for {file_name} "
+            f"(size={destination.stat().st_size} bytes; likely an HTML response)."
+        )
 
     print(f"[done] {file_name} -> {destination}")
 

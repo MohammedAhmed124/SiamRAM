@@ -60,22 +60,6 @@ For full design details see the [System Description](docs/system_description.pdf
 
 ## Installation
 
-### Option 1: Quick Install (conda + pip)
-
-```bash
-git clone https://github.com/ysif9/SiamRAM.git
-cd SiamRAM
-conda create -n SiamRAM-env python=3.10 -y
-conda activate SiamRAM-env
-pip install -r requirements.txt
-```
-
-`requirements.txt` installs PyTorch 2.3.1 from PyPI, which includes CUDA support and falls back to CPU automatically. To
-use a specific CUDA version or a CPU-only build, install PyTorch manually before running the last command above — see
-the [PyTorch install selector](https://pytorch.org/get-started/locally/).
-
-### Option 2: Full Installation Guides
-
 For Docker, VSCode Devcontainer, and local `uv` options see the dedicated guides:
 
 - [CUDA / GPU Installation Guide](docs/install-CUDA.md) — covers Native Docker, VSCode Devcontainer, and local `uv` with

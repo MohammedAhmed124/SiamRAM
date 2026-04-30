@@ -5,7 +5,7 @@
   "workspaceFolder": "/app",
   "overrideCommand": false,
   "runServices": ["gpu"],
-  "postCreateCommand": "uv sync --frozen --group gpu",
+  "postCreateCommand": "uv sync --frozen",
   "customizations": {
     "vscode": {
       "extensions": ["ms-python.python", "ms-toolsai.jupyter", "charliermarsh.ruff"]

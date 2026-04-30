@@ -56,9 +56,6 @@ torchvision = { index = "pytorch-cu128" }
 torch-tensorrt = { index = "pytorch-cu128" }
 tensorrt = { index = "pytorch-cu128" }
 
-[tool.uv]
-environments = ["sys_platform == 'win32'"]
-
 [[tool.uv.index]]
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"

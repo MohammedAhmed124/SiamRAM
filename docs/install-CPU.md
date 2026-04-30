@@ -45,7 +45,7 @@ poe cpu_setup
 ### Step 3: Run a script in the CPU container
 
 ```bash
-poe cpu_run test.py
+poe cpu_run containers/test.py
 ```
 
 ## Option 2: VSCode Devcontainer (Recommended)
@@ -67,7 +67,7 @@ poe cpu_run test.py
 ### Step 3: Verify inside container
 
 ```bash
-python test.py
+python containers/test.py
 ```
 
 Expected result: CUDA available is `False`.
@@ -96,7 +96,7 @@ uv sync
 ### Step 2: Verify environment
 
 ```bash
-uv run python test.py
+uv run containers/test.py
 ```
 
 Expected result: CUDA available is `False`.

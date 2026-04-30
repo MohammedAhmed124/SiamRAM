@@ -47,14 +47,14 @@ make_trt_engine: True
 
 trt_engine:
   lambda_tta: 0.1
-  fp16: False
+  fp16: True
   cuda_id: 0
 
 # --------------------------------------------------------------------------- #
 # SiamRAMTracker (Occlusion & DRM Management)
 # --------------------------------------------------------------------------- #
 ram_tracker:
-  yolo_weights: "yolo11n.pt"
+  yolo_weights: "checkpoints/yolo11n.pt"
   yolo_conf: 0.3
   yolo_filter_class: false
   yolo_class_detect_frames: 5

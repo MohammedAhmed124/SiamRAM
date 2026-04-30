@@ -16,14 +16,16 @@ ENV UV_COMPILE_BYTECODE=1 \
     VIRTUAL_ENV=/app/.venv \
     PATH="/app/.venv/bin:$PATH"
 
-COPY pyproject.toml uv.lock ./
+COPY pyproject.cpu.toml uv.lock ./
+RUN cp pyproject.cpu.toml pyproject.toml
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --group cpu --no-install-project
+    uv sync --frozen --no-install-project
 
 COPY . .
+RUN cp pyproject.cpu.toml pyproject.toml
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --group cpu
+    uv sync --frozen
 
 CMD ["bash"]

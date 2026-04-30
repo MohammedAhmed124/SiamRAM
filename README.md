@@ -24,6 +24,7 @@ high-confidence matches — substantially reducing false reacquisitions caused b
 
 - [System Architecture](#system-architecture)
 - [Installation](#installation)
+- [Checkpoints](#checkpoints)
 - [Quick Start](#quick-start)
 - [Project Structure](#project-structure)
 - [Authors](#authors)
@@ -82,6 +83,35 @@ For Docker, VSCode Devcontainer, and local `uv` options see the dedicated guides
 - [CPU-only Installation Guide](docs/install-CPU.md) — covers Native Docker, VSCode Devcontainer, and local `uv` without
   GPU
 
+## Checkpoints
+
+SiamRAM uses two weight files in `checkpoints/`:
+
+- `head_epoch_000.pth`
+- `yolo11n.pt`
+
+Download them manually with the provided scripts:
+
+- Linux/macOS:
+
+```bash
+./checkpoints/download-checkpoints.sh
+```
+
+- Windows:
+
+```bat
+checkpoints\download-checkpoints.bat
+```
+
+- Direct Python (all platforms):
+
+```bash
+python checkpoints/download_checkpoints.py
+```
+
+`run_inference.py` now auto-downloads these checkpoints if they are missing.
+
 ## Quick Start
 
 The script assumes the AIC-4 competition data layout:
@@ -100,7 +130,7 @@ data/
 All default paths are resolved relative to the repository root, so the script works correctly regardless of which
 directory you invoke it from.
 
-Place your model weights under `checkpoints/` and your data under `data/`, then run with defaults:
+Place your data under `data/`, then run with defaults:
 
 ```bash
 python run_inference.py
@@ -176,10 +206,9 @@ SiamRAM/
 If you find SiamRAM useful in your research, please cite:
 
 ```bibtex
-@misc{siamram2024,
+@misc{siamram2026,
   author       = {Metwally, Mohammed and Abdulhafiz, Yousif and Lotfy, Ahmed and Guirgis, Philopater and Elhassanein, Soliman},
-  title        = {SiamRAM: Robust Long-Term Visual Tracking with
-                  Distractor-Aware Reacquisition Memory},
+  title        = {{SiamRAM}: Robust Long-Term Visual Tracking with Distractor-Aware Reacquisition Memory},
   year         = {2026},
   howpublished = {\url{https://github.com/MohammedAhmed124/SiamRAM}},
 }

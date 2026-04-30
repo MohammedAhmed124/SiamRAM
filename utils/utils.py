@@ -13,13 +13,13 @@ from numpy._typing import NDArray
 from torch import Tensor
 from torch.nn import Module
 
-
 def _extract_descriptor(
     frame: np.ndarray,
     bbox,
     size: int = 16,
     w_gray: float = 0.4,
     w_color: float = 0.6,
+    _PROC_SIZE: int = 64,          # all color work at this resolution
 ) -> Optional[np.ndarray]:
     x, y, w, h = map(int, bbox)
     x, y = max(0, x), max(0, y)
@@ -28,19 +28,23 @@ def _extract_descriptor(
     if patch.size == 0:
         return None
 
-    gray = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
-    p = cv2.resize(gray, (size, size)).flatten().astype(np.float32)
-    p = p / (np.linalg.norm(p) + 1e-8)
+    # ── Resize FIRST — do all expensive color ops on the small patch ─────────
+    # For a 200×200 object: was 40K pixels × 3 ops, now 4K × 3 ops (10× less)
+    small = cv2.resize(patch, (_PROC_SIZE, _PROC_SIZE),
+                       interpolation=cv2.INTER_LINEAR)
 
-    hsv = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)
+    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+    p = cv2.resize(gray, (size, size)).flatten().astype(np.float32)
+    p /= np.linalg.norm(p) + 1e-8
+
+    hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
     h_hist = cv2.calcHist([hsv], [0, 1, 2], None, [8, 4, 4],
                           [0, 180, 0, 256, 0, 256]).flatten().astype(np.float32)
-    h_hist = h_hist / (np.linalg.norm(h_hist) + 1e-8)
+    h_hist /= np.linalg.norm(h_hist) + 1e-8
 
     desc = np.concatenate([w_gray * p, w_color * h_hist])
     norm = np.linalg.norm(desc)
     return desc / (norm + 1e-8)
-
 
 def _iou(a, b) -> float:
     ax2, ay2 = a[0] + a[2], a[1] + a[3]
@@ -168,8 +172,7 @@ def get_extended_crop(image, bbox, crop_size, context, padding_value=None):
         Tuple[np.ndarray, np.ndarray, np.ndarray]:
             (resized_crop, bbox_in_crop, context_rect).
     """
-    if padding_value is None:
-        padding_value = np.mean(image, axis=(0, 1))
+
 
     pad_left = max(-context[0], 0)
     pad_top = max(-context[1], 0)
@@ -181,14 +184,17 @@ def get_extended_crop(image, bbox, crop_size, context, padding_value=None):
         context[0] + pad_left: context[0] + context[2] - pad_right,
     ]
 
-    if not crop.flags['C_CONTIGUOUS']:
-        crop = np.ascontiguousarray(crop)
-
     if pad_top or pad_bottom or pad_left or pad_right:
+        if not crop.flags['C_CONTIGUOUS']:
+            crop = np.ascontiguousarray(crop)
         crop = cv2.copyMakeBorder(
             crop, pad_top, pad_bottom, pad_left, pad_right,
             cv2.BORDER_CONSTANT, value=padding_value,
         )
+    elif not crop.flags['C_CONTIGUOUS']:
+        crop = np.ascontiguousarray(crop)  # ← always needed before resize
+
+    resized = cv2.resize(crop, (crop_size, crop_size), interpolation=cv2.INTER_LINEAR)
 
     sx = crop_size / crop.shape[1]
     sy = crop_size / crop.shape[0]
@@ -199,7 +205,6 @@ def get_extended_crop(image, bbox, crop_size, context, padding_value=None):
         bbox[3] * sy,
     ])
 
-    resized = cv2.resize(crop, (crop_size, crop_size), interpolation=cv2.INTER_LINEAR)
     padded_bbox = ensure_bbox_boundaries(padded_bbox.astype(np.int32), resized.shape[:2])
     return resized, padded_bbox, context
 

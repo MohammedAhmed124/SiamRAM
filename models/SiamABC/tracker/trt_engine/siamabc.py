@@ -5,44 +5,44 @@ Drop-in TensorRT replacement for SiamABCNet for use inside SiamABCTracker.
 
 Architecture
 ------------
-get_features      → fully TRT-compiled (encoder + neck)
+get_features      → ONE dynamic-shape TRT engine (encoder + neck).
+                    Built via torch.jit.trace + torch_tensorrt.compile
+                    (TorchScript backend).  Handles both template (e.g. 128)
+                    and search (e.g. 256) crop sizes in a single engine.
+
+                    Why TorchScript and not torch.export / dynamo?
+                      Every torch.export path — strict=True or strict=False —
+                      runs produce_guards after tracing and raises
+                      ConstraintViolationError when the backbone's stride-2
+                      divisibility guard Ne(Mod(((size-1)//2), 2), 0) is not
+                      satisfied for every integer in [min_hw, max_hw].
+                      The TorchScript backend is purely trace-based: it records
+                      ops on a dummy input and never inspects symbolic shape
+                      guards.  A single dynamic-shape TRT profile then covers
+                      both discrete crop sizes without any guard validation.
 
 track             → SPLIT into two stages:
-  Stage 1 (TRT)  : polarized_self_attention + attention_neck
-                   Single dynamic-shape engine covering both spatial resolutions.
-                   One engine = one kernel family = numerically consistent
-                   t_mixed / s_mixed for BoxTower cross-correlation.
-  Stage 2 (torch.compile, FP32) : connect_model  (BoxTower + AdaptiveBatchNorm)
-                   AdaptiveBatchNorm has Python-level control flow that TRT's
-                   dynamo tracer cannot lower; torch.compile handles it fine.
-                   IMPORTANT: connect_model is kept in FP32 to preserve the
-                   classification score precision that all SiamRAMTracker
-                   thresholds (conf_threshold, reacq_threshold, etc.) depend on.
+  Stage 1 (torch.compile, FP32) : polarized_self_attention + attention_neck
+                   Single dynamic-shape compiled module — one kernel family =
+                   numerically consistent t_mixed / s_mixed for cross-corr.
+  Stage 2 (FP32) : connect_model (BoxTower + AdaptiveBatchNorm)
+                   AdaptiveBatchNorm has Python-level control flow TRT cannot
+                   lower.  Kept FP32 for classification score precision.
 
-Why not cast connect_model to FP16?
-  The cls_pred sigmoid output feeds hard thresholds (0.55, 0.70, 0.80) in
-  SiamRAMTracker. FP16 reduces pre-sigmoid logit precision near 0, causing
-  borderline-good scores (~0.56) to round below threshold, triggering spurious
-  occlusion entry every frame and halving tracking performance. The encoder/neck
-  (the bulk of compute) still runs in FP16 for speed.
+Why not FP16 for connect_model?
+  cls_pred sigmoid feeds hard thresholds (0.55, 0.70, 0.80).  FP16 logit
+  precision near 0 causes borderline scores (~0.56) to fall below threshold
+  → spurious occlusion every frame.  Encoder/neck still run FP16 for speed.
 
-Why a single dynamic-shape attention engine (not two separate engines)?
-  Two separate TRT engines for 8x8 and 16x16 pick different CUDA kernel
-  implementations (different tile sizes, Softmax reduction strategies). This
-  puts t_mixed and s_mixed in slightly different numerical spaces, which corrupts
-  the matmul in CorrelationConcatAtt. A single engine with a dynamic shape
-  profile uses one consistent kernel family for both spatial sizes.
-
-Bug fixes applied vs previous version
---------------------------------------
-  1. Engine built AFTER shape probing — template_hw/search_hw now come from the
-     actual probed shapes (h_t, h_s), not hardcoded 8/16.
-  2. adjust_channels default corrected from 512 → 256 (SiamABCNet default).
-     channels passed to engine = 256*2 = 512, not 1024.
-  3. Dead two-engine code (_trt_attn_template / _trt_attn_search) removed.
-  4. _AttentionNeck now deep-copies weights (was holding live references).
-  5. _warm_connect_model dummy_kernel uses C_s (neck output channels = 256),
-     not C_t (raw feature channels from encoder).
+Bug fixes
+---------
+  1. Engine built after shape probing (shapes from actual forward pass).
+  2. adjust_channels default corrected 512 → 256.
+  3. Dead two-engine attention code removed.
+  4. _AttentionNeck deep-copies weights.
+  5. _warm_connect_model dummy uses C_s not C_t.
+  6. Single dynamic backbone TRT engine via TorchScript backend — no
+     torch.export, no symbolic guard validation, no ConstraintViolationError.
 
 Delegated / no-op:
     modules()                   → original model (AdaptiveBatchNorm discovery)
@@ -59,11 +59,12 @@ import torch.nn as nn
 import torch_tensorrt
 
 from ...model import constants
-from .trt_utils import _AttentionNeck, _FeatureExtractorModule, _cast_module, _trt_input
+from .trt_utils import _AttentionNeck, _FeatureExtractorModule, _cast_module
+from .connector import _build_connect_engines, _dispatch_connect
+from ...model.adaptive_batch_norm import AdaptiveBatchNorm  
+
 
 log = logging.getLogger(__name__)
-from .connector import _build_connect_engines, _dispatch_connect
-
 logging.getLogger("torch_tensorrt").setLevel(logging.ERROR)
 logging.getLogger("torch_tensorrt.dynamo.conversion").setLevel(logging.ERROR)
 
@@ -74,17 +75,16 @@ class TRTSiamABCNet:
 
     Parameters
     ----------
-    model          : trained SiamABCNet — already .cuda().eval(), kept in FP32
-    template_size  : spatial H/W of template crop (e.g. 64)
-    instance_size  : spatial H/W of search  crop  (e.g. 128)
-    norm_lambda    : TTA blending weight
-    cuda_id        : GPU index
-    fp16           : use FP16 for TRT encoder/neck engines ONLY —
-                     attention engine is always FP32 (numerical consistency),
-                     connect_model is always FP32 (score threshold precision)
-    adjust_channels: neck output channels — must match SiamABCNet config
-                     (FIX 2: default corrected to 256, was wrongly 512)
-    min/opt/max_batch: TRT dynamic-shape batch-size range (1/1/1 for tracking)
+    model           : trained SiamABCNet — .cuda().eval(), kept FP32
+    template_size   : spatial H/W of template crop (e.g. 128)
+    instance_size   : spatial H/W of search  crop  (e.g. 256)
+    norm_lambda     : TTA blending weight
+    cuda_id         : GPU index
+    fp16            : FP16 for TRT backbone engine only;
+                      attention + connect_model are always FP32
+    adjust_channels : neck output channels — must match SiamABCNet config
+                      (default corrected to 256, was wrongly 512)
+    min/opt/max_batch: TRT batch-size range (1/1/1 for single-object tracking)
     """
 
     def __init__(
@@ -98,10 +98,10 @@ class TRTSiamABCNet:
         min_batch: int = 1,
         opt_batch: int = 1,
         max_batch: int = 1,
-        adjust_channels: int = 256,  # FIX 2: was 512 — SiamABCNet default is 256
+        adjust_channels: int = 256,
     ) -> None:
 
-        self._model = model.eval()  # original FP32 — never mutated
+        # self._model = model.eval()
         self._norm_lambda = norm_lambda
         self._device = torch.device(f"cuda:{cuda_id}")
         self._fp16 = fp16
@@ -112,8 +112,10 @@ class TRTSiamABCNet:
         enabled_precisions: Set[torch.dtype] = (
             {torch.float16} if fp16 else {torch.float32}
         )
-        batch = (min_batch, opt_batch, max_batch)
 
+        # ------------------------------------------------------------------ #
+        # Probe output shapes (needed for connect engine + attention warmup)  #
+        # ------------------------------------------------------------------ #
         with torch.no_grad():
             _t = torch.randn(opt_batch, 3, template_size, template_size,
                              device=self._device, dtype=torch.float32)
@@ -125,23 +127,36 @@ class TRTSiamABCNet:
         _, C, h_t, w_t = t_feat_shape
         _, _, h_s, w_s = s_feat_shape
 
-        self._trt_feat_template = self._compile_feat(
-            model, template_size, *batch, enabled_precisions,
-        )
-        self._trt_feat_search = self._compile_feat(
-            model, instance_size, *batch, enabled_precisions,
+        # ------------------------------------------------------------------ #
+        # Single dynamic-shape TRT backbone engine (TorchScript backend)     #
+        # ------------------------------------------------------------------ #
+        self._trt_feat = self._compile_feat(
+            model,
+            min_hw=template_size,
+            opt_hw=template_size,
+            max_hw=instance_size,
+            min_batch=min_batch,
+            opt_batch=opt_batch,
+            max_batch=max_batch,
+            enabled_precisions=enabled_precisions,
         )
 
+        # ------------------------------------------------------------------ #
+        # Attention + neck — torch.compile, FP32, dynamic shape              #
+        # ------------------------------------------------------------------ #
         _attn_mod = _AttentionNeck(model).eval().to(self._device).float()
         self._trt_attn = torch.compile(_attn_mod, dynamic=True, fullgraph=True)
 
-        # Warm both shapes so Inductor compiles both specializations now, not lazily
+        # Warm both sizes eagerly so Inductor compiles both specializations now
         with torch.no_grad():
             for hw in (h_t, h_s):
                 _dummy = torch.randn(1, adjust_channels * 2, hw, hw,
                                      device=self._device, dtype=torch.float32)
                 self._trt_attn(_dummy)
 
+        # ------------------------------------------------------------------ #
+        # BoxTower connect engines (FP32)                                     #
+        # ------------------------------------------------------------------ #
         self._connect_engines = _build_connect_engines(
             model,
             s_feat_shape=s_feat_shape,
@@ -157,22 +172,41 @@ class TRTSiamABCNet:
     def _compile_feat(
         self,
         model: nn.Module,
-        crop_size: int,
+        min_hw: int,
+        opt_hw: int,
+        max_hw: int,
         min_batch: int,
         opt_batch: int,
         max_batch: int,
         enabled_precisions: Set[torch.dtype],
     ) -> torch.nn.Module:
+        """
+        Trace the backbone+neck with TorchScript, then compile a single
+        dynamic-shape TRT engine covering [min_hw, max_hw].
+
+        torch.jit.trace records concrete ops on the dummy tensor without
+        building a symbolic shape graph — no produce_guards, no
+        ConstraintViolationError.  The resulting ScriptModule is handed to
+        torch_tensorrt.compile which builds one TRT engine with a dynamic
+        spatial profile.
+        """
         mod = _FeatureExtractorModule(model).eval().to(self._device)
         _cast_module(mod, self._dtype)
 
+        dummy = torch.randn(opt_batch, 3, opt_hw, opt_hw,
+                            device=self._device, dtype=self._dtype)
+
+        with torch.no_grad():
+            scripted = torch.jit.trace(mod, dummy)
+
         return torch_tensorrt.compile(
-            mod,
+            scripted,
             inputs=[
-                _trt_input(
-                    (1, 3, crop_size, crop_size),
-                    min_batch, opt_batch, max_batch,
-                    self._dtype,
+                torch_tensorrt.Input(
+                    min_shape=(min_batch, 3, min_hw, min_hw),
+                    opt_shape=(opt_batch, 3, opt_hw, opt_hw),
+                    max_shape=(max_batch, 3, max_hw, max_hw),
+                    dtype=self._dtype,
                 )
             ],
             enabled_precisions=enabled_precisions,
@@ -186,23 +220,18 @@ class TRTSiamABCNet:
     def get_features(self, crop: torch.Tensor) -> torch.Tensor:
         """
         Mirrors SiamABCNet.get_features(crop).
-        Dispatches to the correct TRT engine by spatial size.
+        Both template and search crops routed through the single TRT engine.
         Always returns float32 so downstream code works correctly.
         """
         _b, _c, h, _w = crop.shape
-        crop = crop.to(dtype=self._dtype, device=self._device)
-
-        if h == self._template_size:
-            out = self._trt_feat_template(crop)
-        elif h == self._instance_size:
-            out = self._trt_feat_search(crop)
-        else:
+        if h not in (self._template_size, self._instance_size):
             raise ValueError(
                 f"get_features: unexpected crop height {h}. "
                 f"Expected {self._template_size} (template) or "
                 f"{self._instance_size} (search)."
             )
-        return out.float().contiguous()
+        crop = crop.to(dtype=self._dtype, device=self._device)
+        return self._trt_feat(crop).float().contiguous()
 
     def track(
         self,
@@ -216,20 +245,19 @@ class TRTSiamABCNet:
         def _cast(t: torch.Tensor) -> torch.Tensor:
             return t.to(dtype=self._dtype, device=self._device)
 
-        sf = _cast(search_features)
+        sf  = _cast(search_features)
         dsf = _cast(dynamic_search_features)
-        tf = _cast(template_features)
+        tf  = _cast(template_features)
         dtf = _cast(dynamic_template_features)
 
-        # Concatenate pairs and pass through single attention engine.
-        # .float() ensures FP32 input to the FP32 attention engine.
-        # .contiguous() forces NCHW — TRT outputs can be channel-last which
-        # silently corrupts conv-based modules downstream.
-        t_combined = torch.cat([tf.float(), dtf.float()], dim=1).contiguous()
-        s_combined = torch.cat([dsf.float(), sf.float()], dim=1).contiguous()
+        # .float()      → FP32 for attention engine
+        # .contiguous() → enforce NCHW; TRT/Inductor can emit channel-last
+        #                  tensors which silently corrupt downstream conv ops
+        t_combined = torch.cat([tf.float(),  dtf.float()], dim=1).contiguous()
+        s_combined = torch.cat([dsf.float(), sf.float()],  dim=1).contiguous()
 
-        t_mixed = self._trt_attn(t_combined).contiguous()  # (B, C, h_t, w_t)
-        s_mixed = self._trt_attn(s_combined).contiguous()  # (B, C, h_s, w_s)
+        t_mixed = self._trt_attn(t_combined).contiguous()
+        s_mixed = self._trt_attn(s_combined).contiguous()
 
         bbox_pred, cls_pred = _dispatch_connect(
             self._connect_engines,
@@ -242,14 +270,28 @@ class TRTSiamABCNet:
 
         return {
             constants.TARGET_REGRESSION_LABEL_KEY: bbox_pred.float(),
-            constants.TARGET_CLASSIFICATION_KEY: cls_pred.float(),
+            constants.TARGET_CLASSIFICATION_KEY:   cls_pred.float(),
             constants.TRACKER_TARGET_SEARCH_SIM_SCORE: None,
-            constants.TRACKER_ATTENTION_MAP: s_mixed.float(),
+            constants.TRACKER_ATTENTION_MAP:        s_mixed.float(),
         }
 
+    # def modules(self):
+    #     """Delegated to original FP32 model for AdaptiveBatchNorm discovery."""
+    #     return self._model.modules()
+
+
+
     def modules(self):
-        """Delegated to the original FP32 model for AdaptiveBatchNorm discovery."""
-        return self._model.modules()
+        """
+        Minimal shim so SiamABCTracker.__init__ can discover _norm_lambda via
+            next((m._norm_lambda for m in self.net.modules()
+                if isinstance(m, AdaptiveBatchNorm)), 0.1)
+        No FP32 model is retained — only a bare AdaptiveBatchNorm shell whose
+        sole attribute is _norm_lambda.
+        """
+        proxy = AdaptiveBatchNorm.__new__(AdaptiveBatchNorm)
+        proxy._norm_lambda = self._norm_lambda
+        yield proxy
 
     def invalidate_template_cache(self) -> None:
         """No-op — TRT engines are stateless."""
@@ -302,7 +344,6 @@ def get_trt_tracker(
         norm_lambda=lambda_tta,
         cuda_id=cuda_id,
         fp16=fp16,
-        # adjust_channels defaults to 256 — override here if your config differs
     )
 
     tracker: SiamABCTracker = instantiate(config["tracker"], model=trt_model)

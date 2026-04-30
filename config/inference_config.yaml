@@ -43,6 +43,7 @@ tracker:
 
 
 
+make_trt_engine: True
 
 trt_engine:
   lambda_tta: 0.1
@@ -57,7 +58,7 @@ ram_tracker:
   yolo_conf: 0.3
   yolo_filter_class: false
   yolo_class_detect_frames: 5
-  copile_yolo: True
+  copile_yolo: False
   
   # Core Thresholds & Hysteresis
   conf_threshold: 0.55
@@ -115,6 +116,9 @@ ram_tracker:
   tiny_search_expand_growth_factor: 1.3
   tiny_search_expand_growth_every: 50
   tiny_search_expand_max: 40.0
+
+
+  disable_camera_motion: False
   
   # Logging
   debug: false

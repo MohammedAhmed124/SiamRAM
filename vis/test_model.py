@@ -186,46 +186,6 @@ def run_inference(
     output_path: str = "outputs/tracked_video.mp4",
     output_video: bool = True,
 ):
-    """
-    Inputs:
-        initial_bbox - [x, y, w, h] ground-truth bounding box in the first frame
-        video_path   - path to the input video file
-        tracker      - EdgeDAMTracker instance (or a bare SiamABC tracker)
-        output_path  - where to write the annotated output video;
-                       also determines the bbox .txt file location
-                       (ignored when output_video=False)
-        output_video - if True, renders and saves the full annotated video with
-                       side panels, overlays, and status pill; if False, only
-                       runs tracking and writes the per-frame bbox .txt file.
-                       Set to False when you need bbox outputs fast without the
-                       overhead of video encoding and drawing.
-
-    What it does:
-        Initialises the tracker on the first frame, then loops over every
-        subsequent frame calling tracker.update(). When output_video=True it
-        also builds a composite canvas each frame (frame + two side panels),
-        draws the predicted bbox, YOLO candidates, search ROI, status pill, HUD
-        text, and legend, then encodes the frame into an AVI which is renamed to
-        output_path at the end.
-
-        Regardless of output_video, every predicted bbox is saved to a .txt file
-        next to the video output (one bbox per line, space-separated x y w h).
-
-        At the end prints a latency report broken down into normal tracking frames
-        and occlusion recovery frames.
-
-    Outputs:
-        None. Side effects:
-            - Writes tracked_bboxes to  <bbox_dir>/<video_name>.txt
-            - If output_video=True, writes the annotated video to output_path
-            - Prints a latency summary to stdout
-
-    Why / where:
-        Top-level entry point for evaluating or visualising the tracker on a
-        video file. The output_video flag means the same function can be used
-        both for quick evaluation runs (False — minimal overhead, fast) and for
-        producing demo videos for inspection (True).
-    """
     is_dam = hasattr(tracker, 'tracker')
     inner_tracker = tracker.tracker if is_dam else tracker
 
@@ -242,7 +202,7 @@ def run_inference(
         raise RuntimeError(f"Cannot open video: {video_path}")
 
     fps = cap.get(cv2.CAP_PROP_FPS) or FPS_DEFAULT
-    int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
     ret, first_bgr = cap.read()
     if not ret or first_bgr is None:
@@ -250,6 +210,87 @@ def run_inference(
         raise RuntimeError(f"Cannot read first frame: {video_path}")
 
     h, w = first_bgr.shape[:2]
+
+    # ── FAST INFERENCE MODE ────────────────────────────────────────────────
+    if not output_video:
+        import time
+
+        tracker.initialize(first_bgr, initial_bbox)
+
+        # Pre-allocate bbox array — avoids list growth and per-frame append cost.
+        # Falls back to a growable list only when frame count is unavailable.
+        if total_frames > 0:
+            tracked_bboxes = np.empty((total_frames, 4), dtype=np.int32)
+            tracked_bboxes[0] = initial_bbox
+            bbox_idx = 1
+            use_preallocated = True
+        else:
+            tracked_bboxes = [initial_bbox]
+            use_preallocated = False
+
+        # Cache the bound method once — removes one attribute lookup per frame.
+        _update = tracker.update
+
+        frame_times: list[float] = []
+        frame_idx = 1
+
+        try:
+            while True:
+                ret, frame = cap.read()
+                if not ret or frame is None:
+                    break
+
+                t0 = time.perf_counter()
+                result = _update(frame)
+                frame_times.append((time.perf_counter() - t0) * 1000.0)
+
+                # Unpack only what we need — skip in_occlusion, yolo_dets.
+                bbox = result[0]
+
+                if use_preallocated:
+                    if bbox_idx < total_frames:
+                        tracked_bboxes[bbox_idx] = bbox
+                    else:
+                        # Frame count was wrong — fall back gracefully.
+                        tracked_bboxes = list(tracked_bboxes[:bbox_idx])
+                        tracked_bboxes.append(bbox)
+                        use_preallocated = False
+                else:
+                    tracked_bboxes.append(bbox)
+
+                bbox_idx += 1
+                frame_idx += 1
+
+        finally:
+            cap.release()
+
+        # Trim pre-allocated array if the video ended early.
+        if use_preallocated:
+            tracked_bboxes = tracked_bboxes[:bbox_idx]
+
+        # Single syscall — no per-line Python overhead.
+        np.savetxt(bbox_file, tracked_bboxes, fmt="%d", delimiter=" ")
+
+        def _stats_fast(name, arr):
+            if not arr:
+                print(f"{name:20s}  no data")
+                return
+            a = np.array(arr)
+            print(f"{name:20s}  n={len(a):4d}  "
+                  f"mean={a.mean():.1f}ms  "
+                  f"med={np.median(a):.1f}ms  "
+                  f"p95={np.percentile(a, 95):.1f}ms  "
+                  f"p99={np.percentile(a, 99):.1f}ms  "
+                  f"min={a.min():.1f}ms  "
+                  f"max={a.max():.1f}ms  "
+                  f"fps={1000 / a.mean():.1f}")
+
+        print("\n─── Latency Report (fast inference) ──────────────────────")
+        _stats_fast("ALL FRAMES", frame_times)
+        print("──────────────────────────────────────────────────────────\n")
+
+        gc.collect()
+        return
 
     if output_video:
         C_OCCLUDED = (0, 0, 220)
@@ -363,18 +404,18 @@ def run_inference(
                 times_normal.append(elapsed_ms)
 
             if output_video:
-                # cur_dyn_bbox = inner_tracker.running_dynamic_bbox
-                # cur_dyn_obj = inner_tracker.running_dynamic_crop
-                # template_updated = not np.array_equal(cur_dyn_bbox, last_dyn_bbox)
+                cur_dyn_bbox = inner_tracker.running_dynamic_bbox
+                cur_dyn_obj = inner_tracker.running_dynamic_image
+                template_updated = not np.array_equal(cur_dyn_bbox, last_dyn_bbox)
 
-                # if template_updated:
-                #     _refresh_panels(inner_tracker, cur_dyn_obj, panel_template,
-                #                     panel_search, frame_idx=frame_idx, updated=True)
-                #     last_dyn_bbox = cur_dyn_bbox.copy()
-                # else:
-                #     _stamp_panel(panel_template,
-                #                  f"Dynamic TEMPLATE  F:{frame_idx - 1}", updated=False)
-                #     _stamp_panel(panel_search, "SEARCH CTX", updated=False)
+                if template_updated:
+                    _refresh_panels(inner_tracker, cur_dyn_obj, panel_template,
+                                    panel_search, frame_idx=frame_idx, updated=True)
+                    last_dyn_bbox = cur_dyn_bbox.copy()
+                else:
+                    _stamp_panel(panel_template,
+                                 f"Dynamic TEMPLATE  F:{frame_idx - 1}", updated=False)
+                    _stamp_panel(panel_search, "SEARCH CTX", updated=False)
 
                 canvas.fill(0)
                 canvas[y_off: y_off + h, :w] = frame
@@ -383,8 +424,8 @@ def run_inference(
 
                 if in_occlusion:
                     cv2.rectangle(canvas, (w, 0), (total_w - 1, canvas_h - 1), C_OCCLUDED, 3)
-                # elif template_updated:
-                #     cv2.rectangle(canvas, (w, 0), (total_w - 1, canvas_h - 1), C_UPDATE, 2)
+                elif template_updated:
+                    cv2.rectangle(canvas, (w, 0), (total_w - 1, canvas_h - 1), C_UPDATE, 2)
 
                 native_h, native_w = frame.shape[:2]
                 long_edge = max(native_h, native_w)
@@ -433,8 +474,8 @@ def run_inference(
 
                 if in_occlusion:
                     hud = f"F:{frame_idx}  [DAM RECOVERY]"
-                # elif template_updated:
-                #     hud = f"F:{frame_idx}  [TMPL UPDATE]"
+                elif template_updated:
+                    hud = f"F:{frame_idx}  [TMPL UPDATE]"
                 else:
                     hud = f"F:{frame_idx}"
                 cv2.putText(canvas, hud, (156, y_off + 22), FONT, 0.45, C_FRAME, 1, cv2.LINE_AA)

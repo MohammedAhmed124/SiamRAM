@@ -88,6 +88,19 @@ def _regression_weight_label(
     r_pos: int = 2,
     r_neg: int = 0,
 ) -> torch.Tensor:
+    """
+    Generate a Gaussian-like label map for bounding box regression.
+
+    Args:
+        bbox (np.ndarray): Target bounding box [x, y, w, h].
+        image_size (int): Size of the input image.
+        map_size (int): Size of the output score map.
+        r_pos (int): Radius for positive labels.
+        r_neg (int): Radius for negative labels.
+
+    Returns:
+        torch.Tensor: The regression weight label map.
+    """
     bbox_c_x = bbox[0] + bbox[2] / 2.0
     bbox_c_y = bbox[1] + bbox[3] / 2.0
 
@@ -211,6 +224,9 @@ class TrackingSequence:
     def _load_bboxes(
         self,
     ) -> None:
+        """
+        Load bounding boxes from the annotation file into memory.
+        """
         if self._bboxes is not None:
             return
         bboxes: List[np.ndarray] = []
@@ -437,12 +453,27 @@ class UAVTrackingDataset(Dataset):
     def __len__(
         self,
     ) -> int:
+        """
+        Get the total number of samples per epoch.
+
+        Returns:
+            int: Number of samples.
+        """
         return self.num_samples
 
     def __getitem__(
         self,
         _idx: int,
     ) -> Dict[str, torch.Tensor]:
+        """
+        Fetch a positive or negative training sample.
+
+        Args:
+            _idx (int): Ignored index (random sampling is used).
+
+        Returns:
+            Dict[str, torch.Tensor]: A dictionary containing the training pair tensors.
+        """
         for attempt in range(5):
             try:
                 if self.rng.random() >= self.neg_ratio:
@@ -457,6 +488,12 @@ class UAVTrackingDataset(Dataset):
     def _positive_sample(
         self,
     ) -> Dict[str, torch.Tensor]:
+        """
+        Generate a positive training sample pair.
+
+        Returns:
+            Dict[str, torch.Tensor]: Dictionary containing positive template and search crops.
+        """
         for _ in range(10):
             seq = self.rng.choice(self.sequences)
 
@@ -878,6 +915,16 @@ class UAVTrackingDataset(Dataset):
         img: np.ndarray,
         bbox: np.ndarray,
     ) -> Optional[torch.Tensor]:
+        """
+        Helper to extract and preprocess a template crop.
+
+        Args:
+            img (np.ndarray): Source image.
+            bbox (np.ndarray): Bounding box.
+
+        Returns:
+            Optional[torch.Tensor]: Preprocessed template crop or None if invalid.
+        """
         bbox = clamp_bbox(bbox, img.shape)
         if not self.is_valid_bbox(bbox):
             return None
@@ -900,6 +947,16 @@ class UAVTrackingDataset(Dataset):
         img: np.ndarray,
         bbox: np.ndarray,
     ) -> Optional[torch.Tensor]:
+        """
+        Helper to extract and preprocess a search crop.
+
+        Args:
+            img (np.ndarray): Source image.
+            bbox (np.ndarray): Bounding box.
+
+        Returns:
+            Optional[torch.Tensor]: Preprocessed search crop or None if invalid.
+        """
         bbox = clamp_bbox(bbox, img.shape)
         if not self.is_valid_bbox(bbox):
             return None
@@ -930,6 +987,23 @@ class UAVTrackingDataset(Dataset):
         is_positive: bool,
         path: Optional[str] = None,
     ) -> Dict[str, torch.Tensor]:
+        """
+        Pack the crops and labels into a standard dictionary format.
+
+        Args:
+            template: Base template crop.
+            dynamic_template: Dynamic template crop.
+            search: Search crop.
+            dynamic_search: Dynamic search crop.
+            cls_label (np.ndarray): Classification label map.
+            bbox_label (np.ndarray): Bounding box regression map.
+            reg_weight (np.ndarray): Regression weight map.
+            is_positive (bool): Whether the sample is positive.
+            path (Optional[str]): Path to the search frame image.
+
+        Returns:
+            Dict[str, torch.Tensor]: Formatted training sample.
+        """
         return {
             "template": self._to_tensor(template),
             "dynamic_template": self._to_tensor(dynamic_template),
@@ -945,6 +1019,12 @@ class UAVTrackingDataset(Dataset):
     def _dummy_negative(
         self,
     ) -> Dict[str, torch.Tensor]:
+        """
+        Generate a zero-filled dummy negative sample as a fallback.
+
+        Returns:
+            Dict[str, torch.Tensor]: Dummy sample dictionary.
+        """
         S, T, i = self.score_size, self.template_size, self.instance_size
         return {
             "template": torch.zeros(3, T, T),
@@ -962,6 +1042,15 @@ class UAVTrackingDataset(Dataset):
     def _load_image(
         path: str,
     ) -> np.ndarray:
+        """
+        Load an image from disk and convert it to RGB.
+
+        Args:
+            path (str): File path to the image.
+
+        Returns:
+            np.ndarray: Loaded RGB image.
+        """
         img = cv2.imread(path)
         if img is None:
             raise FileNotFoundError(f"Could not read image: {path}")
@@ -971,6 +1060,15 @@ class UAVTrackingDataset(Dataset):
     def _to_tensor(
         x,
     ) -> torch.Tensor:
+        """
+        Convert a numpy array or tensor to a float tensor.
+
+        Args:
+            x: Input array or tensor.
+
+        Returns:
+            torch.Tensor: Float tensor.
+        """
         if isinstance(x, torch.Tensor):
             return x.float()
         return torch.from_numpy(x).float()
@@ -980,6 +1078,16 @@ class UAVTrackingDataset(Dataset):
         image: np.ndarray,
         transform: Callable,
     ) -> torch.Tensor:
+        """
+        Apply albumentations transforms and convert image to batch format.
+
+        Args:
+            image (np.ndarray): Source image.
+            transform (Callable): Transform pipeline.
+
+        Returns:
+            torch.Tensor: Preprocessed image tensor.
+        """
         img = transform(image[:, :, :3])
         if image.shape[2] > 3:
             img = np.concatenate([img, image[:, :, 3:]], axis=2)
@@ -989,12 +1097,30 @@ class UAVTrackingDataset(Dataset):
     def _array_to_batch(
         x: np.ndarray,
     ) -> torch.Tensor:
+        """
+        Transpose image array from (H, W, C) to (C, H, W).
+
+        Args:
+            x (np.ndarray): Image array.
+
+        Returns:
+            torch.Tensor: Transposed tensor.
+        """
         return torch.from_numpy(np.transpose(x, (2, 0, 1)))
 
     def _get_default_transform(
         self,
         img_size: int,
     ) -> Callable:
+        """
+        Get the default image normalization transform.
+
+        Args:
+            img_size (int): Target image size.
+
+        Returns:
+            Callable: Transformation function.
+        """
         pipeline = albu.Compose(
             [
                 albu.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
@@ -1036,6 +1162,12 @@ class UAVTrackingDataset(Dataset):
     def _get_random_context(
         self,
     ) -> float:
+        """
+        Generate a randomized search context multiplier.
+
+        Returns:
+            float: Random context scale factor.
+        """
         return np.random.uniform(self.search_context * 0.8, self.search_context * 1.2)
 
     @staticmethod

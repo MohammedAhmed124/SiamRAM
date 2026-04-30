@@ -7,9 +7,10 @@ from numpy._typing import NDArray
 
 from utils.box_coder import SiamABCBoxCoder, TrackerDecodeResult
 from utils.utils import clamp_bbox, extend_bbox, get_extended_crop
-from .base_tracker import Tracker
+
 from ..model import constants
 from ..model.adaptive_batch_norm import AdaptiveBatchNorm
+from .base_tracker import Tracker
 
 
 class SiamABCTracker(Tracker):

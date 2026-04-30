@@ -43,19 +43,21 @@ dependencies = [
   "wandb>=0.26.1",
   "torch==2.11.0",
   "torchvision==0.26.0",
-  "torch-tensorrt==2.11.0",
 ]
 
 [tool.uv.sources]
 mobile_cv = { git = "https://github.com/facebookresearch/mobile-vision.git" }
-torch = { index = "pytorch-cu128" }
-torchvision = { index = "pytorch-cu128" }
-torch-tensorrt = { index = "pytorch-cu128" }
-tensorrt = { index = "pytorch-cu128" }
+torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }
 
 [[tool.uv.index]]
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
 explicit = true
 
 [dependency-groups]

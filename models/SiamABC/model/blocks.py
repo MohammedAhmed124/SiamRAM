@@ -11,8 +11,6 @@ from typing import Any, List, Tuple, Union
 
 import torch
 import torch.nn as nn
-
-# from models import neuron
 from mobile_cv.model_zoo.models.fbnet_v2 import fbnet
 from torchvision.models.resnet import resnet50
 
@@ -36,7 +34,7 @@ class AdaptiveSequential(nn.Sequential):
     at graph-build time (``isinstance`` is resolved at compile time).
     """
 
-    def forward(self, x: torch.Tensor, lam: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
+    def forward(self, x: torch.Tensor, lam: torch.Tensor) -> torch.Tensor:
         for module in self:
             if isinstance(module, AdaptiveBatchNorm):
                 x = module(x, lam)
@@ -102,7 +100,7 @@ class FastParallelPolarizedSelfAttention(nn.Module):
 
         self.sigmoid = nn.Sigmoid()
         self.sp_wq = nn.Conv2d(channel, channel // self.squeeze, kernel_size=(1, 1))
-        # self.sp_wz=nn.Conv2d(1,1,kernel_size=(1,1))
+
         self.agp = nn.AdaptiveAvgPool2d((1, 1))
 
     def forward(self, x1):
@@ -117,27 +115,24 @@ class FastParallelPolarizedSelfAttention(nn.Module):
         """
         b, c, h, w = x1.size()
 
-        wv = self.wv(x1)  # bs,c//2,h,w
-        wv = wv.reshape(b, c // self.squeeze, -1)  # bs,c//2,h*w
+        wv = self.wv(x1)
+        wv = wv.reshape(b, c // self.squeeze, -1)
 
-        # Channel-only Self-Attention
-        channel_wq = self.ch_wq(x1)  # bs,1,h,w
-        channel_wq = channel_wq.reshape(b, -1, 1)  # bs,h*w,1
+        channel_wq = self.ch_wq(x1)
+        channel_wq = channel_wq.reshape(b, -1, 1)
         channel_wq = self.softmax_channel(channel_wq)
         channel_wz = torch.sum(wv * channel_wq.permute(0, 2, 1), dim=2).unsqueeze(-1).unsqueeze(-1)
         channel_weight = self.ln(self.ch_wz(channel_wz).reshape(b, c, 1).permute(0, 2, 1)).permute(0, 2, 1).reshape(b,
                                                                                                                     c,
                                                                                                                     1,
-                                                                                                                    1)  # bs,c,1,1
+                                                                                                                    1)
 
-        # Spatial-only Self-Attention
-        spatial_wq = self.sp_wq(x1)  # bs,c,h,w
-        spatial_wq = self.agp(spatial_wq)  # bs,c,1,1
-        spatial_wq = spatial_wq.permute(0, 2, 3, 1).reshape(b, 1, c // self.squeeze)  # bs,1,c//2
+        spatial_wq = self.sp_wq(x1)
+        spatial_wq = self.agp(spatial_wq)
+        spatial_wq = spatial_wq.permute(0, 2, 3, 1).reshape(b, 1, c // self.squeeze)
         spatial_wq = self.softmax_spatial(spatial_wq)
         spatial_wz = torch.sum(spatial_wq.permute(0, 2, 1) * wv, dim=1).unsqueeze(1)
-        spatial_weight = spatial_wz.reshape(b, 1, h, w)  # bs,1,h,w
-        # spatial_weight=self.sp_wz(spatial_weight)
+        spatial_weight = spatial_wz.reshape(b, 1, h, w)
 
         out = (self.sigmoid(channel_weight) + self.sigmoid(spatial_weight)) * x1
 
@@ -179,7 +174,7 @@ class EncoderResNet(nn.Module):
             self.model.layer1,
             self.model.layer2,
             self.model.layer3,
-            # self.model.layer4,
+
         ]
         return layers
 
@@ -387,24 +382,20 @@ class BoxTower(nn.Module):
         super().__init__()
         tower = []
         cls_tower = []
-        # encode backbone
+
         self.cls_encode = EncodeBackbone(in_channels=inchannels, out_channels=outchannels, conv_block=conv_block)
         self.reg_encode = EncodeBackbone(in_channels=inchannels, out_channels=outchannels, conv_block=conv_block)
-
-        # self.cls_dw = Correlation2xConcat(num_channels=outchannels, conv_block=conv_block)
-        # self.reg_dw = Correlation2xConcat(num_channels=outchannels, conv_block=conv_block)
 
         self.cls_dw = CorrelationConcatAtt(num_channels=outchannels,
                                            inference_mode=inference_mode, norm_lambda=norm_lambda)
         self.reg_dw = CorrelationConcatAtt(num_channels=outchannels,
                                            inference_mode=inference_mode, norm_lambda=norm_lambda)
 
-        # box pred head
         for i in range(4):
             tower.append(ConvBlock(outchannels, outchannels, kernel_size=3, stride=1, padding=1))
             tower.append(_make_norm(outchannels, inference_mode, norm_lambda))
             tower.append(nn.ReLU())
-        # cls tower
+
         for i in range(towernum):
             cls_tower.append(ConvBlock(outchannels, outchannels, kernel_size=3, stride=1, padding=1))
             cls_tower.append(_make_norm(outchannels, inference_mode, norm_lambda))
@@ -413,24 +404,20 @@ class BoxTower(nn.Module):
         self.add_module("bbox_tower", AdaptiveSequential(*tower))
         self.add_module("cls_tower", AdaptiveSequential(*cls_tower))
 
-        # reg head
         self.bbox_pred = ConvBlock(outchannels, 4, kernel_size=3, stride=1, padding=1)
         self.cls_pred = ConvBlock(outchannels, 1, kernel_size=3, stride=1, padding=1)
 
-        # adjust scale
         self.adjust = nn.Parameter(0.1 * torch.ones(1))
         self.bias = nn.Parameter(torch.Tensor(1.0 * torch.ones(1, 4, 1, 1)))
 
-    def forward(self, search_org, search, kernel, lam: torch.Tensor):  # forward(self, search, dynamic, kernel):
+    def forward(self, search_org, search, kernel, lam: torch.Tensor):
 
-        # encode first
         cls_z = kernel.reshape(kernel.size(0), kernel.size(1), -1)
         cls_x = self.cls_encode(search)
 
         reg_z = kernel.reshape(kernel.size(0), kernel.size(1), -1)
         reg_x = self.reg_encode(search)
 
-        # cls and reg DW
         cls_dw = self.cls_dw(cls_z, cls_x, search_org, lam)
         reg_dw = self.reg_dw(reg_z, reg_x, search_org, lam)
 
@@ -438,7 +425,6 @@ class BoxTower(nn.Module):
         x = self.adjust * self.bbox_pred(x_reg) + self.bias
         x = torch.exp(x)
 
-        # cls tower
         c = self.cls_tower(cls_dw, lam)
         cls = 0.1 * self.cls_pred(c)
 
@@ -535,7 +521,7 @@ class CorrelationConcatAtt(nn.Module):
             _make_norm(num_channels, inference_mode, norm_lambda),
             nn.ReLU(inplace=True),
         )
-        # self.att = ParallelPolarizedSelfAttention(num_channels)
+
         self.att = FastParallelPolarizedSelfAttention(num_channels, 1)
 
     def forward(self, z, x, d, lam: torch.Tensor):

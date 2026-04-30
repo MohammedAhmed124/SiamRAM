@@ -14,7 +14,7 @@ class _FeatureExtractorModule(nn.Module):
     def __init__(self, net: nn.Module) -> None:
         super().__init__()
         self.encoder = copy.deepcopy(net.encoder)
-        self.neck    = copy.deepcopy(net.neck)
+        self.neck = copy.deepcopy(net.neck)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.neck(self.encoder(x))
@@ -38,14 +38,12 @@ class _AttentionNeck(nn.Module):
 
     def __init__(self, model: SiamABCNet) -> None:
         super().__init__()
-        # FIX 4: deep copy — do not hold live references into the original model
+
         self.attn = copy.deepcopy(model.polarized_self_attention)
         self.neck = copy.deepcopy(model.attention_neck)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.neck(self.attn(x))
-
-
 
 
 def _cast_module(module: nn.Module, dtype: torch.dtype) -> nn.Module:
@@ -54,11 +52,11 @@ def _cast_module(module: nn.Module, dtype: torch.dtype) -> nn.Module:
 
 
 def _trt_input(
-    shape:     Tuple[int, ...],
+    shape: Tuple[int, ...],
     min_batch: int,
     opt_batch: int,
     max_batch: int,
-    dtype:     torch.dtype,
+    dtype: torch.dtype,
 ) -> torch_tensorrt.Input:
     _b, *rest = shape
     return torch_tensorrt.Input(

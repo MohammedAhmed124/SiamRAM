@@ -15,7 +15,7 @@ def _run_nvidia_smi() -> tuple[bool, str]:
         )
         first_line = result.stdout.strip().splitlines()[0] if result.stdout.strip() else "no gpu rows returned"
         return True, first_line
-    except Exception as exc:  # pragma: no cover
+    except Exception as exc:
         return False, str(exc)
 
 

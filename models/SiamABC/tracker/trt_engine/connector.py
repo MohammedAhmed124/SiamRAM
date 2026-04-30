@@ -61,10 +61,6 @@ from torch_tensorrt.dynamo import compile as trt_dynamo_compile
 log = logging.getLogger(__name__)
 
 
-# --------------------------------------------------------------------------- #
-# Wrapper: serial BoxTower forward + lam as a buffer constant                 #
-# --------------------------------------------------------------------------- #
-
 class _ConnectModelForExport(nn.Module):
     """
     Wraps BoxTower so it is fully TRT-traceable:
@@ -84,9 +80,9 @@ class _ConnectModelForExport(nn.Module):
 
     def __init__(
         self,
-        net:     nn.Module,
+        net: nn.Module,
         lam_val: float,
-        device:  torch.device,
+        device: torch.device,
     ) -> None:
         super().__init__()
 
@@ -96,16 +92,16 @@ class _ConnectModelForExport(nn.Module):
             if hasattr(bt, attr):
                 delattr(bt, attr)
 
-        self.cls_encode  = bt.cls_encode
-        self.reg_encode  = bt.reg_encode
-        self.cls_dw      = bt.cls_dw
-        self.reg_dw      = bt.reg_dw
-        self.bbox_tower  = bt.bbox_tower
-        self.cls_tower   = bt.cls_tower
-        self.bbox_pred   = bt.bbox_pred
-        self.cls_pred    = bt.cls_pred
-        self.adjust      = bt.adjust
-        self.bias        = bt.bias
+        self.cls_encode = bt.cls_encode
+        self.reg_encode = bt.reg_encode
+        self.cls_dw = bt.cls_dw
+        self.reg_dw = bt.reg_dw
+        self.bbox_tower = bt.bbox_tower
+        self.cls_tower = bt.cls_tower
+        self.bbox_pred = bt.bbox_pred
+        self.cls_pred = bt.cls_pred
+        self.adjust = bt.adjust
+        self.bias = bt.bias
 
         self.register_buffer(
             "lam",
@@ -115,43 +111,38 @@ class _ConnectModelForExport(nn.Module):
     def forward(
         self,
         search_org: torch.Tensor,
-        search:     torch.Tensor,
-        kernel:     torch.Tensor,
+        search: torch.Tensor,
+        kernel: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         z = kernel.reshape(kernel.size(0), kernel.size(1), -1)
 
-        cls_x  = self.cls_encode(search)
+        cls_x = self.cls_encode(search)
         cls_dw = self.cls_dw(z, cls_x, search_org, self.lam)
-        c      = self.cls_tower(cls_dw, self.lam)
-        cls    = 0.1 * self.cls_pred(c)
+        c = self.cls_tower(cls_dw, self.lam)
+        cls = 0.1 * self.cls_pred(c)
 
-        reg_x  = self.reg_encode(search)
+        reg_x = self.reg_encode(search)
         reg_dw = self.reg_dw(z, reg_x, search_org, self.lam)
-        x_reg  = self.bbox_tower(reg_dw, self.lam)
-        x      = self.adjust * self.bbox_pred(x_reg) + self.bias
-        x      = torch.exp(x)
+        x_reg = self.bbox_tower(reg_dw, self.lam)
+        x = self.adjust * self.bbox_pred(x_reg) + self.bias
+        x = torch.exp(x)
 
         return x, cls
 
 
-# --------------------------------------------------------------------------- #
-# Engine builder                                                               #
-# --------------------------------------------------------------------------- #
-
 def _build_connect_engines(
-    model:        nn.Module,
+    model: nn.Module,
     s_feat_shape: Tuple[int, ...],
     t_feat_shape: Tuple[int, ...],
-    norm_lambda:  float,
-    device:       torch.device,
+    norm_lambda: float,
+    device: torch.device,
 ) -> Dict[str, torch.nn.Module]:
-
     _, C_s, h_s, w_s = s_feat_shape
-    _, _,   h_t, w_t = t_feat_shape
+    _, _, h_t, w_t = t_feat_shape
 
     dummy_search_org = torch.randn(1, C_s, h_s, w_s, device=device, dtype=torch.float32)
-    dummy_search     = torch.randn(1, C_s, h_s, w_s, device=device, dtype=torch.float32)
-    dummy_kernel     = torch.randn(1, C_s, h_t, w_t, device=device, dtype=torch.float32)
+    dummy_search = torch.randn(1, C_s, h_s, w_s, device=device, dtype=torch.float32)
+    dummy_kernel = torch.randn(1, C_s, h_t, w_t, device=device, dtype=torch.float32)
 
     trt_input_set = [
         torch_tensorrt.Input(shape=(1, C_s, h_s, w_s), dtype=torch.float32),
@@ -180,9 +171,8 @@ def _build_connect_engines(
 
         engine = trt_dynamo_compile(
             exported,
-            inputs=trt_input_set,   # FIX: was [trt_input_set] — extra wrapping
-                                    # caused tree spec mismatch (list of 3 inputs
-                                    # seen as single input containing a list)
+            inputs=trt_input_set,
+
             enabled_precisions={torch.float32},
             optimization_level=3,
             use_fast_partitioner=True,
@@ -199,17 +189,13 @@ def _build_connect_engines(
     return engines
 
 
-# --------------------------------------------------------------------------- #
-# Runtime dispatcher                                                           #
-# --------------------------------------------------------------------------- #
-
 def _dispatch_connect(
-    engines:      Dict[str, torch.nn.Module],
-    lam_val:      float,
-    norm_lambda:  float,
-    search_org:   torch.Tensor,
-    search:       torch.Tensor,
-    kernel:       torch.Tensor,
+    engines: Dict[str, torch.nn.Module],
+    lam_val: float,
+    norm_lambda: float,
+    search_org: torch.Tensor,
+    search: torch.Tensor,
+    kernel: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     tag = "zero" if abs(lam_val) < 1e-6 else "lambda"
     return engines[tag](search_org, search, kernel)

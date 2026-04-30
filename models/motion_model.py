@@ -18,7 +18,7 @@ class BBoxEKF:
     """
 
     DIM_X = 4
-    DIM_Z = 2  # we observe (cx, cy) only
+    DIM_Z = 2
 
     def __init__(self, bbox, process_noise: float = 2.0, meas_noise: float = 5.0,
                  vel_window: int = 100):

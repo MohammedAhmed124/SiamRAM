@@ -7,25 +7,22 @@ from numpy._typing import NDArray
 
 from utils.box_coder import SiamABCBoxCoder, TrackerDecodeResult
 from utils.utils import clamp_bbox, extend_bbox, get_extended_crop
-
+from .base_tracker import Tracker
 from ..model import constants
 from ..model.adaptive_batch_norm import AdaptiveBatchNorm
-from .base_tracker import Tracker
 
 
 class SiamABCTracker(Tracker):
     def __init__(self, model, cuda_id=0, **tracking_config):
         super().__init__(model, cuda_id, **tracking_config)
 
-        # Discover norm_lambda from the first AdaptiveBatchNorm in the net so
-        # enable_tta() knows what blending weight to restore.
         self._norm_lambda_tta: float = next(
             (m._norm_lambda for m in self.net.modules() if isinstance(m, AdaptiveBatchNorm)),
             0.1,
         )
-        # Scalar tensor passed to net.track / net.forward each call.
-        # 0.0 = TTA off (default); self._norm_lambda_tta = TTA on.
+
         self._tta_lam: torch.Tensor = torch.zeros(1, device=f"cuda:{cuda_id}")
+
     def get_box_coder(self, tracking_config, cuda_id: str | int = 0):
         return SiamABCBoxCoder(tracking_config)
 
@@ -47,7 +44,7 @@ class SiamABCTracker(Tracker):
 
         rect = clamp_bbox(rect, image.shape)
         self.tracking_state.bbox = rect
-        self._init_rect = rect.copy()  # ← add this
+        self._init_rect = rect.copy()
 
         self.tracking_state.pred_score = 1.0
         self.prev_good_bbox = rect
@@ -77,7 +74,7 @@ class SiamABCTracker(Tracker):
 
         self._best_idx = 0
         self._best_score = 0.5
-        self._is_full = False  # tracks whether deque has started evicti
+        self._is_full = False
 
     @torch.no_grad()
     def get_template_features(self, image, rect):
@@ -119,7 +116,6 @@ class SiamABCTracker(Tracker):
         return bbox[0] >= bbox_window[0] and bbox[1] >= bbox_window[1] and bbox[2] <= bbox_window[2] and bbox[3] <= \
             bbox_window[3]
 
-
     def _update_best_index(self, pred_score: float, evicting: bool) -> None:
         """
         O(1) amortized best-index maintenance.
@@ -128,19 +124,19 @@ class SiamABCTracker(Tracker):
         """
         if evicting:
             if self._best_idx == 0:
-                # Best was just dropped — rescan (new element already in deque)
+
                 scores = np.array(self.classification_scores, dtype=np.float16)
                 self._best_idx = int(np.argmax(scores))
                 self._best_score = float(scores[self._best_idx])
             else:
-                # Best survived — shift index left to account for eviction
+
                 self._best_idx -= 1
-                # Still check if new element beats it
+
                 if pred_score > self._best_score:
                     self._best_score = pred_score
                     self._best_idx = len(self.classification_scores) - 1
         else:
-            # No eviction — just check new element
+
             if pred_score > self._best_score:
                 self._best_score = pred_score
                 self._best_idx = len(self.classification_scores) - 1
@@ -169,7 +165,6 @@ class SiamABCTracker(Tracker):
     def update(self, search: NDArray, *kw):
         pred_bbox, pred_score, sim_score = self.run_track(search)
 
-        # Always update state
         self.tracking_state.bbox = pred_bbox
         self.tracking_state.pred_score = pred_score
         self.tracking_state.paths.append(pred_bbox)
@@ -188,14 +183,13 @@ class SiamABCTracker(Tracker):
 
             self._prev_bbox = pred_bbox.copy()
 
-
             if self.warmup_frames > 0 and self.idx == self.warmup_frames - 1:
-                full_imgs   = deque(self.all_memory_imgs,        maxlen=self.memory_window_size)
-                full_scores = deque(self.classification_scores,  maxlen=self.memory_window_size)
-                self.all_memory_imgs        = full_imgs
-                self.classification_scores  = full_scores
+                full_imgs = deque(self.all_memory_imgs, maxlen=self.memory_window_size)
+                full_scores = deque(self.classification_scores, maxlen=self.memory_window_size)
+                self.all_memory_imgs = full_imgs
+                self.classification_scores = full_scores
                 scores = np.array(self.classification_scores, dtype=np.float16)
-                self._best_idx   = int(np.argmax(scores))
+                self._best_idx = int(np.argmax(scores))
                 self._best_score = float(scores[self._best_idx])
 
             self.idx += 1
@@ -203,7 +197,6 @@ class SiamABCTracker(Tracker):
             if self.idx % self.N == 0:
                 self.select_representatives()
 
-            # Single EMA update, then clamp — fixes double-update bug
             self.running_confidence = (
                 self.update_lambda * pred_score
                 + (1 - self.update_lambda) * self.running_confidence
@@ -264,9 +257,7 @@ class SiamABCTracker(Tracker):
 
         h_fr, w_fr = search.shape[:2]
 
-        # Use the same context ratio as normal tracking so the feature extractor
-        # sees the same relative amount of context it was trained with.
-        context_ratio = self.tracking_config["search_context"]  # e.g. 2.0
+        context_ratio = self.tracking_config["search_context"]
 
         pad_w = cand_w * context_ratio
         pad_h = cand_h * context_ratio
@@ -283,7 +274,7 @@ class SiamABCTracker(Tracker):
         try:
             self.tracking_state.bbox = candidate_bbox.copy()
             self.tracking_state.mapping = padded_context.copy()
-            # search_context stays UNCHANGED — already the right ratio
+
             return self.run_track(search)
         finally:
             self.tracking_state.bbox = saved_bbox

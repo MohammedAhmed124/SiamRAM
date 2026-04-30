@@ -29,7 +29,6 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 import models.SiamABC.model.constants as constants
-
 from .losses import TrackingHeadLoss
 
 
@@ -42,21 +41,16 @@ class OptimizerParamGroup(TypedDict):
     name: str
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Model setup
-# ──────────────────────────────────────────────────────────────────────────────
-
 def freeze_backbone_only(model, verbose: bool = True) -> None:
     """
     Freeze the encoder (backbone) and leave everything after it trainable:
         neck, polarized_self_attention, attention_neck,
         connect_model, classifier, predictor, similarity_avgpool
     """
-    # ── Freeze encoder ────────────────────────────────────────────────────────
+
     for param in model.encoder.parameters():
         param.requires_grad = False
 
-    # ── Unfreeze everything else ──────────────────────────────────────────────
     trainable_modules = [
         model.neck,
         model.polarized_self_attention,
@@ -92,7 +86,7 @@ def get_trainable_optimizer(model, lr: float = 1e-4,
     Optionally use different LRs per group (neck vs heads).
     """
     param_groups: list[OptimizerParamGroup] = [
-        # Neck + attention: lower LR (closer to backbone, more sensitive)
+
         {
             "params": list(model.neck.parameters()) +
                       list(model.polarized_self_attention.parameters()) +
@@ -100,7 +94,7 @@ def get_trainable_optimizer(model, lr: float = 1e-4,
             "lr": lr * 0.5,
             "name": "neck_attention",
         },
-        # Box head: normal LR
+
         {
             "params": list(model.connect_model.parameters()),
             "lr": lr,
@@ -116,7 +110,6 @@ def get_trainable_optimizer(model, lr: float = 1e-4,
             "name": "simsiam_heads",
         })
 
-    # Safety net: make sure nothing frozen sneaks in
     for group in param_groups:
         group["params"] = [p for p in group["params"] if p.requires_grad]
 
@@ -139,7 +132,6 @@ def set_reg_bn_train(model):
                 m.train()
 
 
-# After model.train(), also freeze ALL BN outside cls branch:
 def set_bn_eval(model):
     """
     Set all BatchNorm layers in the model to evaluation mode.
@@ -164,10 +156,6 @@ def set_cls_bn_train(model):
                 m.train()
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Single epoch helpers
-# ──────────────────────────────────────────────────────────────────────────────
-
 def _train_one_epoch(
     model: nn.Module,
     loader: DataLoader,
@@ -184,9 +172,7 @@ def _train_one_epoch(
         dict with average 'total', 'cls_loss', 'bbox_loss' over the epoch.
     """
     model.train()
-    # set_bn_eval(model)
-    # set_cls_bn_train(model)  # Only unfreeze cls BN if we're fine-tuning the cls branch; otherwise keep all BN frozen to preserve pre-trained stats.
-    # set_reg_bn_train(model)
+
     running = defaultdict(float)
     t_start = time.time()
     n_steps = len(loader)
@@ -199,20 +185,16 @@ def _train_one_epoch(
         cls_label = batch["cls_label"].to(device)
         bbox_label = batch["bbox_label"].to(device)
 
-        # ── forward ──────────────────────────────────────────────────────────
-        # model.forward() returns a dict; we only use cls + bbox keys.
-        # SimSiam outputs are computed inside forward() but we don't add their
-        # loss here — gradients only flow through our criterion.
         out = model((template, dynamic_template, search, dynamic_search))
-        cls_pred = out[constants.TARGET_CLASSIFICATION_KEY]  # (B, 1, S, S)
-        bbox_pred = out[constants.TARGET_REGRESSION_LABEL_KEY]  # (B, 4, S, S)
+        cls_pred = out[constants.TARGET_CLASSIFICATION_KEY]
+        bbox_pred = out[constants.TARGET_REGRESSION_LABEL_KEY]
 
         reg_weight = batch["reg_weight"].to(device)
         losses = criterion(cls_pred, bbox_pred, cls_label, bbox_label, reg_weight)
 
         optimizer.zero_grad(set_to_none=True)
         losses["total"].backward()
-        # Clip gradients to prevent exploding updates in early fine-tuning
+
         nn.utils.clip_grad_norm_(
             [p for p in model.connect_model.parameters() if p.requires_grad],
             max_norm=5.0

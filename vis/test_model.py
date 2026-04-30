@@ -211,14 +211,11 @@ def run_inference(
 
     h, w = first_bgr.shape[:2]
 
-    # ── FAST INFERENCE MODE ────────────────────────────────────────────────
     if not output_video:
         import time
 
         tracker.initialize(first_bgr, initial_bbox)
 
-        # Pre-allocate bbox array — avoids list growth and per-frame append cost.
-        # Falls back to a growable list only when frame count is unavailable.
         if total_frames > 0:
             tracked_bboxes = np.empty((total_frames, 4), dtype=np.int32)
             tracked_bboxes[0] = initial_bbox
@@ -228,7 +225,6 @@ def run_inference(
             tracked_bboxes = [initial_bbox]
             use_preallocated = False
 
-        # Cache the bound method once — removes one attribute lookup per frame.
         _update = tracker.update
 
         frame_times: list[float] = []
@@ -244,14 +240,13 @@ def run_inference(
                 result = _update(frame)
                 frame_times.append((time.perf_counter() - t0) * 1000.0)
 
-                # Unpack only what we need — skip in_occlusion, yolo_dets.
                 bbox = result[0]
 
                 if use_preallocated:
                     if bbox_idx < total_frames:
                         tracked_bboxes[bbox_idx] = bbox
                     else:
-                        # Frame count was wrong — fall back gracefully.
+
                         tracked_bboxes = list(tracked_bboxes[:bbox_idx])
                         tracked_bboxes.append(bbox)
                         use_preallocated = False
@@ -264,11 +259,9 @@ def run_inference(
         finally:
             cap.release()
 
-        # Trim pre-allocated array if the video ended early.
         if use_preallocated:
             tracked_bboxes = tracked_bboxes[:bbox_idx]
 
-        # Single syscall — no per-line Python overhead.
         np.savetxt(bbox_file, tracked_bboxes, fmt="%d", delimiter=" ")
 
         def _stats_fast(name, arr):
@@ -430,25 +423,21 @@ def run_inference(
                 native_h, native_w = frame.shape[:2]
                 long_edge = max(native_h, native_w)
 
-                # Match this to your SiamRAMTracker._MAX_PROC_LONG_EDGE
-                max_edge = 1280 
+                max_edge = 1280
                 scale_factor = long_edge / max_edge if long_edge > max_edge else 1.0
 
-                # 2. Update the drawing block
                 mapping = inner_tracker.tracking_state.mapping
                 if mapping is not None:
-                    # Scale the internal tracker coordinates BACK to native video pixels
                     mx = int(mapping[0] * scale_factor)
                     my = int(mapping[1] * scale_factor)
                     mw = int(mapping[2] * scale_factor)
                     mh = int(mapping[3] * scale_factor)
-                    
-                    # Draw onto the canvas using the y_off (vertical centering offset)
+
                     cv2.rectangle(
-                        canvas, 
-                        (mx, my + y_off), 
+                        canvas,
+                        (mx, my + y_off),
                         (mx + mw, my + mh + y_off),
-                        C_SEARCH, 
+                        C_SEARCH,
                         1
                     )
 

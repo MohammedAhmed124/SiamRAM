@@ -5,6 +5,7 @@ This module defines the abstract base class for all trackers in the
 SiamABC package, along with a TrackingState container for keeping
 track of historical frames and bounding boxes.
 """
+import math
 from abc import ABC, abstractmethod
 from collections import deque
 from typing import Any, Callable, Deque, Optional, Tuple, Union
@@ -15,7 +16,7 @@ import torch
 import torch.nn as nn
 from numpy._typing import NDArray
 from torch import Tensor
-import math
+
 from utils.box_coder import TrackerDecodeResult
 from utils.utils import limit, squared_size, to_device
 

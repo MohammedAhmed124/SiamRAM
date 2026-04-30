@@ -27,9 +27,10 @@ import pandas as pd
 from omegaconf import OmegaConf
 
 from models.SiamABC.tracker.tracker_setup import get_tracker
+from models.SiamABC.tracker.trt_engine.siamabc import get_trt_tracker
 from models.SiamRAM import SiamRAMTracker
 from vis.test_model import run_inference
-from models.SiamABC.tracker.trt_engine.siamabc import get_trt_tracker
+
 BASE_DIR = Path(__file__).resolve().parent
 
 

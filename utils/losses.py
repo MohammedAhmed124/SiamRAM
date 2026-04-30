@@ -22,6 +22,7 @@ bbox → GIoU Loss (masked to positive locations only)
     so negative samples (all-zero cls) contribute zero regression loss —
     exactly what we want.
 """
+
 from typing import Optional
 
 import torch
@@ -38,13 +39,20 @@ class BoxLoss(nn.Module):
     those was replaced with: 1 - IoU
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+    ) -> None:
         """
         Initialise the BoxLoss.
         """
         super().__init__()
 
-    def forward(self, pred: torch.Tensor, target: torch.Tensor, weight: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(
+        self,
+        pred: torch.Tensor,
+        target: torch.Tensor,
+        weight: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """
         Compute the IoU loss.
 
@@ -72,8 +80,13 @@ class TrackingHeadLoss(nn.Module):
     positive labels) for the regression map.
     """
 
-    def __init__(self, cls_weight=1.0, bbox_weight=1.0,
-                 focal_alpha=0.25, focal_gamma=2.0):
+    def __init__(
+        self,
+        cls_weight=1.0,
+        bbox_weight=1.0,
+        focal_alpha=0.25,
+        focal_gamma=2.0,
+    ):
         """
         Initialise the TrackingHeadLoss.
 
@@ -88,10 +101,14 @@ class TrackingHeadLoss(nn.Module):
         self.bbox_weight = bbox_weight
         self.focal_alpha = focal_alpha
         self.focal_gamma = focal_gamma
-        self.bce = nn.BCEWithLogitsLoss(reduction='none')
+        self.bce = nn.BCEWithLogitsLoss(reduction="none")
         self.bbox = BoxLoss()
 
-    def _cls_loss(self, pred, label):
+    def _cls_loss(
+        self,
+        pred,
+        label,
+    ):
         pred = pred.view(-1)
         label = label.view(-1).float()
 
@@ -101,13 +118,14 @@ class TrackingHeadLoss(nn.Module):
         if pos_idx.numel() == 0 and neg_idx.numel() == 0:
             return pred.sum() * 0.0
 
-        def focal_loss_at(idx):
+        def focal_loss_at(
+            idx,
+        ):
             p = torch.sigmoid(pred[idx])
             lbl = label[idx]
             bce = self.bce(pred[idx], lbl)
 
-            p_t = p * lbl + (1 - p) * (
-                1 - lbl)
+            p_t = p * lbl + (1 - p) * (1 - lbl)
             alpha_t = self.focal_alpha * lbl + (1 - self.focal_alpha) * (1 - lbl)
             focal_w = alpha_t * (1 - p_t) ** self.focal_gamma
 
@@ -120,7 +138,12 @@ class TrackingHeadLoss(nn.Module):
 
         return 0.5 * focal_loss_at(pos_idx) + 0.5 * focal_loss_at(neg_idx)
 
-    def _bbox_loss(self, pred, target, reg_weight):
+    def _bbox_loss(
+        self,
+        pred,
+        target,
+        reg_weight,
+    ):
         p = pred.permute(0, 2, 3, 1).reshape(-1, 4)
         t = target.permute(0, 2, 3, 1).reshape(-1, 4)
         w = reg_weight.reshape(-1)
@@ -129,7 +152,14 @@ class TrackingHeadLoss(nn.Module):
             return pred.sum() * 0.0
         return self.bbox(p[pos], t[pos])
 
-    def forward(self, cls_pred, bbox_pred, cls_label, bbox_label, reg_weight):
+    def forward(
+        self,
+        cls_pred,
+        bbox_pred,
+        cls_label,
+        bbox_label,
+        reg_weight,
+    ):
         """
         Compute the total combined loss for a batch.
 

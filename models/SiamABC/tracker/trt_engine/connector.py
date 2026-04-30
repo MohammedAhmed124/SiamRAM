@@ -172,7 +172,6 @@ def _build_connect_engines(
         engine = trt_dynamo_compile(
             exported,
             inputs=trt_input_set,
-
             enabled_precisions={torch.float32},
             optimization_level=3,
             use_fast_partitioner=True,
@@ -182,9 +181,7 @@ def _build_connect_engines(
             engine(dummy_search_org, dummy_search, dummy_kernel)
 
         engines[tag] = engine
-        log.info(
-            "TRTSiamABCNet: connect_model engine [lam=%.4f] ready.", lam_val
-        )
+        log.info("TRTSiamABCNet: connect_model engine [lam=%.4f] ready.", lam_val)
 
     return engines
 

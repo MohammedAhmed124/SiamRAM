@@ -5,6 +5,7 @@ This module manages the storage and matching of target appearance
 descriptors. It maintains a short-term buffer for recent high-confidence
 frames and a long-term DRM bank for reliable re-acquisition.
 """
+
 from collections import deque
 from typing import List, Optional, Tuple
 
@@ -21,6 +22,7 @@ class AppearanceMemory:
     and area constraints, and implements the DRM scoring logic for
     candidate verification during occlusion recovery.
     """
+
     def __init__(
         self,
         capacity: int = 20,
@@ -54,7 +56,9 @@ class AppearanceMemory:
         self._drm: deque = deque(maxlen=drm_capacity)
         self._t: int = 0
 
-    def reset(self):
+    def reset(
+        self,
+    ):
         """
         Clear all buffers and reset the temporal counter.
         """
@@ -62,7 +66,12 @@ class AppearanceMemory:
         self._drm.clear()
         self._t = 0
 
-    def try_admit(self, bbox, desc: np.ndarray, prev_bbox) -> bool:
+    def try_admit(
+        self,
+        bbox,
+        desc: np.ndarray,
+        prev_bbox,
+    ) -> bool:
         """
         Attempt to admit a new descriptor to the short-term buffer.
 
@@ -87,22 +96,29 @@ class AppearanceMemory:
             return True
         return False
 
-    def _try_promote_to_drm(self, bbox, new_desc: np.ndarray) -> None:
+    def _try_promote_to_drm(
+        self,
+        bbox,
+        new_desc: np.ndarray,
+    ) -> None:
         recent = list(self._buf)[-self.window_W:]
         if len(recent) < self.mmin:
             return
         agreements = sum(
-            1 for (_, d) in recent
-            if _cos_sim(new_desc, d) >= self.tau_sim
+            1 for (_, d) in recent if _cos_sim(new_desc, d) >= self.tau_sim
         )
         if agreements >= self.mmin:
-            self._drm.append((
-                np.array(bbox, dtype=int),
-                new_desc.copy(),
-                self._t,
-            ))
+            self._drm.append(
+                (
+                    np.array(bbox, dtype=int),
+                    new_desc.copy(),
+                    self._t,
+                )
+            )
 
-    def best_descriptor(self) -> Optional[np.ndarray]:
+    def best_descriptor(
+        self,
+    ) -> Optional[np.ndarray]:
         """
         Return the most recent descriptor in the short-term buffer.
 
@@ -111,8 +127,12 @@ class AppearanceMemory:
         """
         return self._buf[-1][1] if self._buf else None
 
-    def match(self, frame: np.ndarray, candidates: List[np.ndarray],
-              threshold: float) -> Tuple[Optional[np.ndarray], float]:
+    def match(
+        self,
+        frame: np.ndarray,
+        candidates: List[np.ndarray],
+        threshold: float,
+    ) -> Tuple[Optional[np.ndarray], float]:
         """
         Match a set of candidates against the latest descriptor.
 
@@ -208,7 +228,7 @@ class AppearanceMemory:
                 continue
 
             anchor_scores = []
-            for (dk_bbox, dk_desc, rho_k) in self._drm:
+            for dk_bbox, dk_desc, rho_k in self._drm:
                 s_iou = lam_iou * _iou(dk_bbox, cand_bbox)
                 s_app = lam_app * _cos_sim(dk_desc, cand_desc)
 
@@ -216,8 +236,7 @@ class AppearanceMemory:
                 dk_cy = dk_bbox[1] + dk_bbox[3] / 2.0
                 motion_vec = np.array([dk_cx - ref_cx, dk_cy - ref_cy])
                 mot_norm = float(np.linalg.norm(motion_vec)) + 1e-8
-                pi_t = float(np.dot(velocity, motion_vec) /
-                             (vel_norm * mot_norm))
+                pi_t = float(np.dot(velocity, motion_vec) / (vel_norm * mot_norm))
                 pi_t = max(0.0, pi_t)
                 s_mot = lam_mot * pi_t
 
@@ -234,8 +253,12 @@ class AppearanceMemory:
 
             cand_score = max(anchor_scores) if anchor_scores else -np.inf
 
-            if (search_cx is not None and search_cy is not None
-                and dist_sigma is not None and dist_sigma > 0):
+            if (
+                search_cx is not None
+                and search_cy is not None
+                and dist_sigma is not None
+                and dist_sigma > 0
+            ):
                 cand_cx = cand_bbox[0] + cand_bbox[2] / 2.0
                 cand_cy = cand_bbox[1] + cand_bbox[3] / 2.0
                 d = np.hypot(cand_cx - search_cx, cand_cy - search_cy)
@@ -262,7 +285,9 @@ class AppearanceMemory:
 
         return scored[:top_k]
 
-    def drm_size(self) -> int:
+    def drm_size(
+        self,
+    ) -> int:
         """
         Return the current number of entries in the DRM bank.
 
@@ -271,5 +296,7 @@ class AppearanceMemory:
         """
         return len(self._drm)
 
-    def __len__(self):
+    def __len__(
+        self,
+    ):
         return len(self._buf)

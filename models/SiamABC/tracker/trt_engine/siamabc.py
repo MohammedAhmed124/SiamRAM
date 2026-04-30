@@ -112,10 +112,22 @@ class TRTSiamABCNet:
         )
 
         with torch.no_grad():
-            _t = torch.randn(opt_batch, 3, template_size, template_size,
-                             device=self._device, dtype=torch.float32)
-            _s = torch.randn(opt_batch, 3, instance_size, instance_size,
-                             device=self._device, dtype=torch.float32)
+            _t = torch.randn(
+                opt_batch,
+                3,
+                template_size,
+                template_size,
+                device=self._device,
+                dtype=torch.float32,
+            )
+            _s = torch.randn(
+                opt_batch,
+                3,
+                instance_size,
+                instance_size,
+                device=self._device,
+                dtype=torch.float32,
+            )
             t_feat_shape: Tuple[int, ...] = tuple(model.get_features(_t).shape)
             s_feat_shape: Tuple[int, ...] = tuple(model.get_features(_s).shape)
 
@@ -138,8 +150,14 @@ class TRTSiamABCNet:
 
         with torch.no_grad():
             for hw in (h_t, h_s):
-                _dummy = torch.randn(1, adjust_channels * 2, hw, hw,
-                                     device=self._device, dtype=torch.float32)
+                _dummy = torch.randn(
+                    1,
+                    adjust_channels * 2,
+                    hw,
+                    hw,
+                    device=self._device,
+                    dtype=torch.float32,
+                )
                 self._trt_attn(_dummy)
 
         self._connect_engines = _build_connect_engines(
@@ -174,8 +192,9 @@ class TRTSiamABCNet:
         mod = _FeatureExtractorModule(model).eval().to(self._device)
         _cast_module(mod, self._dtype)
 
-        dummy = torch.randn(opt_batch, 3, opt_hw, opt_hw,
-                            device=self._device, dtype=self._dtype)
+        dummy = torch.randn(
+            opt_batch, 3, opt_hw, opt_hw, device=self._device, dtype=self._dtype
+        )
 
         with torch.no_grad():
             scripted = torch.jit.trace(mod, dummy)
@@ -194,7 +213,10 @@ class TRTSiamABCNet:
             truncate_long_and_double=True,
         )
 
-    def get_features(self, crop: torch.Tensor) -> torch.Tensor:
+    def get_features(
+        self,
+        crop: torch.Tensor,
+    ) -> torch.Tensor:
         """
         Mirrors SiamABCNet.get_features(crop).
         Both template and search crops routed through the single TRT engine.
@@ -219,7 +241,9 @@ class TRTSiamABCNet:
         lam: torch.Tensor,
     ) -> Dict[str, Optional[torch.Tensor]]:
 
-        def _cast(t: torch.Tensor) -> torch.Tensor:
+        def _cast(
+            t: torch.Tensor,
+        ) -> torch.Tensor:
             return t.to(dtype=self._dtype, device=self._device)
 
         sf = _cast(search_features)
@@ -249,7 +273,9 @@ class TRTSiamABCNet:
             constants.TRACKER_ATTENTION_MAP: s_mixed.float(),
         }
 
-    def modules(self):
+    def modules(
+        self,
+    ):
         """
         Minimal shim so SiamABCTracker.__init__ can discover _norm_lambda via
             next((m._norm_lambda for m in self.net.modules()
@@ -261,7 +287,9 @@ class TRTSiamABCNet:
         proxy._norm_lambda = self._norm_lambda
         yield proxy
 
-    def invalidate_template_cache(self) -> None:
+    def invalidate_template_cache(
+        self,
+    ) -> None:
         """No-op — TRT engines are stateless."""
 
 

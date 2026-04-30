@@ -16,7 +16,10 @@ from .SiamABC_Tracker import SiamABCTracker
 
 
 def load_model(
-    model: nn.Module, checkpoint_path: str, map_location: Optional[Union[int, str]] = None, strict: bool = True
+    model: nn.Module,
+    checkpoint_path: str,
+    map_location: Optional[Union[int, str]] = None,
+    strict: bool = True,
 ) -> nn.Module:
     """
     Load weights from a checkpoint into a model.
@@ -33,7 +36,9 @@ def load_model(
     map_location = f"cuda:{map_location}" if type(map_location) is int else map_location
     checkpoint = torch.load(checkpoint_path, map_location=map_location)
     state_dict = {
-        k.lstrip("module").lstrip("."): v for k, v in checkpoint.items() if k.startswith("module.")
+        k.lstrip("module").lstrip("."): v
+        for k, v in checkpoint.items()
+        if k.startswith("module.")
     }
 
     if strict:
@@ -43,7 +48,12 @@ def load_model(
     return model
 
 
-def get_tracker(config, weights_path: str, lambda_tta: float = 0.1, continuous=False) -> SiamABCTracker:
+def get_tracker(
+    config,
+    weights_path: str,
+    lambda_tta: float = 0.1,
+    continuous=False,
+) -> SiamABCTracker:
     """
     Initialise a SiamABCTracker instance from a configuration.
 

@@ -5,6 +5,7 @@ This module provides a constant-velocity EKF that tracks the center
 coordinates of a bounding box. It supports camera motion compensation
 via homography matrices and provides uncertainty estimates.
 """
+
 from typing import Optional
 
 import numpy as np
@@ -20,8 +21,13 @@ class BBoxEKF:
     DIM_X = 4
     DIM_Z = 2
 
-    def __init__(self, bbox, process_noise: float = 2.0, meas_noise: float = 5.0,
-                 vel_window: int = 100):
+    def __init__(
+        self,
+        bbox,
+        process_noise: float = 2.0,
+        meas_noise: float = 5.0,
+        vel_window: int = 100,
+    ):
         """
         Initialise the BBoxEKF.
 
@@ -37,21 +43,34 @@ class BBoxEKF:
         self._bw = float(w)
         self._bh = float(h)
 
-        self.x = np.array([cx, cy, 0., 0.])
-        self.P = np.diag([10., 10., 100., 100.]).astype(float)
-        self.Q = np.diag([
-            process_noise,
-            process_noise,
-            process_noise * 4,
-            process_noise * 4,
-        ]).astype(float)
+        self.x = np.array([cx, cy, 0.0, 0.0])
+        self.P = np.diag([10.0, 10.0, 100.0, 100.0]).astype(float)
+        self.Q = np.diag(
+            [
+                process_noise,
+                process_noise,
+                process_noise * 4,
+                process_noise * 4,
+            ]
+        ).astype(float)
         self.R = np.eye(self.DIM_Z, dtype=float) * meas_noise
-        self._H_mat = np.array([
-            [1., 0., 0., 0.],
-            [0., 1., 0., 0.],
-        ], dtype=float)
+        self._H_mat = np.array(
+            [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+            ],
+            dtype=float,
+        )
 
-    def _compute_jacobian(self, H, H_reliable, cx, cy, new_cx_h, new_cy_h) -> np.ndarray:
+    def _compute_jacobian(
+        self,
+        H,
+        H_reliable,
+        cx,
+        cy,
+        new_cx_h,
+        new_cy_h,
+    ) -> np.ndarray:
         F = np.eye(self.DIM_X, dtype=float)
         F[0, 2] = 1.0
         F[1, 3] = 1.0
@@ -67,7 +86,11 @@ class BBoxEKF:
             F[1, 1] = D
         return F
 
-    def predict(self, H: Optional[np.ndarray] = None, H_reliable: bool = False):
+    def predict(
+        self,
+        H: Optional[np.ndarray] = None,
+        H_reliable: bool = False,
+    ):
         """
         Perform the EKF prediction step.
 
@@ -88,7 +111,10 @@ class BBoxEKF:
         F = self._compute_jacobian(H, H_reliable, cx, cy, new_cx_h, new_cy_h)
         self.P = F @ self.P @ F.T + self.Q
 
-    def update(self, bbox):
+    def update(
+        self,
+        bbox,
+    ):
         """
         Perform the EKF update step with a new measurement.
 
@@ -108,7 +134,9 @@ class BBoxEKF:
         I_KH = np.eye(self.DIM_X) - K @ self._H_mat
         self.P = I_KH @ self.P
 
-    def get_bbox(self) -> np.ndarray:
+    def get_bbox(
+        self,
+    ) -> np.ndarray:
         """
         Return the current predicted bounding box.
 
@@ -118,11 +146,13 @@ class BBoxEKF:
         cx, cy = self.x[0], self.x[1]
         x1 = cx - self._bw / 2.0
         y1 = cy - self._bh / 2.0
-        return np.array([int(x1), int(y1),
-                         max(1, int(self._bw)),
-                         max(1, int(self._bh))], dtype=int)
+        return np.array(
+            [int(x1), int(y1), max(1, int(self._bw)), max(1, int(self._bh))], dtype=int
+        )
 
-    def get_velocity(self) -> np.ndarray:
+    def get_velocity(
+        self,
+    ) -> np.ndarray:
         """
         Return the current estimated velocity.
 
@@ -131,7 +161,9 @@ class BBoxEKF:
         """
         return self.x[2:4].copy()
 
-    def get_uncertainty(self) -> float:
+    def get_uncertainty(
+        self,
+    ) -> float:
         """
         Return the average uncertainty (standard deviation) of the position.
 
@@ -140,7 +172,11 @@ class BBoxEKF:
         """
         return float(np.sqrt(np.diag(self.P[:2]).mean()))
 
-    def reseed(self, bbox, velocity: np.ndarray):
+    def reseed(
+        self,
+        bbox,
+        velocity: np.ndarray,
+    ):
         """
         Reset the EKF state with a new position and velocity.
 
@@ -155,9 +191,12 @@ class BBoxEKF:
         self.x[3] = float(velocity[1])
         self._bw = float(w)
         self._bh = float(h)
-        self.P = np.diag([25., 25., 40., 40.]).astype(float)
+        self.P = np.diag([25.0, 25.0, 40.0, 40.0]).astype(float)
 
-    def nudge_position(self, bbox):
+    def nudge_position(
+        self,
+        bbox,
+    ):
         """
         Adjust the EKF position without affecting velocity.
 

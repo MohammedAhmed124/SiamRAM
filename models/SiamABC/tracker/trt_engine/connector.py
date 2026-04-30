@@ -181,6 +181,9 @@ def _build_connect_engines(
             engine(dummy_search_org, dummy_search, dummy_kernel)
 
         engines[tag] = engine
+        del module, exported         
+        torch.cuda.empty_cache()     
+
         log.info("TRTSiamABCNet: connect_model engine [lam=%.4f] ready.", lam_val)
 
     return engines

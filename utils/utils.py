@@ -1,8 +1,39 @@
 """
 General utility functions for SiamRAM.
 
-This module contains bounding box conversion helpers, coordinate grid
-generation, image cropping utilities, and IoU calculation functions.
+This module is the shared toolkit that every other part of SiamRAM relies on.
+It sits at the very bottom of the dependency stack — nothing here imports from
+the rest of the project, but almost everything in the project imports from here.
+
+Concretely, it provides six categories of helpers:
+
+1. APPEARANCE DESCRIPTORS
+   _extract_descriptor() — builds the 384-d appearance fingerprint ϕ(It, b) from
+   Section 3.1 of the paper. Used by the RAM/DRM memory buffers and by Phase-2
+   reacquisition scoring.
+
+2. GEOMETRIC CHECKS
+   _iou() — lightweight single-pair IoU for the RAM admission gate (Section 3.2).
+   calc_iou() — batched tensor IoU for the training loss.
+
+3. SIMILARITY METRIC
+   _cos_sim() — cosine similarity between two descriptor vectors, used for the
+   DRM promotion consensus (Eq. 8) and Phase-2 candidate scoring (Eq. 10).
+
+4. BOUNDING BOX FORMAT CONVERTERS
+   xyxy_to_xywh(), convert_xywh_to_xyxy() — convert between the two box formats
+   used in different parts of the pipeline.
+
+5. IMAGE CROPPING & PADDING
+   extend_bbox(), ensure_bbox_boundaries(), clamp_bbox(), get_extended_crop(),
+   handle_empty_bbox() — together these produce the correctly-sized, correctly-padded
+   search-region and template crops that SiamABC ingests every frame (Section 2.1).
+
+6. NETWORK SUPPORT UTILITIES
+   make_grid() — pre-computes the pixel-coordinate lookup table used by BoxCoder.
+   get_regression_weight_label() — builds training weight maps for the regression head.
+   squared_size(), limit(), unravel_index(), to_device() — small but frequently
+   needed arithmetic and device-management helpers.
 """
 
 from typing import Any, Optional, Tuple, Union
@@ -23,6 +54,77 @@ def _extract_descriptor(
     w_color: float = 0.6,
     _PROC_SIZE: int = 64,
 ) -> Optional[np.ndarray]:
+    """
+    Compute the 384-dimensional appearance descriptor ϕ(It, b) for a given target
+    region in a video frame.
+
+    What is this and why does it exist?
+    ------------------------------------
+    The Distractor-Aware Memory (DAM) module (Section 3.1) needs a compact, comparable
+    "fingerprint" of what the target looks like at any given frame. That fingerprint is
+    this descriptor. It is used in three places:
+
+      1. RAM admission (Section 3.2): each new box is described and stored; future boxes
+         are compared against stored ones to detect appearance consistency.
+      2. DRM promotion (Eq. 8): if the last W=5 RAM descriptors are mutually similar
+         (cosine similarity ≥ 0.60), the current frame is promoted to the stable DRM
+         bank as a long-term anchor.
+      3. Phase-2 reacquisition scoring (Eq. 10): each YOLO candidate is described and
+         compared against all DRM anchors; the best match score S*(ci) determines whether
+         the candidate is actually the target or a distractor.
+
+    The descriptor is a weighted concatenation of two independently L2-normalised
+    components, following Equation 6 of the paper:
+
+        ϕ(It, b) = [w_gray * p̂ ; w_color * ĥ] / ‖[w_gray * p̂ ; w_color * ĥ]‖
+
+    where:
+      - p̂ ∈ R^256 is a flattened, normalised 16×16 grayscale patch (texture).
+      - ĥ ∈ R^128 is a normalised 8×4×4 HSV histogram (colour).
+
+    Colour is deliberately up-weighted (w_color=0.6 > w_gray=0.4) because colour
+    is more discriminative than raw texture when re-identifying the target after a
+    background-heavy occlusion, as noted in Section 3.1.
+
+    Step-by-step:
+    -------------
+    1. Clip the box to valid pixel coordinates and crop the patch from the frame.
+    2. Resize the patch to a fixed 64×64 internal size for normalisation.
+    3. Convert to grayscale, resize again to size×size (default 16×16), flatten and
+       L2-normalise → texture component p̂.
+    4. Convert to HSV, compute an 8×4×4 joint histogram over (H, S, V), flatten and
+       L2-normalise → colour component ĥ.
+    5. Form the weighted concatenation and re-normalise the whole 384-d vector.
+
+    Args:
+        frame (np.ndarray):
+            The full BGR video frame as a NumPy array with shape (H, W, 3).
+            This is the raw camera output — no pre-processing required before passing.
+        bbox:
+            The target bounding box in [x, y, w, h] format (top-left corner, width,
+            height), in pixel units relative to `frame`. Can be a list, tuple, or array.
+        size (int):
+            The side length of the grayscale patch after downsampling. Default 16 gives
+            a 16×16 = 256-dimensional texture vector. Increase for richer texture at the
+            cost of a larger descriptor.
+        w_gray (float):
+            Weight applied to the normalised grayscale texture component before
+            concatenation. Default 0.4 as per Equation 6.
+        w_color (float):
+            Weight applied to the normalised HSV histogram component before
+            concatenation. Default 0.6 as per Equation 6.
+        _PROC_SIZE (int):
+            Internal processing resolution. The patch is first resized to this square
+            size before computing both the grayscale and HSV features. This
+            standardises descriptor quality regardless of the original bbox aspect ratio.
+            Default 64. Not intended to be changed by callers.
+
+    Returns:
+        Optional[np.ndarray]:
+            A 384-dimensional float32 vector lying on the unit hypersphere (L2 norm ≈ 1).
+            Returns None if the bbox is degenerate (zero area) or lies entirely outside
+            the frame — callers must check for None before using the result.
+    """
     x, y, w, h = map(int, bbox)
     x, y = max(0, x), max(0, y)
     w, h = max(1, w), max(1, h)
@@ -53,6 +155,42 @@ def _iou(
     a,
     b,
 ) -> float:
+    """
+    Compute the Intersection-over-Union (IoU) overlap ratio between two bounding boxes.
+
+    What is this and why does it exist?
+    ------------------------------------
+    IoU is the standard geometric measure of how much two boxes overlap. In SiamRAM it
+    serves as a "sanity check" for temporal coherence: if the tracker's new box barely
+    overlaps the previous one, something has likely gone wrong (a distractor swap, a
+    missed frame, or the target leaving the scene). Specifically:
+
+      - RAM admission gate (Section 3.2, Eq. 7): a box is only stored in the RAM buffer
+        if IoU(b, b̂_{t-1}) ≥ τ_ram = 0.40. This prevents distractor-driven jumps from
+        corrupting the memory.
+      - Occlusion detection pipeline: IoU checks between consecutive boxes help confirm
+        that the tracker has remained locked on the same object across frames.
+
+    This function is intentionally kept lightweight — it operates on plain Python lists
+    or NumPy arrays rather than tensors, so it can be called on the CPU in the main
+    tracking loop without any GPU round-trips. For batched training use, see calc_iou().
+
+    Formula:
+        IoU = area(A ∩ B) / area(A ∪ B)
+            = intersection / (area_A + area_B - intersection)
+
+    Args:
+        a: First bounding box in [x, y, w, h] format (top-left corner + size).
+           Can be a list, tuple, or numpy array.
+        b: Second bounding box in [x, y, w, h] format.
+           Must be in the same coordinate space as `a`.
+
+    Returns:
+        float:
+            Overlap ratio in [0.0, 1.0]. A value of 0.0 means the boxes do not overlap
+            at all; 1.0 means they are identical. The +1e-8 denominator guard prevents
+            division by zero for degenerate zero-area boxes.
+    """
     ax2, ay2 = a[0] + a[2], a[1] + a[3]
     bx2, by2 = b[0] + b[2], b[1] + b[3]
     ix1 = max(a[0], b[0])
@@ -68,6 +206,45 @@ def _cos_sim(
     a: np.ndarray,
     b: np.ndarray,
 ) -> float:
+    """
+    Compute the cosine similarity between two appearance descriptor vectors.
+
+    What is this and why does it exist?
+    ------------------------------------
+    Once we have two 384-d appearance descriptors (from _extract_descriptor), we need a
+    single number that answers "how similar are these two patches?" Cosine similarity is
+    the right tool here because the descriptors are L2-normalised — cosine similarity on
+    unit vectors is equivalent to their dot product, and it is invariant to overall
+    brightness changes, making it robust to illumination shifts across frames.
+
+    This function is the core comparison primitive used in two key places:
+
+      1. DRM promotion consensus (Section 3.2, Eq. 8): we count how many of the last
+         W=5 RAM descriptors have cosine similarity ≥ τ_sim = 0.60 with the current
+         frame's descriptor. If at least m_min = 3 do, the entry is promoted to the
+         stable DRM bank. This filters out frames captured during brief blur or partial
+         occlusion.
+
+      2. Phase-2 DAM appearance scoring (Section 4.3, Eq. 10): each YOLO candidate ci
+         is compared against every DRM anchor ψk, and S*(ci) = max_k cos(ψk, ϕ(It, ci))
+         gives the candidate's best appearance match score. Combined with the velocity
+         consistency term V(ci), this score ranks candidates for reacquisition.
+
+    Args:
+        a (np.ndarray):
+            First descriptor vector, shape (384,). Expected to be L2-normalised (output
+            of _extract_descriptor), but the function handles un-normalised inputs safely
+            via the denominator guard.
+        b (np.ndarray):
+            Second descriptor vector, shape (384,). Same requirements as `a`.
+
+    Returns:
+        float:
+            Cosine similarity in [-1.0, 1.0]. In practice, since all descriptor
+            components are non-negative (grayscale intensities, histogram counts),
+            values will typically lie in [0.0, 1.0]. A value near 1.0 means the two
+            patches look nearly identical; near 0.0 means no visual similarity.
+    """
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-8))
 
 
@@ -75,13 +252,32 @@ def xyxy_to_xywh(
     boxes,
 ):
     """
-    Convert bounding boxes from [x1, y1, x2, y2] to [x, y, w, h] format.
+    Convert a bounding box from corner format [x1, y1, x2, y2] to
+    top-left-plus-size format [x, y, w, h].
+
+    What is this and why does it exist?
+    ------------------------------------
+    Different parts of the SiamRAM pipeline use different box conventions:
+
+      - YOLO (Phase 1 reacquisition, Section 4.3) outputs boxes as [x1, y1, x2, y2]
+        — the absolute pixel coordinates of the top-left and bottom-right corners.
+      - SiamABC, the RAM buffer, and all tracker-internal logic use [x, y, w, h]
+        — the top-left corner plus the width and height.
+
+    This function is the bridge between these two worlds. It is called whenever a YOLO
+    detection needs to be handed off to the Siamese tracker or stored in the DAM buffer.
 
     Args:
-        boxes (List[float]): Bounding box coordinates.
+        boxes:
+            A sequence of four values [x1, y1, x2, y2] representing the top-left corner
+            (x1, y1) and bottom-right corner (x2, y2) of the box in pixel coordinates.
+            Can be a list, tuple, or numpy array.
 
     Returns:
-        List[float]: Converted bounding box.
+        List[float]:
+            The same box expressed as [x, y, w, h], where x=x1, y=y1, w=x2-x1, h=y2-y1.
+            Note that if x2 < x1 or y2 < y1 (malformed input), width or height will be
+            negative — callers should validate inputs if this is a concern.
     """
     x1, y1, x2, y2 = boxes
     return [x1, y1, x2 - x1, y2 - y1]
@@ -91,13 +287,25 @@ def convert_xywh_to_xyxy(
     bbox: NDArray,
 ) -> NDArray:
     """
-    Convert bounding boxes from [x, y, w, h] to [x1, y1, x2, y2] format.
+    Convert a bounding box from top-left-plus-size format [x, y, w, h] to
+    corner format [x1, y1, x2, y2].
+
+    What is this and why does it exist?
+    ------------------------------------
+    This is the inverse of xyxy_to_xywh(). It is needed whenever tracker-internal
+    [x, y, w, h] boxes must be passed to routines that expect explicit corners — for
+    example, when computing the Gaussian label function in box_coder.py (which takes
+    [x1, y1, x2, y2]), or when drawing boxes with certain OpenCV/visualization APIs.
 
     Args:
-        bbox (NDArray): Bounding box in xywh format.
+        bbox (NDArray):
+            A numpy array of four values [x, y, w, h], where (x, y) is the top-left
+            corner and (w, h) are the width and height in pixels.
 
     Returns:
-        NDArray: Bounding box in xyxy format.
+        NDArray:
+            A numpy array [x1, y1, x2, y2] = [x, y, x+w, y+h].
+            The dtype matches the input array.
     """
     return np.array([bbox[0], bbox[1], bbox[2] + bbox[0], bbox[3] + bbox[1]])
 
@@ -107,14 +315,31 @@ def to_device(
     cuda_id: int = 0,
 ) -> Tensor | Module:
     """
-    Move a tensor or module to a CUDA device if available.
+    Move a PyTorch tensor or module to a GPU if one is available, otherwise keep on CPU.
+
+    What is this and why does it exist?
+    ------------------------------------
+    SiamRAM runs in real-time, and the heavy components — the ResNet backbone, the
+    attention modules, and the BoxTower head (Section 2.1) — must live on GPU to meet
+    latency requirements. At the same time, the code should degrade gracefully on
+    CPU-only machines (e.g. during debugging or on edge devices without a GPU).
+
+    This helper centralises the device check so that model initialisation code doesn't
+    need to repeat `if torch.cuda.is_available()` everywhere. It is typically called
+    once per component at startup, after the model is loaded.
 
     Args:
-        x (Union[Tensor, Module]): Object to move.
-        cuda_id (int): CUDA device index.
+        x (Union[torch.Tensor, torch.nn.Module]):
+            The tensor or module to move. Works for any PyTorch object that supports
+            the .cuda() method.
+        cuda_id (int):
+            The index of the GPU to use when multiple GPUs are present. Default 0
+            (the first GPU). Ignored if no CUDA device is available.
 
     Returns:
-        Union[Tensor, Module]: Object on the target device.
+        Tensor | Module:
+            The same object, now residing on the requested GPU, or unchanged on CPU
+            if CUDA is not available.
     """
     return x.cuda(cuda_id) if torch.cuda.is_available() else x
 
@@ -125,6 +350,44 @@ def extend_bbox(
     image_height: int,
     offset: float = 1.1,
 ) -> NDArray:
+    """
+    Expand a bounding box outward to include surrounding context.
+
+    What is this and why does it exist?
+    ------------------------------------
+    SiamABC (Section 2.1) does not process the raw object crop alone — it needs context
+    around the object so the network can distinguish the target from its immediate
+    background. The template crops (static template z and dynamic template z̃) and the
+    search region crop x are all generated from an extended bounding box, not from a
+    tight crop.
+
+    The expansion is multiplicative: if offset=1.1, the box grows 10% of its own size
+    outward on each side. The `offset` can be a tuple for non-uniform expansion:
+      - A single float: equal expansion on all four sides.
+      - A 2-tuple (w_offset, h_offset): independent horizontal and vertical expansion.
+      - A 4-tuple (left, right, top, bottom): full per-side control.
+
+    Note that the returned coordinates may be negative or exceed the image boundaries.
+    This is intentional — callers should pass the result through ensure_bbox_boundaries()
+    or get_extended_crop() (which handles out-of-bounds regions with padding).
+
+    Args:
+        bbox (NDArray):
+            The original target box in [x, y, w, h] format (pixel coordinates).
+        image_width (int):
+            Width of the source image in pixels. Passed for reference but not used to
+            clamp in this function — clamping is handled downstream.
+        image_height (int):
+            Height of the source image in pixels. Same note as image_width.
+        offset (float or tuple):
+            Expansion factor. Default 1.1 expands each side by 10% of the box's
+            corresponding dimension. See above for tuple formats.
+
+    Returns:
+        NDArray (int32):
+            The expanded box [x_new, y_new, w_new, h_new]. May contain negative values
+            or values exceeding the image size if the original box is near the border.
+    """
     x, y, w, h = bbox
 
     if isinstance(offset, tuple):
@@ -146,6 +409,38 @@ def ensure_bbox_boundaries(
     bbox: NDArray,
     img_shape: Tuple[int, int],
 ) -> NDArray:
+    """
+    Clamp a bounding box so it lies entirely within the image boundaries.
+
+    What is this and why does it exist?
+    ------------------------------------
+    After extending a box with extend_bbox() or receiving a prediction from the network,
+    the coordinates may fall outside the [0, W] × [0, H] image domain. Passing such
+    coordinates to cv2.resize(), array slicing, or _extract_descriptor() would cause
+    crashes or silently corrupt data. This function is the safety net that prevents that.
+
+    The clamping logic preserves the bottom-right corner independently: it clips both
+    the top-left and the bottom-right corners separately before recomputing width and
+    height, which means the box can shrink but never expand beyond the image edge.
+
+    This function is called internally by get_extended_crop() and clamp_bbox(), and
+    should be called any time a box is computed from network outputs or arithmetic
+    before being used for image access.
+
+    Args:
+        bbox (NDArray):
+            The box to clamp, in [x, y, w, h] format (pixel coordinates, may be
+            out-of-bounds).
+        img_shape (Tuple[int, int]):
+            The (Height, Width) of the image, as returned by image.shape[:2].
+
+    Returns:
+        NDArray (int32):
+            The clamped box [x, y, w, h], guaranteed to satisfy:
+                0 ≤ x ≤ W, 0 ≤ y ≤ H, x+w ≤ W, y+h ≤ H, w ≥ 0, h ≥ 0.
+            Note that width or height may become 0 if the entire box was outside the
+            image — use clamp_bbox() if a minimum area guarantee is also needed.
+    """
     x1, y1, w, h = bbox
     x2_raw = x1 + w
     y2_raw = y1 + h
@@ -163,6 +458,38 @@ def clamp_bbox(
     shape: Tuple[int, int],
     min_side: int = 3,
 ) -> NDArray:
+    """
+    Clamp a bounding box to image boundaries AND enforce a minimum side length.
+
+    What is this and why does it exist?
+    ------------------------------------
+    This is the stricter sibling of ensure_bbox_boundaries(). While that function
+    prevents out-of-bounds access, it can still return a zero-area box if the target
+    has drifted entirely off-screen. A zero-area box would cause division-by-zero in
+    squared_size(), a crash in cv2.resize() inside get_extended_crop(), or a silent
+    NaN in _extract_descriptor().
+
+    By guaranteeing at least min_side pixels in each dimension, clamp_bbox() ensures
+    that every downstream operation receives a valid, non-degenerate input — even in
+    edge cases like the target temporarily exiting the frame (which can occur during
+    occlusion before the Ego-Motion Block (Section 4.2) compensates).
+
+    Args:
+        bbox (NDArray):
+            The box to clamp, in [x, y, w, h] format. May be out-of-bounds or have
+            small dimensions.
+        shape (Tuple[int, int]):
+            Image dimensions as (Height, Width).
+        min_side (int):
+            The minimum allowed value for both width and height. Default 3 pixels.
+            If the clamped width or height is below this, it is set to min_side and
+            the origin is shifted inward to keep the box within the image.
+
+    Returns:
+        NDArray:
+            A box [x, y, w, h] satisfying: w ≥ min_side, h ≥ min_side, and all
+            coordinates within image bounds.
+    """
     bbox = ensure_bbox_boundaries(bbox, img_shape=shape)
     x, y, w, h = bbox
     img_h, img_w = shape[0], shape[1]
@@ -183,18 +510,66 @@ def get_extended_crop(
     padding_value=None,
 ):
     """
-    Extract a cropped and resized patch from an image with padding.
+    Extract a fixed-size square crop of a target region from a video frame, with
+    intelligent padding for regions that extend beyond the image boundary.
+
+    What is this and why does it exist?
+    ------------------------------------
+    This is the core image extraction routine for SiamABC's four input crops
+    (Section 2.1, Figure 2):
+      - Static template z (first-frame crop of the target).
+      - Dynamic template z̃ (updated from the RAM buffer, Section 2.2).
+      - Search region x (centred on the current position estimate).
+      - Dynamic search x̃ (from the most recent high-confidence memory frame).
+
+    All four crops must be exactly crop_size × crop_size pixels before being passed
+    to the ResNet backbone. When the context window extends beyond the frame edge
+    (common for targets near the image border, or when the EKF predicts a position
+    near the edge during reacquisition), we cannot simply crop — we need to pad the
+    missing area. This function does exactly that: it crops as much as the frame
+    allows, then fills the remainder with `padding_value` (typically the per-channel
+    mean of the image, so the padding is "invisible" to batch normalisation).
+
+    It also returns the target's location expressed relative to the new crop — this
+    "bbox_in_crop" is what gets passed to the box coder's encode() function during
+    training, since the network sees the crop, not the full frame.
+
+    Step-by-step:
+    -------------
+    1. Compute how much of the requested context window falls outside each edge.
+    2. Slice the valid portion from the image.
+    3. If any padding is needed, apply cv2.copyMakeBorder with a constant fill.
+    4. Resize the padded crop to exactly crop_size × crop_size.
+    5. Scale the target bbox coordinates from the original image space into the
+       resized crop space.
+    6. Clamp the in-crop bbox to the crop boundaries.
 
     Args:
-        image (np.ndarray): Source image.
-        bbox (np.ndarray): Target bounding box.
-        crop_size (int): Size of the output square crop.
-        context (np.ndarray): Context window to crop.
-        padding_value (Optional[np.ndarray]): Value for border padding.
+        image (np.ndarray):
+            The full video frame in BGR format, shape (H, W, 3).
+        bbox:
+            The target's current bounding box in [x, y, w, h] pixel coordinates,
+            in the full-frame coordinate system.
+        crop_size (int):
+            The side length of the output square crop in pixels (e.g. 255 or 256).
+            The output is always exactly crop_size × crop_size.
+        context:
+            The extended context box in [x, y, w, h] format — the region of the
+            image we want to capture before resizing. Typically produced by
+            extend_bbox(). May have negative coordinates or exceed image dimensions.
+        padding_value:
+            The BGR pixel value used to fill areas that fall outside the image.
+            If None, cv2.copyMakeBorder defaults to black (0, 0, 0). Typically set
+            to the image's per-channel mean for neutral padding.
 
     Returns:
-        Tuple[np.ndarray, np.ndarray, np.ndarray]:
-            (resized_crop, bbox_in_crop, context_rect).
+        Tuple of three values:
+          - resized_crop (np.ndarray): The crop_size × crop_size BGR image patch,
+            ready to be passed to the ResNet backbone.
+          - bbox_in_crop (NDArray): The target box [x, y, w, h] expressed in
+            the coordinate system of the resized crop (i.e. values in [0, crop_size]).
+          - context_rect: The original context box that was used (same as `context`),
+            returned for the caller's reference.
     """
 
     pad_left = max(-context[0], 0)
@@ -241,19 +616,29 @@ def get_extended_crop(
     return resized, padded_bbox, context
 
 
+
 def handle_empty_bbox(
     bbox: NDArray,
     min_bbox: int = 3,
 ) -> NDArray:
     """
-    Ensure a bounding box has a minimum width and height.
+    Prevents a bounding box from mathematically collapsing into a zero-area point or line.
 
-    Args:
-        bbox (NDArray): Bounding box [x, y, w, h].
-        min_bbox (int): Minimum side length.
+    Why we need this exactly:
+    When tracking objects over time, especially during rapid camera movements (handled by 
+    SiamRAM's Ego-Motion block) or when the target moves far away, the network's predicted 
+    width or height might round down to zero[cite: 1]. If a box has 0 area, downstream operations 
+    like Intersection-over-Union (IoU) calculations or feature cropping will divide by zero 
+    and crash the entire pipeline. This acts as a hard safety net to ensure the box always 
+    maintains a minimal pixel footprint.
 
-    Returns:
-        NDArray: Adjusted bounding box.
+    Inputs:
+        bbox (NDArray): The predicted bounding box in [x, y, width, height] format.
+        min_bbox (int): The absolute minimum allowable size (in pixels) for width and height. Default is 3.
+
+    Outputs:
+        NDArray: The safely adjusted bounding box where width and height are guaranteed 
+        to be at least `min_bbox`.
     """
     bbox[2] = max(bbox[2], min_bbox)
     bbox[3] = max(bbox[3], min_bbox)
@@ -268,16 +653,27 @@ def get_regression_weight_label(
     r_neg: int = 0,
 ) -> torch.Tensor:
     """
-    Generate a Gaussian regression weight label map.
+    Creates a spatial "importance map" to tell the SiamABC neural network where to focus 
+    its learning during training.
 
-    Args:
-        bbox (NDArray): Target bounding box.
-        image_size (int): Size of the input image.
-        map_size (int): Size of the output score map.
-        r_pos, r_neg (int): Radius for positive and negative locations.
+    Why we need this exactly:
+    The SiamABC Box Tower predicts regression offsets for every single cell on a grid[cite: 1]. 
+    However, we don't care if the network is bad at predicting the box from a pixel in the 
+    far corner of the background. We only want to train it to make highly accurate box 
+    predictions from pixels that are actually *inside* or very close to the target object. 
+    This function generates a weight map that assigns a value of 1.0 to the dead-center 
+    of the object, 0.5 to the immediate edges, and 0 to the irrelevant background.
 
-    Returns:
-        torch.Tensor: Weight map.
+    Inputs:
+        bbox: The ground-truth bounding box.
+        image_size (int): The dimension of the raw input search crop (e.g., 255x255).
+        map_size (int): The dimension of the network's output feature map (e.g., 25x25).
+        r_pos (int): The radius around the center considered "highly important" (weight 1.0).
+        r_neg (int): The radius marking the boundary of the "neutral zone" (weight 0.5).
+
+    Outputs:
+        torch.Tensor: A 2D grid of shape (map_size, map_size) containing the loss weights 
+        for the regression head.
     """
     bbox_c_x, bbox_c_y = bbox[0] + bbox[2] // 2, bbox[1] + bbox[3] // 2
     sz_x, sz_y = np.floor(float(bbox_c_x / image_size * map_size)), np.floor(
@@ -300,6 +696,29 @@ def make_grid(
     total_stride: int,
     instance_size: int,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Pre-computes a static translation map between the network's internal matrix and 
+    the actual video frame pixels.
+
+    Why we need this exactly:
+    SiamABC doesn't directly spit out absolute pixel coordinates (like "x=500, y=300"). 
+    Instead, its Box Tower head looks at a compressed feature map (e.g., 16x16) and 
+    predicts *distances* to the box edges from each of those grid cells[cite: 1]. To turn those 
+    predicted distances back into a real bounding box we can draw on the screen, we 
+    first need to know exactly which real-world image pixel corresponds to each of 
+    those 16x16 grid cells. Because this mapping never changes, we calculate it 
+    once here to save precious CPU/GPU cycles during real-time tracking.
+
+    Inputs:
+        score_size (int): The width/height of the network's output feature map (e.g., 16).
+        total_stride (int): The downsampling factor of the ResNet backbone. E.g., a stride 
+                            of 16 means 1 feature map cell equals 16 image pixels.
+        instance_size (int): The total resolution of the search image crop (e.g., 255).
+
+    Outputs:
+        Tuple[torch.Tensor, torch.Tensor]: Two tensors (grid_x, grid_y) representing the 
+        absolute X and Y pixel coordinates for every cell in the feature map.
+    """
     x, y = np.meshgrid(
         np.arange(0, score_size) - np.floor(float(score_size // 2)),
         np.arange(0, score_size) - np.floor(float(score_size // 2)),
@@ -316,13 +735,25 @@ def limit(
     radius: Union[torch.Tensor, float],
 ) -> Union[torch.Tensor, float]:
     """
-    Limit the scale ratio to avoid extreme values.
+    Mathematically restrains object scale changes so the tracker doesn't predict 
+    impossible physical deformations.
 
-    Args:
-        radius (Union[Tensor, float]): Scale ratio.
+    Why we need this exactly:
+    During standard tracking, we apply a "penalty" to predictions that suggest the target 
+    suddenly grew or shrank by a massive, unnatural amount in just 1/30th of a second. 
+    This function processes the ratio of the new box size to the old box size. By forcing 
+    the result to always be >= 1.0 (e.g., if the ratio is 0.5, it flips to 2.0), it 
+    creates a symmetric penalty curve. This prevents visual distractors from tricking the 
+    tracker into collapsing the box down to a single pixel or blowing it up to cover 
+    the whole screen.
 
-    Returns:
-        Union[Tensor, float]: Limited scale ratio.
+    Inputs:
+        radius (Union[torch.Tensor, float]): The calculated ratio between the proposed 
+                                             bounding box scale and the previous frame's scale.
+
+    Outputs:
+        Union[torch.Tensor, float]: The constrained ratio, mathematically guaranteed to 
+        be >= 1.0.
     """
     if isinstance(radius, torch.Tensor):
         return torch.maximum(radius, 1.0 / radius)
@@ -334,13 +765,24 @@ def squared_size(
     h: int,
 ) -> Union[torch.Tensor, float]:
     """
-    Compute the side length of a square with equivalent area after padding.
+    Calculates the exact dimension of the square image crop we need to feed into the 
+    SiamABC network.
 
-    Args:
-        w, h (int): Original width and height.
+    Why we need this exactly:
+    Real-world objects are usually rectangles (like cars or walking people), but neural 
+    networks like SiamABC's ResNet backbone are heavily optimized to process perfect 
+    squares. We cannot just stretch the image to make it square, or it distorts the 
+    target's appearance. Instead, we use this formula to calculate a square that perfectly 
+    contains the rectangular object, plus a specific, mathematically consistent amount of 
+    background "context" padding. This context is critical for the network to understand 
+    the object's edges.
 
-    Returns:
-        Union[Tensor, float]: Equivalent square side length.
+    Inputs:
+        w (int): The current estimated width of the target object.
+        h (int): The current estimated height of the target object.
+
+    Outputs:
+        Union[torch.Tensor, float]: The length of one side of the required square crop.
     """
     pad = (w + h) * 0.5
     size = (w + pad) * (h + pad)
@@ -354,14 +796,22 @@ def unravel_index(
     shape: Tuple[int, int],
 ) -> Tuple[int, ...]:
     """
-    Convert a flat index to a multi-dimensional index.
+    Translates a 1D flat computer index back into human-readable 2D map coordinates (row, col).
 
-    Args:
-        index (Any): Flat index.
-        shape (Tuple[int, int]): Dimensions of the target tensor.
+    Why we need this exactly:
+    When the SiamABC network outputs its classification map (the confidence scores), we use 
+    PyTorch's argmax function to find the absolute highest score. However, PyTorch flattens 
+    the 2D map into a 1D list and returns a single number (e.g., "The highest score is at 
+    index 145"). To actually locate the target and pull its bounding box coordinates, we 
+    must translate "145" back into its 2D grid position (e.g., "Row 9, Column 1").
 
-    Returns:
-        Tuple[int, ...]: Multi-dimensional index.
+    Inputs:
+        index (Any): The flat 1D integer index returned by argmax.
+        shape (Tuple[int, int]): The original dimensions (Height, Width) of the feature map.
+
+    Outputs:
+        Tuple[int, ...]: A tuple representing the exact multidimensional coordinates 
+        (e.g., (row, col)).
     """
     out = []
     for dim in reversed(shape):
@@ -376,15 +826,28 @@ def calc_iou(
     smooth: float = 1.0,
 ) -> torch.Tensor:
     """
-    Compute the Intersection-over-Union (IoU) between two boxes.
+    Calculates how well our predicted bounding boxes overlap with the true bounding boxes 
+    (Intersection-over-Union) at high speed across massive batches of data.
 
-    Args:
-        reg_target (torch.Tensor): Ground-truth boxes.
-        pred (torch.Tensor): Predicted boxes.
-        smooth (float): Smoothing factor to avoid division by zero.
+    Why we need this exactly:
+    IoU is the gold-standard metric for accuracy in object tracking. In SiamRAM, we need 
+    to calculate IoU for two major reasons: 
+    1. During training, to calculate the loss and teach the network to draw tighter boxes.
+    2. During live tracking, specifically in the Distractor-Aware Memory (DAM) module[cite: 1]. 
+       The RAM buffer has a strict admission gate: it will only store a new appearance memory 
+       if the IoU between the current frame and the previous frame is >= 0.40 (Eq 7)[cite: 1]. 
+       This function is highly optimized using vector math to compute these overlaps instantly.
 
-    Returns:
-        torch.Tensor: IoU values.
+    Inputs:
+        reg_target (torch.Tensor): A batch of ground-truth bounding box coordinates.
+        pred (torch.Tensor): A batch of predicted bounding box coordinates.
+        smooth (float): A tiny mathematical buffer added to the calculation. It prevents 
+                        divide-by-zero crashes if the network accidentally predicts an 
+                        impossible box with 0 area. Default is 1.0.
+
+    Outputs:
+        torch.Tensor: A tensor containing the final IoU overlap scores (ranging from 0.0 to 1.0) 
+        for every box in the batch.
     """
     target_area = (reg_target[..., 0] + reg_target[..., 2]) * (
         reg_target[..., 1] + reg_target[..., 3]

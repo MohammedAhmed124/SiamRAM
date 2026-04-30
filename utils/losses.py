@@ -33,10 +33,22 @@ from utils.utils import calc_iou
 
 class BoxLoss(nn.Module):
     """
-    BBOX Loss: optimizes IoU of bounding boxes
-    Original implentation:
-    losses = -torch.log(calc_iou(reg_target=target, pred=pred)) was computationally unstable
-    those was replaced with: 1 - IoU
+    Implements the geometric Bounding Box loss based on Intersection-over-Union (IoU).
+
+    ### Why we need this
+    Standard coordinate regression (like L1) fails because a 10-pixel error on a 
+    tiny drone is a disaster, while a 10-pixel error on a close-up car is negligible. 
+    IoU is scale-invariant, making it much more robust for UAV tracking where object 
+    sizes vary wildly. We use $1 - IoU$ to transform a similarity measure 
+    into a minimizable loss function.
+
+    ### Inputs
+    *   **pred**: (Tensor) The predicted bounding boxes from the Box Tower.
+    *   **target**: (Tensor) The ground-truth boxes.
+    *   **weight**: (Optional Tensor) A spatial mask to prioritize specific regions.
+
+    ### Returns
+    *   **Tensor**: A scalar representing the average geometric error.
     """
 
     def __init__(
@@ -74,10 +86,14 @@ class BoxLoss(nn.Module):
 
 class TrackingHeadLoss(nn.Module):
     """
-    Combined loss for SiamABC classification and regression heads.
+    The unified loss objective for the SiamABC core tracker.
 
-    Computes Focal Loss for the classification map and IoU Loss (masked by
-    positive labels) for the regression map.
+    ### Why we need this
+    SiamABC produces two outputs simultaneously: a classification map $\hat{c}$ 
+    and a regression map $\hat{\Delta}$. This class combines Focal Loss 
+    (for finding the object) and BoxLoss (for sizing it) into a single gradient 
+    that updates the Box Tower heads[cite: 1]. It ensures the model stays 
+    discriminative even when hard negatives are present in the search region.
     """
 
     def __init__(
@@ -88,13 +104,13 @@ class TrackingHeadLoss(nn.Module):
         focal_gamma=2.0,
     ):
         """
-        Initialise the TrackingHeadLoss.
+        Configure the loss hyperparameters.
 
         Args:
-            cls_weight (float): Weight for the classification loss.
-            bbox_weight (float): Weight for the regression loss.
-            focal_alpha (float): Alpha parameter for Focal Loss.
-            focal_gamma (float): Gamma parameter for Focal Loss.
+            cls_weight (float): Importance of the classification branch.
+            bbox_weight (float): Importance of the box refinement branch.
+            focal_alpha (float): Balancing factor for rare positive samples.
+            focal_gamma (float): The "focusing" parameter that down-weights easy examples.
         """
         super().__init__()
         self.cls_weight = cls_weight
@@ -109,6 +125,22 @@ class TrackingHeadLoss(nn.Module):
         pred,
         label,
     ):
+        """
+        Internal implementation of Focal Loss for the sparse classification map.
+
+        ### Why we need this
+        In a typical search crop, 99% of the pixels are background. A standard loss 
+        would make the model "lazy"—it would just predict 'background' for everything 
+        to get a low error. Focal Loss forces the model to focus on the 1% of pixels 
+        that actually belong to the target.
+
+        ### Inputs
+        *   **pred**: Raw logits from the classification head.
+        *   **label**: Binary ground-truth map (1 for target center, 0 for background).
+
+        ### Returns
+        *   **Tensor**: The weighted classification penalty.
+        """
         pred = pred.view(-1)
         label = label.view(-1).float()
 
@@ -144,6 +176,22 @@ class TrackingHeadLoss(nn.Module):
         target,
         reg_weight,
     ):
+        """
+        Computes regression loss only for the cells that actually contain the target.
+
+        ### Why we need this
+        It makes no sense to calculate bounding box error for a pixel that is 
+        background. We use `reg_weight` as a mask to ensure that only "positive" 
+        locations contribute to the box refinement gradients.
+
+        ### Inputs
+        *   **pred**: Predicted regression offsets.
+        *   **target**: Ground-truth offsets.
+        *   **reg_weight**: A mask where > 0 indicates a positive target location.
+
+        ### Returns
+        *   **Tensor**: Scaled regression loss.
+        """
         p = pred.permute(0, 2, 3, 1).reshape(-1, 4)
         t = target.permute(0, 2, 3, 1).reshape(-1, 4)
         w = reg_weight.reshape(-1)
@@ -161,17 +209,18 @@ class TrackingHeadLoss(nn.Module):
         reg_weight,
     ):
         """
-        Compute the total combined loss for a batch.
+        Executes the full forward pass for the multi-task loss objective.
 
-        Args:
-            cls_pred (torch.Tensor): Predicted classification logit map.
-            bbox_pred (torch.Tensor): Predicted regression map.
-            cls_label (torch.Tensor): Ground-truth classification map.
-            bbox_label (torch.Tensor): Ground-truth regression map.
-            reg_weight (torch.Tensor): Mask for valid regression samples.
+        ### Inputs
+        *   **cls_pred**: Classification logits from the network.
+        *   **bbox_pred**: Regression map from the network.
+        *   **cls_label**: Target classification grid.
+        *   **bbox_label**: Target regression grid.
+        *   **reg_weight**: Mask for valid regression samples.
 
-        Returns:
-            Dict[str, torch.Tensor]: Dictionary containing 'total', 'cls_loss', and 'bbox_loss'.
+        ### Returns
+        *   **Dict**: A collection containing the 'total' loss for backprop, 
+            plus individual detached losses for logging/monitoring.
         """
         cls_loss = self._cls_loss(cls_pred, cls_label)
         bbox_loss = self._bbox_loss(bbox_pred, bbox_label, reg_weight)

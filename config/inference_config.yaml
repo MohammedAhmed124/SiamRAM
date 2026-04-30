@@ -36,7 +36,7 @@ tracker:
   template_size: 128
   memory_window_size: 20
   dynamic_update_threshold: 0.87
-  running_confidence_floor_value: 100
+  running_confidence_floor_value: 60
   iou_threshold: 0.6
   warmup_frames: 35
   warmup_window_size: 8

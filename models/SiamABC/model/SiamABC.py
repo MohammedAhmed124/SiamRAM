@@ -235,6 +235,7 @@ class SiamABCNet(nn.Module):
         This is the lowest-level extraction step and is intentionally kept
         separate so that callers can cache its output and avoid redundant
         computation across frames (see ``track``).
+        It is called by `get_features()`.
 
         Args:
             x (torch.Tensor):
@@ -254,6 +255,21 @@ class SiamABCNet(nn.Module):
         self,
         crop: torch.Tensor,
     ) -> torch.Tensor:
+        """
+        Extract and project features for a given image crop.
+
+        This function passes the crop through the `feature_extractor()` backbone
+        and then applies the `neck` layer to project the channel dimensionality
+        to `adjust_channels`. It is called by `forward()` for each input crop.
+
+        Args:
+            crop (torch.Tensor):
+                Input image crop of shape ``(B, 3, H, W)``.
+
+        Returns:
+            torch.Tensor:
+                Projected feature map of shape ``(B, adjust_channels, H', W')``.
+        """
         features = self.feature_extractor(crop)
         features = self.neck(features)
         return features
@@ -264,7 +280,25 @@ class SiamABCNet(nn.Module):
         search_mixed_attention: torch.Tensor,
         search: torch.Tensor,
         lam: torch.Tensor,
-    ) -> Tuple[str, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Connect the attention-refined features to the regression head.
+
+        Passes the mixed attention maps and original search features into
+        the `BoxTower` (`connect_model`) to compute the bounding box regression
+        and target classification scores. Called by both `forward()` and `track()`.
+
+        Args:
+            template_mixed_attention (torch.Tensor): The attention-refined template features.
+            search_mixed_attention (torch.Tensor): The attention-refined search features.
+            search (torch.Tensor): The original raw search features.
+            lam (torch.Tensor): The lambda parameter for TTA (Test-Time Augmentation).
+
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor]:
+                - The predicted bounding box regression map.
+                - The classification score map.
+        """
         bbox_pred, cls_pred, _, _ = self.connect_model(
             search_org=search,
             search=search_mixed_attention,
@@ -277,7 +311,31 @@ class SiamABCNet(nn.Module):
         self,
         x: Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
         lam: Optional[torch.Tensor] = None,
-    ) -> Dict[str, torch.Tensor | List[torch.Tensor]]:
+    ) -> Dict[str, torch.Tensor | List[torch.Tensor] | None]:
+        """
+        Execute the forward pass for training.
+
+        Takes the four image crops, processes each through `get_features()`,
+        combines them in the polarized self-attention module, and then calls
+        `connector()` to produce tracking outputs.
+
+        Args:
+            x (Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]):
+                Tuple containing the static template, dynamic template,
+                static search region, and dynamic search region respectively.
+            lam (Optional[torch.Tensor], optional):
+                Lambda value for TTA. Defaults to None, in which case a
+                zero tensor is used.
+
+        Returns:
+            Dict[str, torch.Tensor | List[torch.Tensor] | None]:
+                A dictionary containing:
+                - Target regression map
+                - Target classification map
+                - SimSiam auxiliary outputs (None by default)
+                - Search to template similarity score (None by default)
+                - The attention map generated for the search region
+        """
         template, dynamic_template, search, dynamic_search = x
 
         if lam is None:
@@ -327,7 +385,27 @@ class SiamABCNet(nn.Module):
         template_features: torch.Tensor,
         dynamic_template_features: torch.Tensor,
         lam: torch.Tensor,
-    ) -> Dict[str, torch.Tensor]:
+    ) -> Dict[str, torch.Tensor | None]:
+        """
+        Execute tracking inference given pre-computed features.
+
+        This bypasses the `get_features()` extraction step for performance,
+        taking raw backbone features directly. It passes the concatenated features
+        into the polarized self attention, then calls `connector()` to obtain the
+        final predictions.
+
+        Args:
+            search_features (torch.Tensor): Encoded current search region.
+            dynamic_search_features (torch.Tensor): Encoded historical search region.
+            template_features (torch.Tensor): Encoded static template.
+            dynamic_template_features (torch.Tensor): Encoded dynamic template.
+            lam (torch.Tensor): The lambda parameter for test-time augmentation.
+
+        Returns:
+            Dict[str, torch.Tensor | None]:
+                A dictionary containing the regression map, classification map,
+                attention map, and a placeholder for similarity score.
+        """
 
         template_combined_features = torch.concat(
             [template_features, dynamic_template_features], dim=1

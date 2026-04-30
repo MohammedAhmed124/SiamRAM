@@ -1,3 +1,12 @@
+"""
+SiamRAM Tracker: A robust hybrid tracker with occlusion recovery.
+
+This module implements the SiamRAMTracker, which combines Siamese visual
+tracking (SiamABC) with a YOLO-based re-detection system and an Extended
+Kalman Filter (EKF) for motion modelling. It features a Dynamic Reference
+Memory (DRM) for reliable re-acquisition after long-term occlusion.
+"""
+import os
 from collections import deque
 from typing import List, Optional, Tuple, TypedDict, cast
 
@@ -18,6 +27,22 @@ import os
 
 
 class DRMKwargs(TypedDict):
+    """
+    Keyword arguments for the Dynamic Reference Memory (DRM) matching logic.
+
+    Attributes:
+        lam_iou (float): Weight for Intersection-over-Union similarity.
+        lam_app (float): Weight for appearance (cosine) similarity.
+        lam_mot (float): Weight for motion consistency.
+        lam_time (float): Weight for temporal decay.
+        alpha (float): Temporal decay rate.
+        gamma (float): Distractor penalty weight.
+        margin (float): Minimum score margin over distractors.
+        top_k (int): Number of top candidates to consider.
+        skip_threshold (float): Score above which re-verification is skipped.
+        lam_dist (float): Weight for spatial distance penalty.
+        lam_cand_dir (float): Weight for candidate direction consistency.
+    """
     lam_iou: float
     lam_app: float
     lam_mot: float
@@ -41,12 +66,12 @@ class SiamRAMTracker:
         siam_tracker: SiamABCTracker,
         yolo_weights: str = "yolo11n.pt",
         conf_threshold: float = 0.60,
-        occ_siam_reacq_threshold = 0.8,
+        occ_siam_reacq_threshold=0.8,
         reacq_threshold: float = 0.55,
         yolo_conf: float = 0.30,
         yolo_iou: float = 0.45,
         app_match_threshold: float = 0.72,
-        occ_siam_margin = 0.2,
+        occ_siam_margin=0.2,
         nudge_alpha: float = 0.30,
         tau_occ: float = 0.40,
         beta: float = 0.06,
@@ -109,8 +134,8 @@ class SiamRAMTracker:
         vel_dir_hard_gate: float = 0.5,
         yolo_filter_class: bool = False,
         yolo_class_detect_frames: int = 5,
-        copile_yolo = False,
-        debug = True
+        copile_yolo=False,
+        debug=True
     ):
         """
         Inputs:
@@ -227,7 +252,6 @@ class SiamRAMTracker:
 
         self._distractor_bank_maxlen = distractor_bank_maxlen
         self.velocity_window_average = velocity_window_average
-
 
         self.occ_siam_margin = occ_siam_margin
 
@@ -571,7 +595,7 @@ class SiamRAMTracker:
                     f"loss_cause={loss_cause}  "
                     f"out_of_frame={self._out_of_frame}  exit_edge={self._exit_edge}  "
                     f"entry_streak={entry_streak_val}"
-            )
+                )
 
             area_skip = self._detect_shrinkage_onset(
                 max_lookback=self.shrinkage_max_lookback,
@@ -806,18 +830,6 @@ class SiamRAMTracker:
             if ekf_inside and vel_inward:
                 self._out_of_frame = False
                 self._exit_edge = None
-        # else:
-        #     if (self._search_cx < 0 or self._search_cx >= w_fr or
-        #         self._search_cy < 0 or self._search_cy >= h_fr):
-        #         if self._search_cx >= w_fr:
-        #             self._exit_edge = 'right'
-        #         elif self._search_cx < 0:
-        #             self._exit_edge = 'left'
-        #         elif self._search_cy >= h_fr:
-        #             self._exit_edge = 'bottom'
-        #         else:
-        #             self._exit_edge = 'top'
-        #         self._out_of_frame = True
 
         else:
             obj_w, obj_h = self._get_median_size()
@@ -944,7 +956,7 @@ class SiamRAMTracker:
             drm_ok = drm_score >= self.app_match_threshold
             if self.debug:
                 print(f"[occ frame {self._occ_frames}] phase=siam  "
-                    f"score={score:.3f}  drm={drm_score:.3f}  pass={drm_ok}")
+                      f"score={score:.3f}  drm={drm_score:.3f}  pass={drm_ok}")
 
             if drm_ok:
                 self.recovered_early_occlusion = True
@@ -1077,7 +1089,7 @@ class SiamRAMTracker:
         if last_idx == -1:
             if self.debug:
                 print(f"[occ frame {self._occ_frames}] phase=final_drm  "
-                    f"no candidates in any collection frame — resetting")
+                      f"no candidates in any collection frame — resetting")
             _reset()
             return self.held_box, 0.0
 
@@ -1092,7 +1104,7 @@ class SiamRAMTracker:
             bbox
             for bbox, vel in zip(last_cand_bboxes, cand_vels)
             if (vel is not None or single_frame_mode)
-            and self._is_near_exit_edge(bbox, frame, fraction=0.50)
+               and self._is_near_exit_edge(bbox, frame, fraction=0.50)
         ]
 
         _n_edge_rejected = sum(
@@ -1107,12 +1119,12 @@ class SiamRAMTracker:
                 f"fully_tracked={len(fully_tracked_bboxes)}  "
                 f"drm_size={self.memory.drm_size()}  ram={len(self.memory)}  "
                 f"ekf_unc={cast(BBoxEKF, self.ekf).get_uncertainty():.1f}px"
-        )
+            )
 
         if not fully_tracked_bboxes:
             if self.debug:
                 print(f"[occ frame {self._occ_frames}] phase=final_drm  "
-                    f"no fully-tracked candidates — resetting")
+                      f"no fully-tracked candidates — resetting")
             if last_cand_bboxes:
                 self.held_box = self._nudge_toward_nearest(frame, last_cand_bboxes)
                 ekf = self.ekf
@@ -1166,7 +1178,6 @@ class SiamRAMTracker:
             # vel = (cand_vels[cand_idx]
             #        if cand_idx is not None and cand_idx < len(cand_vels)
             #        else None)
-
 
             vel = (cand_vels[cand_idx]
                    if cand_idx is not None and cand_idx < len(cand_vels)
@@ -2515,14 +2526,14 @@ class SiamRAMTracker:
             self._class_warmup_done = True
             if self.debug:
                 print(f"[class filter] target class locked: {best_cls}  "
-                    f"(votes={votes})")
-            
+                      f"(votes={votes})")
+
     def _is_near_exit_edge(
-    self,
-    bbox: np.ndarray,
-    frame: np.ndarray,
-    fraction: float = 0.5,
-) -> bool:
+        self,
+        bbox: np.ndarray,
+        frame: np.ndarray,
+        fraction: float = 0.5,
+    ) -> bool:
         """
         During out-of-frame occlusion, returns True only when the candidate's
         centre lies within `fraction` of the frame dimension measured from the
@@ -2548,25 +2559,24 @@ class SiamRAMTracker:
             return cy <= h_fr * fraction
 
         return True
-    
 
     def load_yolo_compiled(self, weights_path, force_recompile=False):
         engine_path = weights_path.replace(".pt", ".engine")
-        
+
         if not os.path.exists(engine_path) or force_recompile:
             # Use a print statement to keep it consistent with your previous logs
             print("Compiling YOLO model using TensorRT at 320x320 (may take a minute)...")
-            
+
             model = YOLO(weights_path)
-            
+
             # Add imgsz=320 here to lock the engine to that resolution
             model.export(
-                format="engine", 
-                half=True, 
-                device=0, 
+                format="engine",
+                half=True,
+                device=0,
                 imgsz=320
             )
-        
+
         return YOLO(engine_path)
     
 
@@ -2591,16 +2601,26 @@ class SiamRAMTracker:
 
     @property
     def running_dynamic_bbox(self):
+        """
+        Return the bounding box used for the running dynamic template.
+        """
         return self.tracker.running_dynamic_bbox
 
     @property
     def running_dynamic_image(self):
         return self.tracker.running_dynamic_image
+        return self.tracker.running_dynamic_image
 
     @property
     def tracking_config(self):
+        """
+        Return the underlying tracker configuration.
+        """
         return self.tracker.tracking_config
 
     @property
     def tracking_state(self):
+        """
+        Return the current internal tracking state.
+        """
         return self.tracker.tracking_state

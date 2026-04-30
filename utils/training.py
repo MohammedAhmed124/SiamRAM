@@ -34,6 +34,9 @@ from .losses import TrackingHeadLoss
 
 
 class OptimizerParamGroup(TypedDict):
+    """
+    Dictionary representing a parameter group for a PyTorch optimizer.
+    """
     params: list[nn.Parameter]
     lr: float
     name: str
@@ -122,6 +125,9 @@ def get_trainable_optimizer(model, lr: float = 1e-4,
 
 
 def set_reg_bn_train(model):
+    """
+    Set BatchNorm layers in the regression branch to training mode.
+    """
     for module in [
         model.connect_model.reg_encode,
         model.connect_model.reg_dw,
@@ -135,12 +141,18 @@ def set_reg_bn_train(model):
 
 # After model.train(), also freeze ALL BN outside cls branch:
 def set_bn_eval(model):
+    """
+    Set all BatchNorm layers in the model to evaluation mode.
+    """
     for name, m in model.named_modules():
         if isinstance(m, (nn.BatchNorm2d, nn.BatchNorm1d)):
             m.eval()
 
 
 def set_cls_bn_train(model):
+    """
+    Set BatchNorm layers in the classification branch to training mode.
+    """
     for module in [
         model.connect_model.cls_encode,
         model.connect_model.cls_dw,

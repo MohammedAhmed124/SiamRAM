@@ -1,3 +1,9 @@
+"""
+IPython display utilities for tracking visualisation.
+
+This module provides functions to render tracking sequences and annotations
+as HTML5 videos directly within Jupyter/IPython environments.
+"""
 import os
 
 import matplotlib.patches as patches
@@ -15,6 +21,19 @@ def show_video(
     n_frames_to_display=None,
     figsize=(12, 6)
 ):
+    """
+    Render a tracking sequence as an HTML5 video for Jupyter Notebooks.
+
+    Args:
+        video_folder_path (str): Path to the directory containing image frames.
+        annotation_path (str): Path to the ground-truth annotation file.
+        start_end_idx (Tuple[int, int]): Start and end frame indices.
+        n_frames_to_display (Optional[int]): Number of frames to render.
+        figsize (Tuple[int, int]): Size of the matplotlib figure.
+
+    Returns:
+        IPython.display.HTML: The rendered HTML5 video object.
+    """
     start_frame, end_frame = start_end_idx
     all_frames = sorted(os.listdir(video_folder_path), key=lambda x: int(x.split('.')[0]))
     frames = all_frames[start_frame - 1: end_frame]

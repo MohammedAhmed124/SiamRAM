@@ -134,6 +134,12 @@ class TrackingSequence:
     """
 
     def __init__(self, row: Dict):
+        """
+        Initialise a TrackingSequence from a dataframe row.
+
+        Args:
+            row (Dict): Dictionary containing 'seq_path', 'annot_path', etc.
+        """
         self.seq_path = row["seq_path"]
         self.annot_path = row["annot_path"]
         self.start_idx = int(row["start_idx"])
@@ -188,6 +194,15 @@ class TrackingSequence:
         return None
 
     def frame_path(self, frame_idx: int) -> str:
+        """
+        Return the absolute path to the image at the given frame index.
+
+        Args:
+            frame_idx (int): Frame index.
+
+        Returns:
+            str: Absolute file path.
+        """
         if self._frame_pattern is None:
             self._frame_pattern = self._resolve_frame_pattern()
         return os.path.join(self.seq_path, self._frame_pattern.format(frame_idx))
@@ -215,6 +230,15 @@ class TrackingSequence:
         self._bboxes = bboxes
 
     def get_bbox(self, frame_idx: int) -> np.ndarray:
+        """
+        Return the ground-truth bounding box for the given frame index.
+
+        Args:
+            frame_idx (int): Frame index.
+
+        Returns:
+            np.ndarray: Bounding box [x, y, w, h].
+        """
         self._load_bboxes()
         assert self._bboxes is not None
         local = frame_idx - self.start_idx
@@ -223,9 +247,17 @@ class TrackingSequence:
         return self._bboxes[local].copy()
 
     # ── validity ──────────────────────────────────────────────────────────────
-
     @staticmethod
     def is_valid_bbox(bbox: np.ndarray) -> bool:
+        """
+        Check if a bounding box is valid (not NaN, positive dimensions).
+
+        Args:
+            bbox (np.ndarray): Bounding box to check.
+
+        Returns:
+            bool: True if valid.
+        """
         return (
             not np.any(np.isnan(bbox))
             and bbox[2] > 5
@@ -241,6 +273,18 @@ class TrackingSequence:
         lower_end: Optional[int] = None,
         upper_end: Optional[int] = None,
     ) -> Optional[int]:
+        """
+        Randomly sample a frame index with a valid bounding box.
+
+        Args:
+            rng (random.Random): Random number generator.
+            max_tries (int): Maximum number of random attempts.
+            lower_end (Optional[int]): Lower bound for sampling.
+            upper_end (Optional[int]): Upper bound for sampling.
+
+        Returns:
+            Optional[int]: Valid frame index or None.
+        """
         lower_end = max(lower_end, self.start_idx) if lower_end is not None else self.start_idx
         upper_end = min(upper_end, self.end_idx) if upper_end is not None else self.end_idx
         self._load_bboxes()
@@ -259,6 +303,18 @@ class TrackingSequence:
         lower_end: Optional[int] = None,
         upper_end: Optional[int] = None,
     ) -> Tuple[Optional[int], Optional[int], Optional[np.ndarray]]:
+        """
+        Sample a pair of (template, search) frame indices.
+
+        Args:
+            rng (random.Random): Random number generator.
+            max_frame_gap (int): Maximum temporal distance between frames.
+            lower_end, upper_end (Optional[int]): Search range bounds.
+
+        Returns:
+            Tuple[Optional[int], Optional[int], Optional[np.ndarray]]:
+                (template_idx, search_idx, search_bbox).
+        """
         lower_end = max(lower_end, self.start_idx) if lower_end is not None else self.start_idx
         upper_end = min(upper_end, self.end_idx) if upper_end is not None else self.end_idx
 
@@ -306,6 +362,16 @@ class UAVTrackingDataset(Dataset):
         neg_ratio: float = 0.5,
         seed: int = 42,
     ):
+        """
+        Initialise the UAVTrackingDataset.
+
+        Args:
+            dataframe (pd.DataFrame): Dataframe containing sequence info.
+            tracking_config (Dict[str, Any]): Tracker hyper-parameters.
+            num_samples (int): Total number of samples per epoch.
+            neg_ratio (float): Probability of sampling a negative pair.
+            seed (int): Random seed for reproducibility.
+        """
         super().__init__()
 
         self.template_size = tracking_config["template_size"]
@@ -418,6 +484,18 @@ class UAVTrackingDataset(Dataset):
         upper_end=None,
         max_frame_gap=None,
     ):
+        """
+        Sample a (template_crop, search_crop) pair from a sequence.
+
+        Args:
+            rng (random.Random): Random number generator.
+            seq (TrackingSequence): The sequence to sample from.
+            lower_end, upper_end (Optional[int]): Range bounds.
+            max_frame_gap (Optional[int]): Max temporal distance.
+
+        Returns:
+            Tuple: (t_crop, t_idx, t_bbox, s_crop, s_idx, s_bbox, success).
+        """
         failure = (None, None, None, None, None, None, False)
         frame_gap = self.max_frame_gap if max_frame_gap is None else max_frame_gap
 
@@ -440,6 +518,16 @@ class UAVTrackingDataset(Dataset):
     # ── crop helpers (positive path) ──────────────────────────────────────────
 
     def get_template_crop(self, image: np.ndarray, rect: np.ndarray):
+        """
+        Extract and preprocess a template crop from an image.
+
+        Args:
+            image (np.ndarray): Source RGB image.
+            rect (np.ndarray): Target bounding box [x, y, w, h].
+
+        Returns:
+            Tuple[torch.Tensor, np.ndarray]: (preprocessed_crop, crop_bbox).
+        """
         shifted = self.apply_shift_scale(
             rect, image.shape,
             shift_factor=self.template_image_shift,
@@ -460,6 +548,17 @@ class UAVTrackingDataset(Dataset):
         return img, template_bbox
 
     def get_search_crop(self, image: np.ndarray, bbox: np.ndarray):
+        """
+        Extract and preprocess a search crop from an image.
+
+        Args:
+            image (np.ndarray): Source RGB image.
+            bbox (np.ndarray): Target bounding box [x, y, w, h].
+
+        Returns:
+            Tuple[torch.Tensor, np.ndarray, np.ndarray]:
+                (preprocessed_crop, search_bbox, context_rect).
+        """
         shifted = self.apply_shift_scale(
             bbox, image.shape,
             shift_factor=self.search_image_shift,
@@ -876,6 +975,18 @@ class UAVTrackingDataset(Dataset):
     def apply_shift_scale(
         self, bbox: np.ndarray, img_shape, shift_factor=0.0, scale_factor=0.0
     ) -> np.ndarray:
+        """
+        Apply random translation and scaling to a bounding box.
+
+        Args:
+            bbox (np.ndarray): Original bounding box.
+            img_shape (Tuple[int, int]): Image dimensions (H, W).
+            shift_factor (float): Max translation ratio.
+            scale_factor (float): Max scaling ratio.
+
+        Returns:
+            np.ndarray: Shifted and scaled bounding box.
+        """
         x, y, w, h = bbox
         cx, cy = x + w / 2.0, y + h / 2.0
         shift_x = np.random.uniform(-shift_factor, shift_factor) * w
@@ -893,6 +1004,15 @@ class UAVTrackingDataset(Dataset):
 
     @staticmethod
     def is_valid_bbox(bbox: np.ndarray) -> bool:
+        """
+        Check if a bounding box is valid.
+
+        Args:
+            bbox (np.ndarray): Bounding box [x, y, w, h].
+
+        Returns:
+            bool: True if valid.
+        """
         return (
             not np.any(np.isnan(bbox))
             and bbox[2] > 5

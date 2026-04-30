@@ -1,6 +1,6 @@
 {
   "name": "SiamRAM (GPU)",
-  "dockerComposeFile": ["../docker-compose.gpu.yml"],
+  "dockerComposeFile": ["../containers/docker-compose.gpu.yml"],
   "service": "gpu",
   "workspaceFolder": "/app",
   "overrideCommand": false,

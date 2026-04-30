@@ -1,3 +1,10 @@
+"""
+Base tracker classes and state management.
+
+This module defines the abstract base class for all trackers in the
+SiamABC package, along with a TrackingState container for keeping
+track of historical frames and bounding boxes.
+"""
 from abc import ABC, abstractmethod
 from collections import deque
 from typing import Any, Callable, Deque, Optional, Tuple, Union
@@ -14,7 +21,20 @@ from utils.utils import limit, squared_size, to_device
 
 
 class TrackingState:
+    """
+    Container for maintaining the internal state of a tracking session.
+
+    Attributes:
+        frame_h (int): Height of the current video frame.
+        frame_w (int): Width of the current video frame.
+        bbox (NDArray): Most recent predicted bounding box.
+        pred_score (float): Confidence score of the last prediction.
+        paths (Deque): Historical sequence of predicted bounding boxes.
+    """
     def __init__(self) -> None:
+        """
+        Initialise an empty TrackingState.
+        """
         super().__init__()
         self.frame_h = 0
         self.frame_w = 0
@@ -26,12 +46,32 @@ class TrackingState:
         self.paths: Deque[NDArray] = deque(maxlen=70)
 
     def save_frame_shape(self, frame: np.ndarray) -> None:
+        """
+        Store the dimensions of the input frame.
+
+        Args:
+            frame (np.ndarray): Input image array.
+        """
         self.frame_h = frame.shape[0]
         self.frame_w = frame.shape[1]
 
 
 class Tracker(ABC):
+    """
+    Abstract base class for Siamese trackers.
+
+    Provides common utilities for image preprocessing, device management,
+    and state handling that are shared across different tracker variants.
+    """
     def __init__(self, model: nn.Module, cuda_id: Union[int, str] = 0, **tracking_config: Any) -> None:
+        """
+        Initialise the base tracker.
+
+        Args:
+            model (nn.Module): The neural network model used for tracking.
+            cuda_id (Union[int, str]): GPU device identifier.
+            **tracking_config: Hyperparameters and flags for the tracker.
+        """
         super().__init__()
 
         _mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
@@ -66,9 +106,18 @@ class Tracker(ABC):
 
     @abstractmethod
     def get_box_coder(self, tracking_config, cuda_id: str | int = 0):
+        """
+        Abstract method to retrieve the appropriate box coder.
+        """
         pass
 
     def to_device(self, cuda_id):
+        """
+        Move the tracker and its components to the specified device.
+
+        Args:
+            cuda_id (Union[int, str]): Destination device identifier.
+        """
         self.cuda_id = cuda_id
         self.window = to_device(self.window, cuda_id)
         self.box_coder = self.box_coder.to_device(self.cuda_id)
@@ -138,6 +187,9 @@ class Tracker(ABC):
         return x.sub_(self._norm_mean).div_(self._norm_std)
 
     def reset(self) -> None:
+        """
+        Clear cached features and reset the tracker to its initial state.
+        """
         self._template_features = None
 
     def initialize(self, image: NDArray, rect: NDArray, **kwargs) -> None:

@@ -1,6 +1,6 @@
 {
   "name": "SiamRAM (CPU)",
-  "dockerComposeFile": ["../docker-compose.cpu.yml"],
+  "dockerComposeFile": ["../../containers/docker-compose.cpu.yml"],
   "service": "cpu",
   "workspaceFolder": "/app",
   "overrideCommand": false,

@@ -53,6 +53,12 @@ torchvision = [
   { index = "pytorch-cu128", marker = "'gpu' in dependency_groups" },
   { index = "pytorch-cpu", marker = "'cpu' in dependency_groups and 'gpu' not in dependency_groups" },
 ]
+torch-tensorrt = [
+  { index = "pytorch-cu128", marker = "'gpu' in dependency_groups" },
+]
+tensorrt = [
+  { index = "pytorch-cu128", marker = "'gpu' in dependency_groups" },
+]
 
 [[tool.uv.index]]
 name = "pytorch-cu128"
@@ -68,6 +74,7 @@ explicit = true
 gpu = [
   "torch==2.11.0",
   "torchvision==0.26.0",
+  "torch-tensorrt==2.11.0",
 ]
 cpu = [
   "torch==2.11.0",
@@ -179,33 +186,33 @@ case-sensitive = true
 type = "simple"
 
 [tool.poe.tasks]
-gpu_build = { cmd = "docker compose -f docker-compose.gpu.yml build gpu", help = "Build the GPU Docker image." }
-gpu_up = { cmd = "docker compose -f docker-compose.gpu.yml up -d gpu", help = "Start GPU container in detached mode." }
-gpu_down = { cmd = "docker compose -f docker-compose.gpu.yml down --remove-orphans", help = "Stop GPU container." }
-gpu_logs = { cmd = "docker compose -f docker-compose.gpu.yml logs -f gpu", help = "Tail GPU container logs." }
-gpu_verify = { cmd = "docker compose -f docker-compose.gpu.yml exec gpu python test.py", help = "Verify GPU container environment." }
-gpu_shell = { cmd = "docker compose -f docker-compose.gpu.yml exec gpu bash", help = "Open shell in GPU container." }
+gpu_build = { cmd = "docker compose -f containers/docker-compose.gpu.yml build gpu", help = "Build the GPU Docker image." }
+gpu_up = { cmd = "docker compose -f containers/docker-compose.gpu.yml up -d gpu", help = "Start GPU container in detached mode." }
+gpu_down = { cmd = "docker compose -f containers/docker-compose.gpu.yml down --remove-orphans", help = "Stop GPU container." }
+gpu_logs = { cmd = "docker compose -f containers/docker-compose.gpu.yml logs -f gpu", help = "Tail GPU container logs." }
+gpu_verify = { cmd = "docker compose -f containers/docker-compose.gpu.yml exec gpu python containers/test.py", help = "Verify GPU container environment." }
+gpu_shell = { cmd = "docker compose -f containers/docker-compose.gpu.yml exec gpu bash", help = "Open shell in GPU container." }
 
-cpu_build = { cmd = "docker compose -f docker-compose.cpu.yml build cpu", help = "Build the CPU Docker image." }
-cpu_up = { cmd = "docker compose -f docker-compose.cpu.yml up -d cpu", help = "Start CPU container in detached mode." }
-cpu_down = { cmd = "docker compose -f docker-compose.cpu.yml down --remove-orphans", help = "Stop CPU container." }
-cpu_logs = { cmd = "docker compose -f docker-compose.cpu.yml logs -f cpu", help = "Tail CPU container logs." }
-cpu_verify = { cmd = "docker compose -f docker-compose.cpu.yml exec cpu python test.py", help = "Verify CPU container environment." }
-cpu_shell = { cmd = "docker compose -f docker-compose.cpu.yml exec cpu bash", help = "Open shell in CPU container." }
+cpu_build = { cmd = "docker compose -f containers/docker-compose.cpu.yml build cpu", help = "Build the CPU Docker image." }
+cpu_up = { cmd = "docker compose -f containers/docker-compose.cpu.yml up -d cpu", help = "Start CPU container in detached mode." }
+cpu_down = { cmd = "docker compose -f containers/docker-compose.cpu.yml down --remove-orphans", help = "Stop CPU container." }
+cpu_logs = { cmd = "docker compose -f containers/docker-compose.cpu.yml logs -f cpu", help = "Tail CPU container logs." }
+cpu_verify = { cmd = "docker compose -f containers/docker-compose.cpu.yml exec cpu python containers/test.py", help = "Verify CPU container environment." }
+cpu_shell = { cmd = "docker compose -f containers/docker-compose.cpu.yml exec cpu bash", help = "Open shell in CPU container." }
 
 gpu_setup = { sequence = ["gpu_build", "gpu_up", "gpu_verify"], help = "Build, start, and verify GPU container." }
 cpu_setup = { sequence = ["cpu_build", "cpu_up", "cpu_verify"], help = "Build, start, and verify CPU container." }
 
 [tool.poe.tasks.gpu_run]
 help = "Run a Python file inside the running GPU container."
-cmd = "docker compose -f docker-compose.gpu.yml exec gpu python ${file}"
+cmd = "docker compose -f containers/docker-compose.gpu.yml exec gpu python ${file}"
 args = [
   { name = "file", positional = true, help = "Python file path to run inside GPU container." }
 ]
 
 [tool.poe.tasks.cpu_run]
 help = "Run a Python file inside the running CPU container."
-cmd = "docker compose -f docker-compose.cpu.yml exec cpu python ${file}"
+cmd = "docker compose -f containers/docker-compose.cpu.yml exec cpu python ${file}"
 args = [
   { name = "file", positional = true, help = "Python file path to run inside CPU container." }
 ]

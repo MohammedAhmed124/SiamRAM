@@ -181,6 +181,8 @@ outputs/
 yolo11n.pt
 
 checkpoints/**.pth
+checkpoints/**.onnx
+checkpoints/**.engine
 yolo11n.pt
 debug_frames/
 

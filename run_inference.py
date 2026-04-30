@@ -19,7 +19,11 @@ directory from which it is invoked.
 
 import argparse
 import json
+import logging
 import os
+import subprocess
+import sys
+import warnings
 from collections import defaultdict
 from pathlib import Path
 
@@ -32,7 +36,21 @@ from models.SiamABC.tracker.trt_engine.siamabc import get_trt_tracker
 from models.SiamRAM import SiamRAMTracker
 from vis.test_model import run_inference
 
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", message=".*LeafSpec.*")
+warnings.filterwarnings("ignore", message=".*tensorrt.plugin module is experimental.*")
+
+os.environ["TORCH_LOGS"] = ""
+os.environ["TORCHDYNAMO_VERBOSE"] = "0"
+
+logging.getLogger("torch").setLevel(logging.ERROR)
+logging.getLogger("torch_tensorrt").setLevel(logging.ERROR)
+logging.getLogger("torch._inductor").setLevel(logging.ERROR)
+logging.getLogger("py.warnings").setLevel(logging.ERROR)
+
 BASE_DIR = Path(__file__).resolve().parent
+CHECKPOINTS_DIR = BASE_DIR / "checkpoints"
+CHECKPOINT_DOWNLOADER = CHECKPOINTS_DIR / "download_checkpoints.py"
 
 
 def parse_args():
@@ -42,7 +60,7 @@ def parse_args():
     )
     parser.add_argument(
         "--data_dir",
-        default=str(BASE_DIR / "dataset"),
+        default=str(BASE_DIR / "data"),
         help="Root directory containing video files and annotation sub-folders.",
     )
     parser.add_argument(
@@ -52,7 +70,7 @@ def parse_args():
     )
     parser.add_argument(
         "--manifest_path",
-        default=str(BASE_DIR / "dataset" / "metadata" / "contestant_manifest.json"),
+        default=str(BASE_DIR / "data" / "metadata" / "contestant_manifest.json"),
         help="Path to the competition manifest JSON file.",
     )
     parser.add_argument(
@@ -94,10 +112,110 @@ def parse_args():
     return parser.parse_args()
 
 
+def _resolve_weights_path(path_value: str) -> Path:
+    path = Path(path_value).expanduser()
+    if path.is_absolute():
+        if not path.exists():
+            checkpoint_candidate = CHECKPOINTS_DIR / path.name
+            if checkpoint_candidate.exists():
+                return checkpoint_candidate.resolve()
+        return path
+    if path.exists():
+        return path.resolve()
+    if len(path.parts) == 1:
+        return (CHECKPOINTS_DIR / path.name).resolve()
+    return (BASE_DIR / path).resolve()
+
+
+def _is_valid_checkpoint_file(path: Path) -> bool:
+    if not path.exists() or path.stat().st_size < 1024 * 1024:
+        return False
+    with path.open("rb") as f:
+        head = f.read(512).lstrip().lower()
+    return not (head.startswith(b"<!doctype html") or head.startswith(b"<html"))
+
+
+def _resolve_data_dir(path_value: str) -> Path:
+    path = Path(path_value).expanduser()
+    if path.is_absolute():
+        return path
+    candidate = (BASE_DIR / path).resolve()
+    if candidate.exists():
+        return candidate
+    if path.name == "dataset":
+        alt = (BASE_DIR / "data").resolve()
+        if alt.exists():
+            return alt
+    if path.name == "data":
+        alt = (BASE_DIR / "dataset").resolve()
+        if alt.exists():
+            return alt
+    return candidate
+
+
+def _resolve_manifest_path(path_value: str) -> Path:
+    path = Path(path_value).expanduser()
+    if path.is_absolute() and path.exists():
+        return path
+    candidates: list[Path] = []
+    if path.is_absolute():
+        candidates.append(path)
+    else:
+        candidates.append((BASE_DIR / path).resolve())
+    candidates.append((BASE_DIR / "data" / "metadata" / "contestant_manifest.json").resolve())
+    candidates.append((BASE_DIR / "dataset" / "metadata" / "contestant_manifest.json").resolve())
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
+def _ensure_required_checkpoints(weights_path: Path, yolo_path: Path) -> tuple[Path, Path]:
+    invalid_or_missing = [
+        p for p in (weights_path, yolo_path) if not _is_valid_checkpoint_file(p)
+    ]
+    if not invalid_or_missing:
+        return weights_path, yolo_path
+
+    if not CHECKPOINT_DOWNLOADER.exists():
+        missing_str = ", ".join(str(p) for p in invalid_or_missing)
+        raise FileNotFoundError(
+            f"Missing checkpoints: {missing_str}. Also missing downloader script: {CHECKPOINT_DOWNLOADER}"
+        )
+
+    print("Missing or invalid checkpoints detected. Downloading required models...")
+    subprocess.run(
+        [sys.executable, str(CHECKPOINT_DOWNLOADER), "--force"],
+        check=True,
+        cwd=str(BASE_DIR),
+    )
+
+    resolved_weights = _resolve_weights_path(str(weights_path))
+    resolved_yolo = _resolve_weights_path(str(yolo_path))
+    still_missing = [
+        p for p in (resolved_weights, resolved_yolo) if not _is_valid_checkpoint_file(p)
+    ]
+    if still_missing:
+        missing_str = ", ".join(str(p) for p in still_missing)
+        raise FileNotFoundError(f"Checkpoint download finished, but files are still missing: {missing_str}")
+
+    return resolved_weights, resolved_yolo
+
+
 def main():
     args = parse_args()
+    args.data_dir = str(_resolve_data_dir(args.data_dir))
+    args.manifest_path = str(_resolve_manifest_path(args.manifest_path))
 
     config = OmegaConf.load(args.yaml_config_path)
+    resolved_weights_path = _resolve_weights_path(args.weights_path)
+    resolved_yolo_path = _resolve_weights_path(str(config.ram_tracker.yolo_weights))
+    resolved_weights_path, resolved_yolo_path = _ensure_required_checkpoints(
+        resolved_weights_path, resolved_yolo_path
+    )
+
+    args.weights_path = str(resolved_weights_path)
+    config.ram_tracker.yolo_weights = str(resolved_yolo_path)
     config.model.model_size = args.model_size
     if config.make_trt_engine:
         wrapped = get_trt_tracker(

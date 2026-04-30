@@ -58,10 +58,10 @@ import torch
 import torch.nn as nn
 import torch_tensorrt
 
-from .connector import _build_connect_engines, _dispatch_connect
-from .trt_utils import _AttentionNeck, _FeatureExtractorModule, _cast_module
 from ...model import constants
 from ...model.adaptive_batch_norm import AdaptiveBatchNorm
+from .connector import _build_connect_engines, _dispatch_connect
+from .trt_utils import _AttentionNeck, _FeatureExtractorModule, _cast_module
 
 log = logging.getLogger(__name__)
 logging.getLogger("torch_tensorrt").setLevel(logging.ERROR)

@@ -15,11 +15,37 @@ from .base_tracker import Tracker
 
 class SiamABCTracker(Tracker):
     """
-    Siamese Actor-Critic based Tracker.
+    The main tracker class for SiamRAM — built on top of the SiamABC core.
 
-    This tracker uses dynamic templates and memory windows to maintain tracking robustly.
-    It manages the tracking state, handles dynamic updates, and coordinates with
-    a box coder to decode network outputs into bounding boxes.
+    This is the heart of the tracking system described in the SiamRAM paper.
+    During normal operation (Section 2 of the paper), this tracker runs every
+    frame: it extracts features from both the search region and the template,
+    fuses them through an attention mechanism, and predicts where the target
+    object is in the current frame.
+
+    What makes this tracker smarter than a basic Siamese tracker is that it
+    doesn't just rely on the very first frame's template forever. Instead, it
+    maintains a rolling memory window of the most recent high-quality frames
+    (Section 2.2 of the paper) and continuously updates what it calls the
+    "dynamic template" — a fresh, high-confidence snapshot of the target that
+    replaces the static first-frame crop whenever the tracker is confident enough.
+
+    The tracker also supports Test-Time Augmentation (TTA) via Adaptive Batch
+    Normalization (Section 2.3), which helps it handle gradual illumination
+    changes and sensor noise without any retraining.
+
+    In the broader SiamRAM pipeline, this class is the engine that the occlusion
+    recovery and reacquisition phases (Section 4) call back into once they've
+    found a candidate location for the lost target.
+
+    Attributes:
+        _norm_lambda_tta (float): The lambda value used to modulate Adaptive
+            Batch Norm behavior during TTA. Pulled directly from the model's
+            AdaptiveBatchNorm layers at init time.
+        _tta_lam (torch.Tensor): A scalar tensor that acts as the live TTA
+            switch. Setting it to `_norm_lambda_tta` turns TTA on; zeroing it
+            turns TTA off. This tensor is passed directly into the network's
+            forward pass so the change takes effect immediately.
     """
 
     def __init__(
@@ -29,12 +55,28 @@ class SiamABCTracker(Tracker):
         **tracking_config,
     ):
         """
-        Initialize the SiamABCTracker.
+        Set up the tracker and wire in the TTA (Test-Time Augmentation) machinery.
+
+        This constructor does two things beyond the standard base-class setup:
+
+        1. It scans the model's layers for an AdaptiveBatchNorm module and grabs
+           its `_norm_lambda` value. This value controls how aggressively the
+           batch-norm statistics adapt at test time (see Section 2.3 of the paper).
+           If no AdaptiveBatchNorm layer is found, it safely defaults to 0.1.
+
+        2. It initialises `_tta_lam` as a zero tensor on the target GPU. A value
+           of zero means TTA is OFF by default — the tracker runs in standard mode
+           until `enable_tta()` is explicitly called.
 
         Args:
-            model (torch.nn.Module): The underlying SiamABC neural network model.
-            cuda_id (int, optional): The ID of the CUDA device to use. Defaults to 0.
-            **tracking_config: Dictionary containing arbitrary tracking configurations.
+            model (torch.nn.Module): The fully loaded SiamABC neural network. This
+                should already be moved to the correct device before being passed in.
+            cuda_id (int, optional): Which GPU to run on. Defaults to 0. Used to
+                place the `_tta_lam` tensor on the right device from the start.
+            **tracking_config: A flat dictionary of all tracker hyperparameters —
+                things like memory window size, score thresholds, IoU gates, search
+                context ratios, etc. These come from a config file and are passed
+                through to the base class and then used throughout tracking.
         """
         super().__init__(model, cuda_id, **tracking_config)
 
@@ -55,14 +97,31 @@ class SiamABCTracker(Tracker):
         cuda_id: str | int = 0,
     ):
         """
-        Create and return the bounding box coder for decoding network outputs.
+        Build and return the bounding box decoder that the tracker relies on.
+
+        In the SiamABC architecture, the network doesn't output a bounding box
+        directly. Instead, it produces two raw maps: a classification map (which
+        spatial locations look like the target?) and a regression map (by how much
+        should each candidate location's default box be offset to fit the target?).
+
+        The SiamABCBoxCoder is the component that takes those raw maps and converts
+        them into a final [x, y, w, h] bounding box in image coordinates. It applies
+        the cosine penalty window (to suppress false positives near the search region
+        boundary) and handles all the anchor-free decoding math.
+
+        This method is called once during base-class initialisation, so the returned
+        coder is available as `self.box_coder` throughout the tracker's lifetime.
 
         Args:
-            tracking_config (dict): The configuration dictionary for the tracker.
-            cuda_id (str | int, optional): The CUDA device ID. Defaults to 0.
+            tracking_config (dict): The full tracking config dictionary. The box coder
+                reads things like grid stride, penalty weights, and score normalization
+                settings from here.
+            cuda_id (str | int, optional): The GPU index. Passed to the coder so it
+                can place intermediate tensors on the right device. Defaults to 0.
 
         Returns:
-            SiamABCBoxCoder: An instance of the box coder initialized with the configuration.
+            SiamABCBoxCoder: A fully configured box decoder instance, ready to
+                process network outputs frame by frame.
         """
         return SiamABCBoxCoder(tracking_config)
 
@@ -73,17 +132,37 @@ class SiamABCTracker(Tracker):
         **kwargs,
     ) -> None:
         """
-        Initialize the tracker state with the first frame and bounding box.
+        Cold-start the tracker on the very first frame of a sequence.
 
-        This sets up the initial template and search features by calling
-        `get_template_features()` and `get_search_features()`. It also resets
-        history buffers and tracking states.
+        This is called exactly once per video sequence, before any calls to
+        `update()`. Everything that the tracker needs to know about the target's
+        initial appearance is set up here.
+
+        Concretely, this method:
+
+        - Reads all the relevant thresholds and flags from the config (memory
+          window size N, dynamic update on/off, similarity score mode, etc.)
+        - Clamps the given bounding box so it can't spill outside the image frame.
+        - Extracts the static template features from the initial crop — these
+          features are kept frozen for the entire sequence and represent the
+          "ground truth" appearance of the target at t=0.
+        - Also builds the initial dynamic template and dynamic search features,
+          which start as copies of the static ones but get updated as tracking
+          proceeds (see Section 2.2 of the paper).
+        - Initialises the memory deque (`all_memory_imgs`) with the first frame
+          and its ground-truth box, so the memory window starts populated.
+        - Resets all counters, confidence trackers, and score history so the
+          tracker is in a clean state.
+
+        After this call, the tracker is fully ready to receive frames via `update()`.
 
         Args:
-            image (NDArray): The initial RGB image frame.
-            rect (NDArray): The initial bounding box as [x, y, width, height],
-                where x and y are 0-based.
-            **kwargs: Additional arguments.
+            image (NDArray): The RGB image array for the very first frame (H x W x 3,
+                uint8). This is the frame where the target is known with certainty.
+            rect (NDArray): The initial ground-truth bounding box as [x, y, width, height]
+                in 0-based pixel coordinates. This is provided by the benchmark or the
+                human annotator and is assumed to be accurate.
+            **kwargs: Reserved for future use. Not currently read.
 
         Returns:
             None
@@ -137,14 +216,34 @@ class SiamABCTracker(Tracker):
         rect,
     ):
         """
-        Extract template features for a specific bounding box in an image.
+        Crop out the target region from an image and run it through the feature extractor.
+
+        The SiamABC architecture (Section 2.1) always has a "template branch" and
+        a "search branch". This method handles the template side: given an image and
+        a bounding box, it adds some padding around the box (controlled by
+        `template_bbox_offset` in the config), crops out that padded region, resizes
+        it to the standard template size, and then passes it through the shared
+        ResNet backbone + neck to get a feature tensor.
+
+        This is used in two contexts:
+        1. At initialisation — to extract the static first-frame template features
+           that remain frozen for the whole sequence.
+        2. During dynamic template updates (`select_representatives()`) — to refresh
+           the dynamic template features from the best high-confidence frame stored
+           in memory.
+
+        Running under `@torch.no_grad()` because we never backprop through tracking.
 
         Args:
-            image (NDArray): The source image array.
-            rect (NDArray): The bounding box [x, y, w, h] indicating the template region.
+            image (NDArray): The full source frame (H x W x 3). Can be any frame
+                from the sequence — first frame, or a stored memory frame.
+            rect (NDArray): The bounding box [x, y, w, h] indicating where the
+                target is in `image`. Used as the centre of the template crop.
 
         Returns:
-            torch.Tensor: The extracted features for the template crop.
+            torch.Tensor: The feature map extracted from the template crop. Shape
+                depends on the backbone/neck configuration, but this tensor is
+                what gets passed into the attention fusion module during tracking.
         """
         context = extend_bbox(
             rect,
@@ -170,17 +269,41 @@ class SiamABCTracker(Tracker):
         bbox,
     ):
         """
-        Extract search features and compute search context mapping for a bounding box.
+        Extract features from the search region centred around a predicted bounding box.
+
+        While the template tells the network "what the target looks like", the search
+        region tells it "where to look in the current frame". This method crops out a
+        larger region centred on the current bounding box estimate (using the
+        `search_context` ratio from config to decide how much padding to add), resizes
+        it to the standard instance size, and extracts features from it.
+
+        Critically, this method also returns the spatial mapping information needed to
+        translate predicted coordinates inside the crop back to full image coordinates.
+        That mapping (the `search_context` array) is saved into `tracking_state.mapping`
+        during `run_track()` and later used by `_rescale_bbox()`.
+
+        Used in three places:
+        1. At initialisation — to set the initial dynamic search features.
+        2. Every frame in `run_track()` — to process the live search region.
+        3. During `select_representatives()` — to refresh dynamic search features
+           from the best memory frame.
+
+        Running under `@torch.no_grad()` because we never backprop through tracking.
 
         Args:
-            image (NDArray): The search image array.
-            bbox (NDArray): The bounding box [x, y, w, h] to extract features around.
+            image (NDArray): The full current frame (H x W x 3).
+            bbox (NDArray): The current bounding box estimate [x, y, w, h] — used as
+                the centre of the search crop. During normal tracking this is the
+                most recent prediction.
 
         Returns:
             Tuple[torch.Tensor, NDArray, NDArray]:
-                - Extracted features for the search crop.
-                - The scaled bounding box within the crop.
-                - The padded search context used for mapping coordinates back.
+                - The feature tensor extracted from the search crop.
+                - The scaled bounding box of the target within the crop (useful for
+                  computing relative offsets during decoding).
+                - The padded search context box in full image coordinates — this is
+                  the "mapping" needed to invert the crop transform and recover
+                  predicted coordinates in the original image space.
         """
 
         context = extend_bbox(
@@ -206,14 +329,27 @@ class SiamABCTracker(Tracker):
         bbox,
     ):
         """
-        Check if a bounding box is fully contained within another window bounding box.
+        Check whether a candidate bounding box is fully enclosed within a reference window.
+
+        This is a spatial containment test used to validate that a predicted or
+        candidate bounding box doesn't stray outside a defined region of interest.
+        In the context of SiamRAM's recovery pipeline (Section 4), this kind of
+        check guards against accepting a "recovered" box that is actually sitting
+        outside the expected search window — which would be a sign of a false match
+        rather than a genuine reacquisition.
+
+        Both boxes are expected in [x, y, right, bottom] (i.e. corner format, not
+        [x, y, w, h]), so the caller is responsible for converting if needed.
 
         Args:
-            bbox_window (Sequence[float]): The reference bounding box [x, y, right, bottom].
-            bbox (Sequence[float]): The bounding box to check [x, y, right, bottom].
+            bbox_window (Sequence[float]): The outer boundary box expressed as
+                [x_left, y_top, x_right, y_bottom]. Everything must stay inside this.
+            bbox (Sequence[float]): The box to validate, also as
+                [x_left, y_top, x_right, y_bottom].
 
         Returns:
-            bool: True if `bbox` is inside `bbox_window`, False otherwise.
+            bool: True if `bbox` is completely inside `bbox_window` (all four edges
+                are within bounds). False if any edge pokes outside.
         """
         return (
             bbox[0] >= bbox_window[0]
@@ -228,14 +364,37 @@ class SiamABCTracker(Tracker):
         evicting: bool,
     ) -> None:
         """
-        Update the index of the best score in the classification memory window.
+        Keep track of which memory slot currently holds the highest-scoring frame.
 
-        Maintains O(1) amortized tracking of the highest score index.
-        Called by `_maybe_store_frame()`.
+        The memory window (`all_memory_imgs`) is a fixed-size deque. As new frames
+        are pushed in, old ones fall off the left end. The tracker needs to always
+        know which slot holds the best frame — because that's the one it will use
+        to refresh the dynamic template every N frames (see `select_representatives()`
+        and Section 2.2 of the paper).
+
+        Recomputing `argmax` over the full deque every frame would be wasteful.
+        This method maintains `_best_idx` and `_best_score` incrementally:
+
+        - If we're NOT evicting (the window still has space), we just check if the
+          new score beats the current best and update accordingly.
+
+        - If we ARE evicting (oldest frame is being dropped), we have to be more
+          careful. If the frame being evicted was the best one (index 0), we do a
+          full re-scan — there's no way around it when the champion leaves. If it
+          wasn't the best frame, we simply shift the best index left by one (since
+          every existing entry moves one slot to the left) and check the new entry.
+
+        This gives O(1) amortized cost for the common case, with O(M) only when
+        the best frame falls off the window — which is relatively infrequent.
+
+        Called exclusively by `_maybe_store_frame()` immediately after appending
+        the new entry to the deque.
 
         Args:
-            pred_score (float): The newly added classification score.
-            evicting (bool): Whether the memory deque has reached capacity and is evicting the oldest element.
+            pred_score (float): The classification score of the frame that was
+                just appended to the memory window.
+            evicting (bool): True if the deque was already at full capacity before
+                this append, meaning the oldest element was simultaneously dropped.
 
         Returns:
             None
@@ -266,15 +425,33 @@ class SiamABCTracker(Tracker):
         pred_score: float,
     ) -> None:
         """
-        Optionally store the current frame in memory if conditions are met.
+        Attempt to add the current frame to the rolling memory window.
 
-        This appends the frame to `all_memory_imgs`, the score to `classification_scores`,
-        and manages the best index using `_update_best_index()`.
+        This is the write path for the short-term memory buffer described in
+        Section 2.2 of the paper. The memory window M (default size 20) stores
+        the most recent high-quality (image, bounding-box) pairs so that the
+        dynamic template can be periodically refreshed from the best one.
+
+        Note: the filtering decision (whether this frame is good enough to store)
+        is NOT made here — that happens in `update()` before this method is called.
+        By the time we reach `_maybe_store_frame()`, the decision to store has
+        already been made. This method's job is purely mechanical: append the data
+        and update the best-index bookkeeping via `_update_best_index()`.
+
+        The deque's `maxlen` ensures automatic eviction of the oldest frame when
+        the window is full — we just need to tell `_update_best_index()` whether
+        an eviction is happening so it can maintain the best-index correctly.
 
         Args:
-            search (np.ndarray): The current image frame.
-            pred_bbox (np.ndarray): The predicted bounding box.
-            pred_score (float): The prediction confidence score.
+            search (np.ndarray): The full current frame image (H x W x 3). Stored
+                alongside its bounding box so we can re-extract features from it
+                later during `select_representatives()`.
+            pred_bbox (np.ndarray): The predicted bounding box [x, y, w, h] for
+                the target in this frame. Stored as the crop centre for future
+                feature extraction.
+            pred_score (float): The network's classification confidence for this
+                frame. Stored in `classification_scores` and used by
+                `_update_best_index()` to track which frame is the best.
 
         Returns:
             None
@@ -288,11 +465,34 @@ class SiamABCTracker(Tracker):
         self,
     ) -> None:
         """
-        Select the best memory frame and update dynamic tracking features.
+        Refresh the dynamic template and dynamic search features from the best memory frame.
 
-        Calls `get_template_features()` and `get_search_features()` on the best
-        stored frame to update dynamic representative features if its score exceeds
-        `dynamic_update_threshold`.
+        This is the core of the online template update mechanism described in
+        Section 2.2 of the paper. The idea is simple but powerful: instead of always
+        tracking against the first-frame template (which can become stale as the
+        target changes appearance), we periodically find the highest-confidence frame
+        we've seen recently and re-extract fresh template and search features from it.
+
+        This method is called every N frames from `update()` (N is set in the config,
+        default 10). When called, it:
+
+        1. Checks that there's actually something in memory and that the best stored
+           score clears the `dynamic_update_threshold` (τu = 0.87 in the paper).
+           If the best we've seen is mediocre, we don't update — better to keep the
+           last good template than replace it with a shaky one.
+
+        2. Retrieves the best (image, bbox) pair from `all_memory_imgs` using the
+           precomputed `_best_idx`.
+
+        3. Re-extracts both `dynamic_template_features` and `dynamic_search_features`
+           from that frame by calling `get_template_features()` and
+           `get_search_features()` respectively.
+
+        4. Saves the raw image and box as `running_dynamic_image` / `running_dynamic_bbox`
+           so other parts of the system can reference the current dynamic frame.
+
+        5. Invalidates any cached template computation in the network (if the model
+           supports it), so the next forward pass uses the freshly updated features.
 
         Returns:
             None
@@ -318,22 +518,54 @@ class SiamABCTracker(Tracker):
         *kw,
     ):
         """
-        Update the tracker using the current frame, generating the next bounding box.
+        Process a new frame and return the tracker's best estimate of the target location.
 
-        This invokes `run_track()` to perform the tracking step, evaluates conditions
-        like IoU with `_compute_iou()` and stores confident frames using
-        `_maybe_store_frame()`. Finally, it occasionally updates dynamic features
-        via `select_representatives()`.
+        This is the main entry point called once per frame during normal tracking
+        (Section 2 of the paper). It ties together the full tracking loop:
+        feature extraction → network forward → box decoding → memory update →
+        dynamic template refresh.
+
+        Here's what happens step by step:
+
+        1. `run_track()` is called to get the predicted bounding box and scores for
+           this frame. This is the actual neural network inference step.
+
+        2. The tracking state (current bbox, score, path history) is updated.
+
+        3. If `dynamic_update` is enabled, the frame goes through a two-gate filter
+           before being admitted to memory:
+           - Score gate: the score must beat the running exponential average of
+             recent scores, OR clear the hard update threshold. This prevents
+             storing frames when the tracker is confused.
+           - IoU gate: the new box must overlap sufficiently with the previous
+             frame's box (default τ_iou=0.3). This prevents storing frames where
+             the box jumped suddenly, which often indicates a distractor switch.
+
+        4. After the warmup period (if configured), the memory deque is sealed at
+           full capacity and the best-index is computed fresh over the whole window.
+
+        5. Every N frames, `select_representatives()` is called to refresh the
+           dynamic template from the best stored frame (Section 2.2).
+
+        6. The running confidence EMA is updated and clamped at a floor value, so
+           the threshold adapts to the sequence difficulty without collapsing.
 
         Args:
-            search (NDArray): The current image frame array.
-            *kw: Additional unused positional arguments.
+            search (NDArray): The current full frame image (H x W x 3, uint8).
+                This is the frame to track the target in.
+            *kw: Unused. Exists for API compatibility with the base class interface.
 
         Returns:
             Tuple[NDArray, float, float]:
-                - The predicted bounding box.
-                - The predicted classification score.
-                - The similarity score.
+                - pred_bbox (NDArray): The predicted bounding box [x, y, w, h] in
+                  image pixel coordinates.
+                - pred_score (float): The classification confidence score from the
+                  network's output map at the predicted location. Higher is more
+                  confident. Values below the occlusion threshold (0.55) trigger
+                  the SiamRAM recovery pipeline.
+                - sim_score (float): A similarity score between the current search
+                  features and the stored dynamic features, providing an auxiliary
+                  signal about how much the target's appearance has drifted.
         """
         pred_bbox, pred_score, sim_score = self.run_track(search)
 
@@ -385,19 +617,42 @@ class SiamABCTracker(Tracker):
         search,
     ):
         """
-        Run the fundamental tracking sequence for a search frame.
+        Run one complete tracking inference step for the current frame.
 
-        Extracts search features using `get_search_features()`, forwards them to `track()`,
-        and rescales the output bounding box back to image coordinates.
+        This method sits between `update()` (which handles memory and state) and
+        `track()` (which calls the raw neural network). Its job is the geometric
+        pipeline around the network call:
+
+        1. Call `get_search_features()` to extract features from a region centred
+           on the most recent bounding box estimate. This also returns the `search_context`
+           — the mapping from crop coordinates back to full image coordinates.
+
+        2. Save the context mapping into `tracking_state` so `_rescale_bbox()` can
+           later invert the crop transform.
+
+        3. Call `track()` to run the full network forward pass and get a predicted
+           box in crop-relative coordinates.
+
+        4. Call `_rescale_bbox()` to convert the predicted box back into full
+           image pixel coordinates using the saved mapping.
+
+        5. Call `clamp_bbox()` to ensure the final box doesn't go outside the image
+           boundaries (handles edge cases near frame borders).
+
+        This method is also the one called by `run_track_for_candidate()` when the
+        recovery pipeline (Section 4.3) wants to test a hypothesised target location.
 
         Args:
-            search (NDArray): The search image frame array.
+            search (NDArray): The current full frame image (H x W x 3).
 
         Returns:
             Tuple[NDArray, float, float]:
-                - The predicted bounding box in image coordinates.
-                - The classification score.
-                - The similarity score.
+                - pred_bbox (NDArray): The predicted bounding box [x, y, w, h] in
+                  full image pixel coordinates, guaranteed to be within image bounds.
+                - pred_score (float): The peak classification score at the predicted
+                  location, used to decide whether tracking is reliable.
+                - sim_score (float): The similarity score between the current search
+                  and the stored dynamic context features.
         """
         search_features, search_bbox, search_context = self.get_search_features(
             search, self.tracking_state.bbox
@@ -421,17 +676,44 @@ class SiamABCTracker(Tracker):
         dynamic_template_features,
     ):
         """
-        Execute the core neural network tracking operation and postprocess results.
+        Execute the SiamABC neural network forward pass and postprocess its output.
 
-        Passes features to `self.net.track()` and hands the raw output to `_postprocess()`.
+        This is the lowest-level tracking method that actually touches the neural
+        network (`self.net`). The SiamABC architecture (Section 2.1 of the paper)
+        takes four feature inputs in a single forward pass:
+
+        - Static template features (always `self._template_features` from frame 0,
+          held frozen — passed from `self` not as an argument here).
+        - Dynamic template features (the freshest high-confidence template, updated
+          every N frames by `select_representatives()`).
+        - Current search features (extracted from the live frame by `run_track()`).
+        - Dynamic search features (from the best historical frame, same source as
+          dynamic template features).
+
+        These four are fused inside the network via the Fast Parallel Polarized
+        Self-Attention module and the BoxTower head, producing a classification map
+        and regression map. This method then hands those raw outputs to
+        `_postprocess()` which decodes them into an actual bounding box.
+
+        Running under `@torch.no_grad()` — tracking is purely inference, no gradients.
 
         Args:
-            search_features (torch.Tensor): Current frame search features.
-            dynamic_search_features (torch.Tensor): Best historical search features.
-            dynamic_template_features (torch.Tensor): Best historical template features.
+            search_features (torch.Tensor): Features extracted from the current
+                frame's search crop — represents "where to look right now".
+            dynamic_search_features (torch.Tensor): Features from the best recent
+                high-confidence search crop — the tracker's updated reference for
+                the target's current environment context.
+            dynamic_template_features (torch.Tensor): Features from the best recent
+                high-confidence template crop — the tracker's updated visual model
+                of what the target looks like.
 
         Returns:
-            Tuple[NDArray, float, float, torch.Tensor]: Outputs derived from `_postprocess()`.
+            Tuple[NDArray, float, float, torch.Tensor]: The four outputs from
+                `_postprocess()`:
+                - Predicted bounding box in crop coordinates (before rescaling).
+                - Peak classification confidence score.
+                - Similarity score.
+                - Raw attention map tensor (for debugging / visualisation).
         """
         track_result = self.net.track(
             search_features=search_features,
@@ -448,20 +730,51 @@ class SiamABCTracker(Tracker):
         track_result: Dict[str, torch.Tensor],
     ) -> Tuple[NDArray, float, Union[int, float, bool], torch.Tensor]:
         """
-        Post-process raw tracking network output into actionable bounding boxes and scores.
+        Convert raw network output tensors into a bounding box, score, and similarity.
 
-        Uses the box coder to decode classification and regression maps, applying
-        penalties as necessary.
+        The SiamABC network produces raw logits and regression offsets — it doesn't
+        directly output a box. This method is the bridge between the network's
+        tensor world and the tracker's geometric world. Here's what it does:
+
+        1. Pulls out the raw classification logits and applies sigmoid to get
+           per-location confidence scores in [0, 1].
+
+        2. Pulls out the raw regression map (location offsets from anchor points).
+
+        3. Calls `_confidence_postprocess()` (inherited from the base class) which
+           applies the cosine penalty window — this suppresses spuriously high
+           responses near the edges of the search crop, which is a common failure
+           mode in Siamese trackers.
+
+        4. Calls `self.box_coder.decode()` (the SiamABCBoxCoder) to anchor-free
+           decode the penalised classification map + regression map into a candidate
+           bounding box in crop-relative coordinates.
+
+        5. Identifies the peak score location (r_max, c_max) from the decoded result
+           and extracts the actual confidence value at that point.
+
+        6. Reads out the similarity score from the network's output dictionary.
 
         Args:
-            track_result (Dict[str, torch.Tensor]): The raw output tensor dictionary from the tracking network.
+            track_result (Dict[str, torch.Tensor]): The raw dictionary returned by
+                `self.net.track()`. Expected keys include:
+                - `TARGET_CLASSIFICATION_KEY`: Raw classification logit map.
+                - `TARGET_REGRESSION_LABEL_KEY`: Raw regression offset map.
+                - `TRACKER_TARGET_SEARCH_SIM_SCORE`: Scalar similarity score.
+                - `TRACKER_ATTENTION_MAP`: Attention weights map (for visualisation).
 
         Returns:
             Tuple[NDArray, float, Union[int, float, bool], torch.Tensor]:
-                - The predicted bounding box within the crop.
-                - The maximum classification score.
-                - The similarity score.
-                - The attention map.
+                - pred_bbox (NDArray): The decoded bounding box [x, y, w, h] in
+                  crop-relative pixel coordinates. Will be rescaled to image
+                  coordinates by the caller.
+                - cls_score (float): The classification confidence at the peak
+                  location — this is the score used for memory gating and occlusion
+                  detection.
+                - sim_score (float): The feature similarity score. Returns 0.0 if
+                  the network didn't produce one.
+                - attention_map (torch.Tensor): The raw attention map tensor, useful
+                  for debugging or visualisation. Not used in the main tracking loop.
         """
         cls_score = track_result[constants.TARGET_CLASSIFICATION_KEY].float().sigmoid()
         regression_map = (
@@ -498,18 +811,40 @@ class SiamABCTracker(Tracker):
         candidate_bbox: np.ndarray,
     ):
         """
-        Temporarily set tracking state to a candidate bbox and run tracking.
+        Test whether a hypothesised bounding box is a plausible target location.
 
-        Evaluates a hypothesis candidate by injecting its bounding box into
-        tracking state and invoking `run_track()`. Restores state afterward.
+        This method is used by the Multi-Phase Reacquisition Pipeline (Section 4.3
+        of the paper) during Phase 3 — Tracker Verification. When the recovery
+        pipeline has found a promising candidate (e.g. a YOLO detection that scored
+        well against the DAM memory), it calls this method to verify the candidate
+        by re-running the Siamese tracker as if the target were at that location.
+
+        The trick here is "hypothesis injection": rather than using the tracker's
+        current bounding box estimate (which may be wrong or stale during occlusion),
+        we temporarily override `tracking_state.bbox` with the candidate box,
+        compute the appropriate search context around it, run `run_track()`, and
+        then restore the original state. This lets us evaluate any location in the
+        image without permanently committing to it.
+
+        The caller (Phase 3) accepts the candidate if the returned score is ≥ 0.70,
+        at which point the tracker is reinitialised at the candidate location and
+        normal tracking resumes.
 
         Args:
-            search (np.ndarray): The search image frame array.
-            candidate_bbox (np.ndarray): The hypothesized bounding box [x, y, w, h].
+            search (np.ndarray): The current full frame image (H x W x 3). The same
+                frame that the recovery pipeline is operating on.
+            candidate_bbox (np.ndarray): The hypothesis bounding box [x, y, w, h] to
+                evaluate. This comes from Phase 2 scoring — the top-ranked DAM
+                candidate after appearance and velocity filtering.
 
         Returns:
-            Tuple[NDArray, float, float]: The predicted bounding box, score, and
-            similarity score as returned by `run_track()`.
+            Tuple[NDArray, float, float]:
+                - pred_bbox (NDArray): The tracker's predicted box when seeded at
+                  the candidate location. A well-matched candidate will produce a
+                  box close to the input candidate.
+                - pred_score (float): The classification confidence at the prediction.
+                  This is the key verification score — ≥ 0.70 means confirmed.
+                - sim_score (float): The similarity score from the network forward pass.
         """
         cand_x, cand_y, cand_w, cand_h = [float(v) for v in candidate_bbox]
 
@@ -542,12 +877,27 @@ class SiamABCTracker(Tracker):
         enabled: bool,
     ) -> None:
         """
-        Enable or disable Test-Time Augmentation (TTA).
+        Turn Test-Time Augmentation (TTA) on or off for all subsequent frames.
 
-        Updates the `_tta_lam` tensor parameter.
+        As described in Section 2.3 of the paper, Adaptive Batch Normalization
+        allows certain encoder layers to incrementally update their running mean
+        and variance statistics based on each incoming search crop. This is a
+        lightweight form of test-time adaptation that helps the tracker handle
+        gradual shifts in illumination, white balance, or sensor noise — without
+        any retraining.
+
+        The `_tta_lam` tensor acts as the live gate for this mechanism. When it's
+        nonzero (equal to `_norm_lambda_tta`), the AdaptiveBatchNorm layers blend
+        their stored statistics with the current crop's statistics. When it's zero,
+        they behave like standard frozen BatchNorm.
+
+        Using `fill_()` modifies the tensor in-place, which means any reference
+        to `_tta_lam` elsewhere (e.g. inside the network's forward graph) sees
+        the update immediately — no need to pass a new tensor.
 
         Args:
-            enabled (bool): Whether TTA should be enabled.
+            enabled (bool): True to activate TTA (sets lam to `_norm_lambda_tta`),
+                False to deactivate it (sets lam to 0.0 — standard frozen BN).
 
         Returns:
             None
@@ -559,7 +909,16 @@ class SiamABCTracker(Tracker):
         self,
     ) -> None:
         """
-        Enable Test-Time Augmentation by calling `set_tta(True)`.
+        Activate Test-Time Augmentation for all subsequent network forward passes.
+
+        A convenience wrapper around `set_tta(True)`. Call this before processing
+        a sequence where you expect significant appearance variation — e.g. outdoor
+        scenes with changing sunlight, cameras with auto-exposure, or sequences
+        with motion blur and sensor noise.
+
+        Internally, this sets `_tta_lam` to the AdaptiveBatchNorm lambda value
+        found in the model, causing the encoder's normalization layers to adapt
+        their statistics incrementally at each step (Section 2.3 of the paper).
 
         Returns:
             None
@@ -570,7 +929,15 @@ class SiamABCTracker(Tracker):
         self,
     ) -> None:
         """
-        Disable Test-Time Augmentation by calling `set_tta(False)`.
+        Deactivate Test-Time Augmentation, reverting to standard frozen BatchNorm.
+
+        A convenience wrapper around `set_tta(False)`. Call this when you want
+        strict reproducibility or when the sequence has stable, predictable
+        illumination where adaptation would add noise rather than help.
+
+        Internally, this zeros out `_tta_lam`, which makes the AdaptiveBatchNorm
+        layers behave identically to regular frozen BatchNorm — no statistics
+        are updated during inference.
 
         Returns:
             None
@@ -583,14 +950,36 @@ class SiamABCTracker(Tracker):
         boxB,
     ) -> float:
         """
-        Calculate the Intersection over Union (IoU) of two bounding boxes.
+        Compute the Intersection over Union (IoU) between two bounding boxes.
+
+        IoU is the standard overlap metric in object tracking and detection. It
+        measures what fraction of the combined area of two boxes is actually
+        shared between them. A value of 1.0 means perfect overlap; 0.0 means
+        no overlap at all.
+
+        In SiamRAM this is used in two critical places:
+
+        1. In `update()` as the second gate before storing a frame to memory:
+           IoU(pred_bbox, prev_bbox) ≥ τ_iou (default 0.3). This prevents the
+           memory from being polluted by frames where the predicted box jumped
+           suddenly — a sign of a distractor switch or momentary confusion.
+           (See Equation 4 in the paper, where τ_iou = 0.6 for the full DAM
+           admission criteria.)
+
+        2. In the DAM module's RAM admission logic (Section 3.2), where the same
+           kind of geometric coherence check is applied to short-term memory entries.
+
+        The implementation handles the degenerate case where union is zero
+        (e.g. one box has zero area) by returning 0.0 rather than dividing by zero.
 
         Args:
-            boxA (Sequence[float]): First bounding box [x, y, w, h].
-            boxB (Sequence[float]): Second bounding box [x, y, w, h].
+            boxA (Sequence[float]): First bounding box in [x, y, width, height]
+                format. x and y are the top-left corner in pixel coordinates.
+            boxB (Sequence[float]): Second bounding box, also [x, y, width, height].
 
         Returns:
-            float: The IoU ratio ranging from 0.0 to 1.0.
+            float: IoU value in the range [0.0, 1.0]. Returns 0.0 if the union
+                area is zero (e.g. either box has zero dimensions).
         """
         ix1 = max(boxA[0], boxB[0])
         iy1 = max(boxA[1], boxB[1])

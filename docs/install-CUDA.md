@@ -51,6 +51,10 @@ uv tool install poethepoet
 poe --help
 ```
 
+All `poe` tasks used below (for example `gpu_setup`, `gpu_verify`, `gpu_run`) are defined in
+`pyproject.toml` under `[tool.poe.tasks]`, so you can inspect that section to see the exact Docker commands being
+executed.
+
 ### Step 2: Build and start the GPU container
 
 ```bash
@@ -68,7 +72,7 @@ If this fails, fix Docker GPU runtime/NVIDIA Container Toolkit, then run `poe gp
 ### Step 4: Run a script in the GPU container
 
 ```bash
-poe gpu_run test.py
+poe gpu_run containers/test.py
 ```
 
 ## Option 2: VSCode Devcontainer (Recommended)
@@ -92,7 +96,7 @@ The default `.devcontainer/devcontainer.json` uses the GPU compose setup.
 ### Step 3: Verify inside container
 
 ```bash
-python test.py
+python containers/test.py
 ```
 
 Expected result: CUDA available is `True` and at least one GPU is detected.
@@ -100,29 +104,43 @@ Expected result: CUDA available is `True` and at least one GPU is detected.
 ## Option 3: Local Installation with uv
 
 Use this path if you want to run directly on your host Python environment.
-Plain `uv sync` defaults to CPU torch, so CUDA setup must use the GPU group.
+`uv sync` uses the CUDA wheel index configured in `pyproject.toml` (default in this repo: `cu128`).
 
 ### Step 1: Install project dependencies
 
 ```bash
-uv sync --group gpu
+uv sync
 ```
 
 ### Step 2: Verify environment
 
 ```bash
-uv run python test.py
+uv run containers/test.py
 ```
 
 ### Optional: Match your local CUDA wheel channel (`cuXXX`)
 
-Local install can target different CUDA wheels by changing the `gpu` group torch sources in `pyproject.toml`.
+Local install can target different CUDA wheels by changing the torch indexes in `pyproject.toml`.
 
 - Current default is `cu128` (CUDA 12.8 wheels).
 - If your machine needs a different wheel, switch to another `cuXXX` index (example: `cu124`), then run:
 
+Example change in `pyproject.toml`:
+
+```toml
+[tool.uv.sources]
+torch = { index = "pytorch-cu124" }
+torchvision = { index = "pytorch-cu124" }
+torch-tensorrt = { index = "pytorch-cu124" }
+
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
+```
+
 ```bash
-uv sync --group gpu
+uv sync
 ```
 
 ## Troubleshooting

@@ -190,14 +190,14 @@ gpu_build = { cmd = "docker compose -f containers/docker-compose.gpu.yml build g
 gpu_up = { cmd = "docker compose -f containers/docker-compose.gpu.yml up -d gpu", help = "Start GPU container in detached mode." }
 gpu_down = { cmd = "docker compose -f containers/docker-compose.gpu.yml down --remove-orphans", help = "Stop GPU container." }
 gpu_logs = { cmd = "docker compose -f containers/docker-compose.gpu.yml logs -f gpu", help = "Tail GPU container logs." }
-gpu_verify = { cmd = "docker compose -f containers/docker-compose.gpu.yml exec gpu python test.py", help = "Verify GPU container environment." }
+gpu_verify = { cmd = "docker compose -f containers/docker-compose.gpu.yml exec gpu python containers/test.py", help = "Verify GPU container environment." }
 gpu_shell = { cmd = "docker compose -f containers/docker-compose.gpu.yml exec gpu bash", help = "Open shell in GPU container." }
 
 cpu_build = { cmd = "docker compose -f containers/docker-compose.cpu.yml build cpu", help = "Build the CPU Docker image." }
 cpu_up = { cmd = "docker compose -f containers/docker-compose.cpu.yml up -d cpu", help = "Start CPU container in detached mode." }
 cpu_down = { cmd = "docker compose -f containers/docker-compose.cpu.yml down --remove-orphans", help = "Stop CPU container." }
 cpu_logs = { cmd = "docker compose -f containers/docker-compose.cpu.yml logs -f cpu", help = "Tail CPU container logs." }
-cpu_verify = { cmd = "docker compose -f containers/docker-compose.cpu.yml exec cpu python test.py", help = "Verify CPU container environment." }
+cpu_verify = { cmd = "docker compose -f containers/docker-compose.cpu.yml exec cpu python containers/test.py", help = "Verify CPU container environment." }
 cpu_shell = { cmd = "docker compose -f containers/docker-compose.cpu.yml exec cpu bash", help = "Open shell in CPU container." }
 
 gpu_setup = { sequence = ["gpu_build", "gpu_up", "gpu_verify"], help = "Build, start, and verify GPU container." }

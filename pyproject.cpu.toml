@@ -43,6 +43,7 @@ dependencies = [
   "wandb>=0.26.1",
   "torch==2.11.0",
   "torchvision==0.26.0",
+  "omegaconf>=2.3.0",
 ]
 
 [tool.uv.sources]

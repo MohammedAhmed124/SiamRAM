@@ -44,6 +44,9 @@ dependencies = [
   "torch==2.11.0",
   "torchvision==0.26.0",
   "torch-tensorrt==2.11.0",
+  "omegaconf>=2.3.0",
+  "triton-windows==3.6.0.post26; sys_platform == 'win32' and platform_machine == 'AMD64'",
+  "triton==3.6.0; sys_platform != 'win32'",
 ]
 
 [tool.uv.sources]
@@ -52,6 +55,9 @@ torch = { index = "pytorch-cu128" }
 torchvision = { index = "pytorch-cu128" }
 torch-tensorrt = { index = "pytorch-cu128" }
 tensorrt = { index = "pytorch-cu128" }
+
+[tool.uv]
+environments = ["sys_platform == 'win32'"]
 
 [[tool.uv.index]]
 name = "pytorch-cu128"

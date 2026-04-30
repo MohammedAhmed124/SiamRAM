@@ -34,7 +34,11 @@ def load_model(
         nn.Module: The model with loaded weights.
     """
     map_location = f"cuda:{map_location}" if type(map_location) is int else map_location
-    checkpoint = torch.load(checkpoint_path, map_location=map_location)
+    checkpoint = torch.load(
+        checkpoint_path,
+        map_location=map_location,
+        weights_only=False,
+    )
     state_dict = {
         k.lstrip("module").lstrip("."): v
         for k, v in checkpoint.items()

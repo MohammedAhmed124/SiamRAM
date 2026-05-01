@@ -69,7 +69,15 @@ poe gpu_verify
 
 If this fails, fix Docker GPU runtime/NVIDIA Container Toolkit, then run `poe gpu_setup` again.
 
-### Step 4: Run a script in the GPU container
+### Step 4: Ensure the GPU container is running
+
+```bash
+poe gpu_up
+```
+
+If the container is already running, this is a no-op. Run this before executing any file in the container.
+
+### Step 5: Run a script in the GPU container
 
 ```bash
 poe gpu_run containers/test.py

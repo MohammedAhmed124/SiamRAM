@@ -15,7 +15,7 @@ from pathlib import Path
 import gdown
 
 FILES: dict[str, str] = {
-    "head_epoch_000.pth": "1ehwIYvwwIulWNAshYVWm5ashkMmRtcik",
+    "head_epoch_000.pth": "1VQdAZj0Mpf_ZMxvoZOaCRp3uo6wOPuDC",
     "yolo11n.pt": "1WUAArjVjMwrluMWBBlTqGO7NBkDy_CMv",
 }
 MIN_BYTES: dict[str, int] = {

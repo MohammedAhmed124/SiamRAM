@@ -1942,28 +1942,6 @@ class SiamRAMTracker:
         self._yolo_cache = boxes
         return boxes
 
-    def _yolo_detect_cached(
-        self,
-        frame: np.ndarray,
-    ) -> List[np.ndarray]:
-        """
-        Returns the cached YOLO detections from _yolo_cache if they are
-                    non-empty (i.e. YOLO was already run this frame). Falls through
-                    to _yolo_detect otherwise.
-
-        Some code paths can trigger YOLO more than once per frame. This
-                    wrapper prevents duplicate inference calls within the same frame
-                    by serving the already-computed results. Saves inference time
-                    proportional to how many times it would have been called redundantly.
-        Args:
-            frame (any): current video frame as a numpy BGR array
-        Returns:
-            list of np.ndarray [x, y, w, h] — same format as _yolo_detect
-    """
-        if self._yolo_cache:
-            return self._yolo_cache
-        return self._yolo_detect(frame)
-
     def _clamp_bbox_to_frame(
         self,
         bbox: np.ndarray,

@@ -1,0 +1,72 @@
+# ─────────────────────────────────────────────
+#  SiamABC Fine-Tuning — Configuration
+# ─────────────────────────────────────────────
+
+
+data:
+  csv_path: "../data/train_dataframe.csv"   # single combined CSV with all sequences
+  seed: 42
+
+# ── Tracking crop/augmentation parameters ────
+tracking:
+  template_size: 128
+  instance_size: 256
+  score_size: 16
+  search_context: 2
+  max_frame_gap: 130
+  total_stride: 16
+  template_bbox_offset: 0.2
+  search_image_shift: 0.6
+  search_image_scale: 0.3
+  template_image_shift: 0.01
+  template_image_scale: 0.01
+
+# ── Dataset sampling ─────────────────────────
+dataset:
+  train_num_samples: 5000
+  train_neg_ratio: 0.5
+  val_num_samples: 500
+  val_neg_ratio: -0.001
+  val_split_ratio: 0.1        # fraction of data held out for validation
+
+# ── DataLoader ───────────────────────────────
+dataloader:
+  train_batch_size: 32
+  val_batch_size: 32
+  num_workers: 4
+
+# ── Model ────────────────────────────────────
+model:
+  simabc_config_path: "../external/SiamABC/core/config"
+  simabc_config_name: "SiamABC_tracker"
+  weights_path: "../checkpoints/pretrained/head_epoch_001.pth"
+  model_size: "M"
+  build_simsiam_heads: false
+
+# ── Tracker overrides (used at model init) ───
+tracker:
+  dynamic_update: true
+  window_influence: 0.05
+  N: 50
+
+# ── Training ─────────────────────────────────
+training:
+  num_epochs: 30
+  start_epoch: 1
+  backbone_lr: 1.0e-5
+  head_lr: 2.0e-4
+  weight_decay: 1.0e-4
+  warmup_epochs: 3
+  eta_min: 1.0e-6
+  log_every: 10             # print loss every N batches
+
+# ── Loss ─────────────────────────────────────
+loss:
+  cls_weight: 3
+  bbox_weight: 0
+  focal_alpha: 0.25
+  focal_gamma: 1.5
+
+# ── Output ───────────────────────────────────
+output:
+  checkpoint_dir: "../checkpoints/finetuned"

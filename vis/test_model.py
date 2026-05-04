@@ -216,7 +216,7 @@ def run_inference(
     video_path: str,
     tracker,
     output_path: str = "outputs/tracked_video.mp4",
-    output_video: bool = True,
+    output_video: bool = False,
 ):
     is_dam = hasattr(tracker, "tracker")
     inner_tracker = tracker.tracker if is_dam else tracker

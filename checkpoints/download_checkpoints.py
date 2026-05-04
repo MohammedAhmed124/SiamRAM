@@ -15,12 +15,14 @@ from pathlib import Path
 import gdown
 
 FILES: dict[str, str] = {
-    "head_epoch_000.pth": "1VQdAZj0Mpf_ZMxvoZOaCRp3uo6wOPuDC",
+    "inference_checkpoint.pth": "1VQdAZj0Mpf_ZMxvoZOaCRp3uo6wOPuDC",
     "yolo11n.pt": "1WUAArjVjMwrluMWBBlTqGO7NBkDy_CMv",
+    "SiamABC_init_checkpoint.pth":"1sM88OYPNgu1-iLgcjn4OBt9rdXLEE9AW"
 }
 MIN_BYTES: dict[str, int] = {
-    "head_epoch_000.pth": 1_000_000,
+    "inference_checkpoint.pth": 1_000_000,
     "yolo11n.pt": 1_000_000,
+    "SiamABC_init_checkpoint.pth":1_000_000
 }
 
 CHUNK_SIZE = 1024 * 1024  # 1MB

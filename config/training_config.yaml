@@ -63,4 +63,4 @@ loss:
   focal_gamma: 1.5
 
 output:
-  checkpoint_dir: "../checkpoints/finetuned"
+  checkpoint_dir: "checkpoints/training_run1/"

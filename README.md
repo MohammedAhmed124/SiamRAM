@@ -126,7 +126,7 @@ Override any path or setting via flags:
 python run_inference.py \
     --data_dir data/ \
     --manifest_path data/metadata/contestant_manifest.json \
-    --weights_path checkpoints/head_epoch_000.pth \
+    --weights_path checkpoints/inference_checkpoint.pth \
     --outputs_dir outputs/SiamRAM \
     --submission_csv submission.csv
 ```

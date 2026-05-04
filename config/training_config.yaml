@@ -29,7 +29,7 @@ dataloader:
 
 model:
   _target_: models.SiamABC.model.SiamABC.SiamABCNet
-  weights_path: "../checkpoints/pretrained/head_epoch_001.pth"
+  weights_path: "checkpoints/SiamABC_init_checkpoint.pth"
   backbone: custom_fbnet
   growth_factor: 1.2
   upsample: pixel_shuffle
@@ -63,4 +63,4 @@ loss:
   focal_gamma: 1.5
 
 output:
-  checkpoint_dir: "checkpoints/training_run1/"
+  checkpoint_dir: "training/checkpoints/training_run1/"

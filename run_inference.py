@@ -146,7 +146,7 @@ def parse_args():
     )
     parser.add_argument(
         "--weights_path",
-        default=str(BASE_DIR / "checkpoints" / "head_epoch_000.pth"),
+        default=str(BASE_DIR / "checkpoints" / "inference_checkpoint.pth"),
         help="Path to the SiamABC checkpoint (.pth file).",
     )
     parser.add_argument(
@@ -221,7 +221,7 @@ def _resolve_weights_path(path_value: str) -> Path:
     if path.exists():
         return path.resolve()
     if len(path.parts) == 1:
-        # Bare filename like "head_epoch_000.pth" → look in checkpoints/
+        # Bare filename like "inference_checkpoint.pth" → look in checkpoints/
         return (CHECKPOINTS_DIR / path.name).resolve()
     return (BASE_DIR / path).resolve()
 

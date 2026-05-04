@@ -1,15 +1,7 @@
-"""
-SiamABC Fine-Tuning Script
-Usage:
-    python train.py --config config.yaml
-    python train.py --config config.yaml --csv_path /path/to/data.csv
-"""
-
 import argparse
 import os
 import sys
 
-import numpy as np
 import pandas as pd
 import torch
 import yaml
@@ -21,28 +13,35 @@ from torch.utils.data import DataLoader
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Config helpers
-# ─────────────────────────────────────────────────────────────────────────────
-
 def load_config(path: str) -> dict:
+    """
+    Reads the YAML config file from disk and returns it as a plain Python dict.
+    Every section of the config (data, model, training, etc.) becomes a nested key in that dict.
+    """
     with open(path, "r") as f:
         return yaml.safe_load(f)
 
 
 def override_config(cfg: dict, csv_path: str | None) -> dict:
-    """Apply CLI overrides on top of the loaded YAML config."""
+    """
+    Lets you swap out the CSV path at launch time without editing the config file.
+    If you pass --csv_path on the command line, this function writes it into the config
+    so the rest of the code never needs to know the override came from the CLI.
+    If no override is given, the config is returned unchanged.
+    """
     if csv_path:
         cfg["data"]["csv_path"] = csv_path
     return cfg
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Data
-# ─────────────────────────────────────────────────────────────────────────────
-
 def load_and_split(cfg: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Load the single combined CSV and produce train / val DataFrames."""
+    """
+    Loads the single combined CSV that contains all tracking sequences,
+    then performs a reproducible random split into training and validation sets.
+    The split ratio and random seed both come from the config so results are consistent
+    across runs as long as the config doesn't change.
+    Returns two DataFrames: one for training and one for validation.
+    """
     data_cfg = cfg["data"]
     df = pd.read_csv(data_cfg["csv_path"])
     print(f"Loaded {len(df)} sequences from {data_cfg['csv_path']}")
@@ -58,15 +57,19 @@ def load_and_split(cfg: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
     return train_df, val_df
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# DataLoaders
-# ─────────────────────────────────────────────────────────────────────────────
-
 def build_dataloaders(
     train_df: pd.DataFrame,
     val_df: pd.DataFrame,
     cfg: dict,
 ) -> tuple[DataLoader, DataLoader]:
+    """
+    Wraps the train and validation DataFrames in UAV123TrackingDataset instances,
+    which handle all the crop-and-augment logic for siamese tracking pairs.
+    Then wraps those datasets in standard PyTorch DataLoaders.
+    The training loader shuffles its data every epoch; the validation loader does not,
+    since order doesn't matter when you're just measuring performance.
+    Returns the train DataLoader and the val DataLoader.
+    """
     from utils.dataset import UAV123TrackingDataset
 
     tracking_config = cfg["tracking"]
@@ -110,41 +113,40 @@ def build_dataloaders(
     return train_loader, val_loader
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Model
-# ─────────────────────────────────────────────────────────────────────────────
-
 def build_model(cfg: dict, device: torch.device):
+    """
+    Constructs the SiamABCNet model directly from the model section of the config.
+    The config uses Hydra's _target_ convention, so instantiate() reads that key,
+    imports the right class, and passes every other key in the section as a constructor argument.
+    weights_path is pulled out before instantiation because it is not a constructor argument —
+    it tells us where to load pretrained weights from after the model is built.
+    The model is moved to the requested device before being returned.
+    """
     from models.SiamABC.tracker.tracker_setup import load_model
-    from utils.hydra import load_hydra_config_from_path
 
-    model_cfg = cfg["model"]
-    tracker_cfg = cfg["tracker"]
+    model_cfg = dict(cfg["model"])
+    weights_path = model_cfg.pop("weights_path", None)
 
-    hydra_config = load_hydra_config_from_path(
-        config_path=model_cfg["simabc_config_path"],
-        config_name=model_cfg["simabc_config_name"],
-    )
+    model = instantiate(model_cfg)
 
-    hydra_config["model"]["model_size"] = model_cfg["model_size"]
-    hydra_config["model"]["build_simsiam_heads"] = model_cfg["build_simsiam_heads"]
-    hydra_config["tracker"]["dynamic_update"] = tracker_cfg["dynamic_update"]
-    hydra_config["tracker"]["window_influence"] = tracker_cfg["window_influence"]
-    hydra_config["tracker"]["N"] = tracker_cfg["N"]
+    if weights_path:
+        model = load_model(model, weights_path, strict=False)
+        print(f"Weights loaded from {weights_path}")
 
-    model = instantiate(hydra_config["model"])
-    model = load_model(model, model_cfg["weights_path"], strict=False)
     model = model.to(device)
-
-    print(f"Model loaded from {model_cfg['weights_path']}")
     return model
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Training utilities
-# ─────────────────────────────────────────────────────────────────────────────
-
 def build_optimizer_and_scheduler(model, cfg: dict):
+    """
+    Sets up AdamW with two separate learning-rate groups: one for the backbone encoder
+    (which we want to nudge gently because it's already well-trained) and one for the
+    tracking head (which we want to adapt more aggressively).
+    The learning-rate schedule starts with a short linear warm-up phase to avoid
+    destabilising the pretrained weights in the first few epochs, then transitions
+    into a cosine annealing decay for the rest of training.
+    Returns the optimizer and the combined scheduler.
+    """
     train_cfg = cfg["training"]
 
     backbone_params = [p for p in model.encoder.parameters() if p.requires_grad]
@@ -179,6 +181,12 @@ def build_optimizer_and_scheduler(model, cfg: dict):
 
 
 def build_criterion(cfg: dict, device: torch.device):
+    """
+    Builds the combined tracking loss, which adds a focal classification loss
+    (for deciding whether a location contains the target) and a bounding-box
+    regression loss (for refining its position). The weights and focal parameters
+    all come from the loss section of the config.
+    """
     from utils.losses import TrackingHeadLoss
 
     loss_cfg = cfg["loss"]
@@ -190,29 +198,28 @@ def build_criterion(cfg: dict, device: torch.device):
     ).to(device)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Training loop
-# ─────────────────────────────────────────────────────────────────────────────
-
 def train(cfg: dict) -> None:
+    """
+    The main training loop. Pulls everything together: data, model, optimizer, scheduler,
+    and loss function. Runs for the configured number of epochs, printing a loss summary
+    after each one and saving a checkpoint to disk so you can resume or evaluate at any point.
+    Backbone layers are frozen at the start so only the tracking head gets updated,
+    which is a standard fine-tuning strategy that keeps the pretrained representations intact.
+    """
     from utils.training import _train_one_epoch, freeze_backbone_only
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    # ── data ──
     train_df, val_df = load_and_split(cfg)
     train_loader, val_loader = build_dataloaders(train_df, val_df, cfg)
 
-    # ── model ──
     model = build_model(cfg, device)
     freeze_backbone_only(model)
 
-    # ── optimisation ──
     optimizer, scheduler = build_optimizer_and_scheduler(model, cfg)
     criterion = build_criterion(cfg, device)
 
-    # ── checkpointing ──
     save_dir = cfg["output"]["checkpoint_dir"]
     os.makedirs(save_dir, exist_ok=True)
 
@@ -220,7 +227,6 @@ def train(cfg: dict) -> None:
     num_epochs = train_cfg["num_epochs"]
     start_epoch = train_cfg["start_epoch"]
 
-    # ── loop ──
     for epoch in range(start_epoch, num_epochs + 1):
         print(f"\n── Epoch {epoch}/{num_epochs} ──")
         model.train()
@@ -250,11 +256,13 @@ def train(cfg: dict) -> None:
         print(f"  Saved checkpoint → {ckpt_path}")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Entry point
-# ─────────────────────────────────────────────────────────────────────────────
-
 def parse_args() -> argparse.Namespace:
+    """
+    Defines the two command-line arguments the script accepts.
+    --config points to the YAML file that controls everything.
+    --csv_path is an optional shortcut to override the dataset path without
+    touching the config file, which is handy when running quick experiments.
+    """
     parser = argparse.ArgumentParser(description="SiamABC fine-tuning script")
     parser.add_argument(
         "--config",

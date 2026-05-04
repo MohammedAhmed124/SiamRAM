@@ -1,58 +1,90 @@
 """
-Multi-dataset tracking dataset supporting UAV123, UAVTrack112, and DTB70.
+UAV tracking dataset that feeds SiamABC during training.
+ 
+Supports UAV123, UAVTrack112, and DTB70 out of the box. Mixed dataframes
+(rows from multiple datasets) work fine — each sequence figures out its own
+frame-naming convention automatically.
+ 
+──────────────────────────────────────────────────────────────────────────────
+WHY THIS FILE EXISTS: THE CONFIDENCE COLLAPSE PROBLEM
+──────────────────────────────────────────────────────────────────────────────
+ 
+SiamABC (and Siamese trackers in general) learn by comparing a template crop
+of the target to a search-region crop and predicting whether the target is
+present and where.  The head outputs a classification score (confidence) and
+a regression map (bounding box).
+ 
+The problem: if you only ever train on POSITIVE pairs — template and search
+both containing the real target — the head never learns to say "no".  During
+inference it sees backgrounds, distractors, and completely empty regions, but
+it was never penalised for being confident on those.  The result is that the
+confidence score is always high regardless of what's actually in the search
+crop.  The tracker can't distinguish "I found the target" from "I'm looking
+at a patch of sky".  This kills any re-detection or confidence-gating logic
+you put downstream.
+ 
+The fix is to inject NEGATIVE pairs during training: samples where the search
+crop is explicitly guaranteed to NOT contain the target.  The head then learns
+to output low confidence when the target isn't there.  That's the entire
+reason _negative_sample(), _build_shifted_negative_search(), and
+_build_distractor_negative_search() exist in this file.
+ 
+──────────────────────────────────────────────────────────────────────────────
+WHY "GUARANTEED" MATTERS
+──────────────────────────────────────────────────────────────────────────────
+ 
+Early versions of negative sampling just shifted the crop anchor by "a lot"
+and hoped for the best.  That doesn't work reliably.  With search_context=2.0
+the context window is 5× the object wide (2 left + 1 object + 2 right), so
+you need to shift by more than (1 + search_context) × object_width to clear
+it — at least 3× the object width horizontally.  The old code shifted by only
+1–2× and would frequently still overlap the target.
+ 
+The current code uses _bboxes_overlap() as a hard geometric gate after EVERY
+candidate crop is proposed.  No crop is accepted until it provably has zero
+pixel overlap with the target bounding box.  The minimum-shift heuristic is
+just a sampling bias to make the search faster; the overlap check is the
+actual guarantee.
+ 
 
-Dataset-specific differences handled here
-──────────────────────────────────────────
-UAV123      : frames/{frame_idx:06d}.jpg, index starts at 1
-UAVTrack112 : frames/{frame_idx:06d}.jpg, index starts at 1  (same as UAV123)
-DTB70       : img/{frame_idx:04d}.jpg,    index starts at 1
-
-Frame naming is auto-detected from existing files on first access, so new
-datasets that follow any common convention will work without code changes.
-
-Negative sample structure (guaranteed)
-───────────────────────────────────────
-  template         – positive target crop (template-style) from frame t_idx
-  dynamic_template – positive target crop (template-style) from frame dyn_idx
-  dynamic_search   – positive target crop (search-style)  from frame dyn_idx
-                     dyn_idx ∈ [t_idx, s_idx]; SAME frame for both dynamic crops
-  search           – negative crop: the context window is GUARANTEED not to
-                     overlap the ground-truth target bbox, verified explicitly
-                     via _bboxes_overlap() after every candidate is proposed.
-                     No target pixel can appear in the search crop.
-
-Why the old shift-magnitude heuristic was insufficient
-───────────────────────────────────────────────────────
-With search_context = 2.0, extend_bbox expands the context window by 2× the
-object width/height on every side.  The full context window therefore spans
-5× the object in each dimension (2 left + 1 object + 2 right).  The context
-left/right edges are at anchor_center ± 2.5 × w.  For a purely horizontal
-shift of magnitude s, the nearest context edge is at distance s – 2.5w from
-the target center, so NO overlap requires s > (1 + search_context) × w = 3w.
-The old code shifted by only 1–2 × w, which is provably insufficient.
-
-The fix uses a minimum shift magnitude of (search_context + 1.1) × dimension
-as a sampling bias AND always validates with the explicit geometry check.
+ 
+You don't need to hard-code these.  The pattern is auto-detected from files
+on disk the first time a frame is accessed.  New datasets work automatically
+as long as they follow any common numbering convention.
+ 
+──────────────────────────────────────────────────────────────────────────────
+SAMPLE STRUCTURE (both positive and negative)
+──────────────────────────────────────────────────────────────────────────────
+ 
+Every sample contains four crops:
+ 
+  template         – target crop (template-sized) from frame t_idx
+  dynamic_template – target crop (template-sized) from an intermediate frame
+  dynamic_search   – target crop (search-sized)   from that SAME intermediate frame
+  search           – either the real target region (positive) or a crop that
+                     is 100% confirmed to not contain the target (negative)
 """
-
+ 
 import os
 import random
 from typing import Any, Callable, Dict, List, Optional, Tuple
-
+ 
 import albumentations as albu
 import cv2
 import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import Dataset
-
+ 
 from utils.box_coder import SiamABCBoxCoder
 from utils.utils import (
     clamp_bbox,
     extend_bbox,
     get_extended_crop,
 )
-
+ 
+# The patterns we try when auto-detecting how a dataset names its frames.
+# Order matters: more common patterns come first so detection is fast.
 _FRAME_PATTERNS = [
     "{:06d}.jpg",
     "img/{:04d}.jpg",
@@ -61,16 +93,20 @@ _FRAME_PATTERNS = [
     "{:06d}.png",
     "img/{:04d}.png",
 ]
-
-
+ 
+ 
 def _detect_frame_pattern(
     seq_path: str,
     probe_indices: List[int],
 ) -> Optional[str]:
     """
-    Try each pattern in _FRAME_PATTERNS against a handful of probe frame
-    indices.  Return the first pattern where ALL probes resolve to existing
-    files, or None if nothing matches.
+    Figure out how a dataset names its frame images by testing a handful
+    of known frame indices against every pattern we know about.
+ 
+    We probe the first frame, last frame, and middle frame — if all three
+    exist under the same pattern, that's almost certainly the right one.
+    Returns None if nothing matches, which triggers the directory-listing
+    fallback in TrackingSequence._infer_pattern_from_directory().
     """
     for pattern in _FRAME_PATTERNS:
         if all(
@@ -79,8 +115,8 @@ def _detect_frame_pattern(
         ):
             return pattern
     return None
-
-
+ 
+ 
 def _regression_weight_label(
     bbox,
     image_size: int = 255,
@@ -89,24 +125,23 @@ def _regression_weight_label(
     r_neg: int = 0,
 ) -> torch.Tensor:
     """
-    Generate a Gaussian-like label map for bounding box regression.
-
-    Args:
-        bbox (np.ndarray): Target bounding box [x, y, w, h].
-        image_size (int): Size of the input image.
-        map_size (int): Size of the output score map.
-        r_pos (int): Radius for positive labels.
-        r_neg (int): Radius for negative labels.
-
-    Returns:
-        torch.Tensor: The regression weight label map.
+    Build the per-cell regression weight map for a given bounding box.
+ 
+    Cells near the target center get weight 1.0, cells far away get 0.0.
+    The head uses this to focus regression loss on cells that are actually
+    close to the target — there's no point penalising the regression output
+    at a cell that's three object-widths away from the target center.
+ 
+    The "label" is essentially a Manhattan-distance threshold: cells within
+    r_pos steps of the target's cell on the score map are positive, cells
+    between r_pos and r_neg are neutral (0.5), everything else is background.
     """
     bbox_c_x = bbox[0] + bbox[2] / 2.0
     bbox_c_y = bbox[1] + bbox[3] / 2.0
-
+ 
     sz_x = np.floor(float(bbox_c_x / image_size * map_size))
     sz_y = np.floor(float(bbox_c_y / image_size * map_size))
-
+ 
     x, y = np.meshgrid(
         np.arange(0, map_size) - sz_x,
         np.arange(0, map_size) - sz_y,
@@ -118,37 +153,34 @@ def _regression_weight_label(
         np.where(dist_to_center < r_neg, 0.5 * np.ones_like(y), np.zeros_like(y)),
     )
     return torch.from_numpy(label.astype(np.float32))
-
-
+ 
+ 
 class TrackingSequence:
     """
-    Dataset-agnostic sequence wrapper.
-
-    The dataframe row must supply:
-        seq_path    – directory containing frame images
-        annot_path  – path to groundtruth annotation file
-        start_idx   – first frame index (inclusive)
-        end_idx     – last  frame index (inclusive)
-        n_frames    – total number of frames
-        class       – object class label (string)
-        dataset     – source dataset name, e.g. "UAV123" / "DTB70" / "UAVTrack112"
-
-    Optional row column:
-        frame_pattern – printf-style pattern relative to seq_path, e.g.
-                        "img/{:04d}.jpg".  If absent or empty the pattern is
-                        auto-detected from existing files.
+    A single annotated video sequence, dataset-agnostic.
+ 
+    This wraps all the per-sequence bookkeeping — reading annotations,
+    finding frame images, sampling valid frames — so the main dataset
+    class doesn't have to think about it.
+ 
+    The row dict you pass in must contain:
+        seq_path    – folder where frame images live
+        annot_path  – path to the groundtruth .txt file (x,y,w,h per line)
+        start_idx   – first frame index (inclusive, 1-based for UAV datasets)
+        end_idx     – last frame index (inclusive)
+        n_frames    – total frame count
+        class       – what kind of object is being tracked
+        dataset     – which dataset this came from (UAV123 / DTB70 / etc.)
+ 
+    Optionally:
+        frame_pattern – e.g. "img/{:04d}.jpg". If you leave this out, we
+                        auto-detect it from the files on disk.
     """
-
+ 
     def __init__(
         self,
         row: Dict,
     ):
-        """
-        Initialise a TrackingSequence from a dataframe row.
-
-        Args:
-            row (Dict): Dictionary containing 'seq_path', 'annot_path', etc.
-        """
         self.seq_path = row["seq_path"]
         self.annot_path = row["annot_path"]
         self.start_idx = int(row["start_idx"])
@@ -156,20 +188,23 @@ class TrackingSequence:
         self.n_frames = int(row["n_frames"])
         self.cls = row["class"]
         self.dataset = row["dataset"]
-
+ 
         self._frame_pattern: Optional[str] = row.get("frame_pattern") or None
         self._bboxes: Optional[List[np.ndarray]] = None
-
+ 
     def _resolve_frame_pattern(
         self,
     ) -> str:
         """
-        Auto-detect the frame-naming pattern by probing a few known indices.
-        Raises RuntimeError if none of the known patterns match.
+        Try to figure out the frame naming pattern by probing a few frames
+        from this sequence.  Falls back to scanning the directory if probing
+        fails.  Raises RuntimeError if nothing works — at that point you need
+        to either add the pattern to _FRAME_PATTERNS or put a 'frame_pattern'
+        column in your dataframe.
         """
         mid = (self.start_idx + self.end_idx) // 2
         probes = list({self.start_idx, mid, self.end_idx})
-
+ 
         pattern = _detect_frame_pattern(self.seq_path, probes)
         if pattern is None:
             pattern = self._infer_pattern_from_directory()
@@ -179,13 +214,15 @@ class TrackingSequence:
                 f"Add a 'frame_pattern' column to your dataframe or extend _FRAME_PATTERNS."
             )
         return pattern
-
+ 
     def _infer_pattern_from_directory(
         self,
     ) -> Optional[str]:
         """
-        Fallback: list the sequence directory (or its 'img/' subdirectory) and
-        guess the zero-padding width and extension from the first image found.
+        Last-resort frame pattern detection: list the folder, look at the
+        first image filename, and guess the zero-padding width and extension
+        from it.  Checks both the sequence root and an 'img/' subfolder since
+        some datasets (like DTB70) put frames there.
         """
         for subdir in ("", "img"):
             dirpath = os.path.join(self.seq_path, subdir) if subdir else self.seq_path
@@ -203,29 +240,30 @@ class TrackingSequence:
             prefix = (subdir + "/") if subdir else ""
             return f"{prefix}{{:{width:02d}d}}{ext}"
         return None
-
+ 
     def frame_path(
         self,
         frame_idx: int,
     ) -> str:
         """
-        Return the absolute path to the image at the given frame index.
-
-        Args:
-            frame_idx (int): Frame index.
-
-        Returns:
-            str: Absolute file path.
+        Get the full path to a specific frame image.
+        Auto-detects the naming pattern on first call, caches it after that.
         """
         if self._frame_pattern is None:
             self._frame_pattern = self._resolve_frame_pattern()
         return os.path.join(self.seq_path, self._frame_pattern.format(frame_idx))
-
+ 
     def _load_bboxes(
         self,
     ) -> None:
         """
-        Load bounding boxes from the annotation file into memory.
+        Read the annotation file into memory.  We load it all at once and
+        cache it — annotation files are small and we'll typically access many
+        frames from the same sequence during training.
+ 
+        Handles both comma-separated and tab-separated files.  Lines that
+        can't be parsed (partial occlusion flags, comment lines, etc.) become
+        NaN bounding boxes, which is_valid_bbox() will reject safely.
         """
         if self._bboxes is not None:
             return
@@ -235,7 +273,7 @@ class TrackingSequence:
                 line = line.strip()
                 if not line:
                     continue
-
+ 
                 vals = line.replace("\t", ",").split(",")
                 try:
                     x, y, w, h = (float(v) for v in vals[:4])
@@ -246,19 +284,15 @@ class TrackingSequence:
                     )
                     bboxes.append(np.full(4, np.nan, dtype=np.float32))
         self._bboxes = bboxes
-
+ 
     def get_bbox(
         self,
         frame_idx: int,
     ) -> np.ndarray:
         """
-        Return the ground-truth bounding box for the given frame index.
-
-        Args:
-            frame_idx (int): Frame index.
-
-        Returns:
-            np.ndarray: Bounding box [x, y, w, h].
+        Return the ground-truth bounding box for a given frame.
+        Returns a NaN array if the index is out of range — callers should
+        always check is_valid_bbox() before using the result.
         """
         self._load_bboxes()
         assert self._bboxes is not None
@@ -266,19 +300,19 @@ class TrackingSequence:
         if local < 0 or local >= len(self._bboxes):
             return np.full(4, np.nan, dtype=np.float32)
         return self._bboxes[local].copy()
-
+ 
     @staticmethod
     def is_valid_bbox(
         bbox: np.ndarray,
     ) -> bool:
         """
-        Check if a bounding box is valid (not NaN, positive dimensions).
-
-        Args:
-            bbox (np.ndarray): Bounding box to check.
-
-        Returns:
-            bool: True if valid.
+        Check whether a bounding box is actually usable for training.
+ 
+        We reject boxes that are NaN (annotation parse failures), have
+        dimensions of 5 pixels or less (too small to crop meaningfully),
+        or have negative coordinates (off-screen boxes from some annotation
+        styles).  These edge cases come up more than you'd expect in real
+        UAV datasets.
         """
         return (
             not np.any(np.isnan(bbox))
@@ -287,7 +321,7 @@ class TrackingSequence:
             and bbox[0] >= 0
             and bbox[1] >= 0
         )
-
+ 
     def sample_valid_frame(
         self,
         rng: random.Random,
@@ -296,16 +330,13 @@ class TrackingSequence:
         upper_end: Optional[int] = None,
     ) -> Optional[int]:
         """
-        Randomly sample a frame index with a valid bounding box.
-
-        Args:
-            rng (random.Random): Random number generator.
-            max_tries (int): Maximum number of random attempts.
-            lower_end (Optional[int]): Lower bound for sampling.
-            upper_end (Optional[int]): Upper bound for sampling.
-
-        Returns:
-            Optional[int]: Valid frame index or None.
+        Randomly pick a frame index that has a valid bounding box and an
+        image file that actually exists on disk.
+ 
+        We shuffle the candidate indices instead of sampling with replacement
+        so we don't waste tries on the same bad frames repeatedly.  Returns
+        None if we exhausted max_tries without finding anything usable —
+        callers should handle this gracefully (skip the sequence, try another).
         """
         lower_end = (
             max(lower_end, self.start_idx) if lower_end is not None else self.start_idx
@@ -321,7 +352,7 @@ class TrackingSequence:
             if self.is_valid_bbox(bbox) and os.path.exists(self.frame_path(idx)):
                 return idx
         return None
-
+ 
     def sample_search_template_idx_pair(
         self,
         rng: random.Random,
@@ -330,16 +361,19 @@ class TrackingSequence:
         upper_end: Optional[int] = None,
     ) -> Tuple[Optional[int], Optional[int], Optional[np.ndarray]]:
         """
-        Sample a pair of (template, search) frame indices.
-
-        Args:
-            rng (random.Random): Random number generator.
-            max_frame_gap (int): Maximum temporal distance between frames.
-            lower_end, upper_end (Optional[int]): Search range bounds.
-
-        Returns:
-            Tuple[Optional[int], Optional[int], Optional[np.ndarray]]:
-                (template_idx, search_idx, search_bbox).
+        Pick a (template frame, search frame) pair from this sequence.
+ 
+        The template frame is sampled first.  The search frame is then
+        picked from the window [template_frame, template_frame + max_frame_gap].
+        This enforces a temporal ordering — the template always comes before
+        (or at) the search frame — which mirrors how a real tracker works.
+ 
+        When max_frame_gap=0 is passed, we allow t_idx == s_idx, which is
+        used for the dynamic template/search pair where we want both crops
+        from the exact same moment in time.
+ 
+        Returns (None, None, None) if no valid pair could be found, which
+        happens with short sequences or sequences with many invalid frames.
         """
         lower_end = (
             max(lower_end, self.start_idx) if lower_end is not None else self.start_idx
@@ -347,13 +381,13 @@ class TrackingSequence:
         upper_end = (
             min(upper_end, self.end_idx) if upper_end is not None else self.end_idx
         )
-
+ 
         failure = (None, None, None)
-
+ 
         t_idx = self.sample_valid_frame(rng, lower_end=lower_end, upper_end=upper_end)
         if t_idx is None:
             return failure
-
+ 
         lo = max(lower_end, t_idx)
         hi = min(upper_end, t_idx + max_frame_gap)
         candidates = [
@@ -361,28 +395,74 @@ class TrackingSequence:
         ]
         if not candidates:
             return failure
-
+ 
         s_idx = rng.choice(candidates)
         s_bbox = self.get_bbox(s_idx)
         if not self.is_valid_bbox(s_bbox):
             return failure
         if not os.path.exists(self.frame_path(s_idx)):
             return failure
-
+ 
         return t_idx, s_idx, s_bbox
-
-
+ 
+ 
 class UAVTrackingDataset(Dataset):
     """
-    Unified tracking dataset for UAV123, UAVTrack112, and DTB70.
-
-    The dataframe must have columns described in TrackingSequence.__init__.
-    Mixed-dataset dataframes (rows from different sources) are fully supported.
+    Training dataset for SiamABC on UAV footage.
+ 
+    ──────────────────────────────────────────────────────────────────────────
+    THE CORE PROBLEM THIS DATASET SOLVES
+    ──────────────────────────────────────────────────────────────────────────
+ 
+    SiamABC's classification head learns to compare a template (what we're
+    tracking) against a search region (where we think it might be).  If
+    training only ever shows it positive pairs — search regions that DO
+    contain the target — the head never learns what "not there" looks like.
+ 
+    In practice this means the confidence score stays high everywhere.
+    The tracker can't tell the difference between "I found the target" and
+    "I'm looking at a blank wall".  This kills re-detection, makes the
+    tracker drift to distractors, and makes confidence-based early stopping
+    useless.
+ 
+    The solution: neg_ratio controls what fraction of training samples are
+    NEGATIVE — search crops explicitly confirmed to contain zero target pixels.
+    The head learns to output low confidence on those, which means high
+    confidence becomes a meaningful signal again.
+ 
+    ──────────────────────────────────────────────────────────────────────────
+    TWO KINDS OF NEGATIVES
+    ──────────────────────────────────────────────────────────────────────────
+ 
+    75% of negatives use the "shifted" strategy: take the same frame as the
+    search crop but shift the anchor far away from the target.  This teaches
+    the head to reject background from the same sequence as the target.
+ 
+    25% use the "distractor" strategy: randomly sample a background patch
+    anywhere in the image.  This provides more variety and catches cases where
+    the shifted strategy keeps hitting similar textures.
+ 
+    Both strategies use _bboxes_overlap() as a hard geometric gate — no crop
+    is accepted until it's provably non-overlapping with the target.
+ 
+    ──────────────────────────────────────────────────────────────────────────
+    SAMPLE STRUCTURE
+    ──────────────────────────────────────────────────────────────────────────
+ 
+    Every sample (positive or negative) returns the same four crops:
+ 
+        template         – what the target looked like at time t
+        dynamic_template – what the target looked like at some time between t and s
+        dynamic_search   – same intermediate frame, search-crop style
+        search           – positive: target at time s / negative: guaranteed non-target
+ 
+    The dynamic pair exists so the model can learn from target appearance
+    changes over time, not just the initial template vs. final search.
     """
-
+ 
     TEMPLATE_CONTEXT = 0.5
     SEARCH_CONTEXT = 2.0
-
+ 
     def __init__(
         self,
         dataframe: pd.DataFrame,
@@ -392,17 +472,19 @@ class UAVTrackingDataset(Dataset):
         seed: int = 42,
     ):
         """
-        Initialise the UAVTrackingDataset.
-
-        Args:
-            dataframe (pd.DataFrame): Dataframe containing sequence info.
-            tracking_config (Dict[str, Any]): Tracker hyper-parameters.
-            num_samples (int): Total number of samples per epoch.
-            neg_ratio (float): Probability of sampling a negative pair.
-            seed (int): Random seed for reproducibility.
+        Set up the dataset.
+ 
+        dataframe      – one row per sequence, see TrackingSequence for required columns
+        tracking_config – dict of tracker hyperparams (sizes, context factors, etc.)
+        num_samples    – how many samples to report per epoch (sampling is random so
+                         this is just a schedule length, not a data limit)
+        neg_ratio      – fraction of samples that will be negative pairs.
+                         0.5 means the head sees as many "not there" crops as "there"
+                         crops, which works well in practice.
+        seed           – fixed seed so runs are reproducible
         """
         super().__init__()
-
+ 
         self.template_size = tracking_config["template_size"]
         self.instance_size = tracking_config["instance_size"]
         self.score_size = tracking_config["score_size"]
@@ -415,7 +497,7 @@ class UAVTrackingDataset(Dataset):
         self.template_image_shift = tracking_config["template_image_shift"]
         self.template_image_scale = tracking_config["template_image_scale"]
         self.cuda_id = 0
-
+ 
         self._template_transform = self._get_default_transform(
             tracking_config["template_size"]
         )
@@ -425,23 +507,23 @@ class UAVTrackingDataset(Dataset):
         self._dynamic_search_transform = self._get_default_transform(
             tracking_config["instance_size"]
         )
-
+ 
         self.neg_ratio = neg_ratio
         self.num_samples = num_samples
         self.rng = random.Random(seed)
-
+ 
         self.box_coder = SiamABCBoxCoder(tracking_config)
-
+ 
         self.sequences: List[TrackingSequence] = [
             TrackingSequence(row.to_dict())
             for _, row in dataframe.reset_index(drop=True).iterrows()
         ]
-
+ 
         if "dataset" in dataframe.columns:
             breakdown = dataframe["dataset"].value_counts().to_dict()
         else:
             breakdown = {"unknown": len(self.sequences)}
-
+ 
         print(
             f"[Dataset] {len(self.sequences)} sequences | "
             f"sources={breakdown} | "
@@ -449,30 +531,23 @@ class UAVTrackingDataset(Dataset):
             f"template_size={self.template_size} | instance_size={self.instance_size} | "
             f"score_size={self.score_size}"
         )
-
+ 
     def __len__(
         self,
     ) -> int:
-        """
-        Get the total number of samples per epoch.
-
-        Returns:
-            int: Number of samples.
-        """
         return self.num_samples
-
+ 
     def __getitem__(
         self,
         _idx: int,
     ) -> Dict[str, torch.Tensor]:
         """
-        Fetch a positive or negative training sample.
-
-        Args:
-            _idx (int): Ignored index (random sampling is used).
-
-        Returns:
-            Dict[str, torch.Tensor]: A dictionary containing the training pair tensors.
+        Return one training sample.
+ 
+        The index is ignored — sampling is random each call because we want
+        each epoch to see a different random mix.  If sampling fails after 5
+        attempts (bad sequence, all frames corrupt, etc.) we fall back to a
+        zero-filled dummy negative so the DataLoader never stalls.
         """
         for attempt in range(5):
             try:
@@ -484,19 +559,25 @@ class UAVTrackingDataset(Dataset):
                 if attempt == 4:
                     return self._dummy_negative()
         return self._dummy_negative()
-
+ 
     def _positive_sample(
         self,
     ) -> Dict[str, torch.Tensor]:
         """
-        Generate a positive training sample pair.
-
-        Returns:
-            Dict[str, torch.Tensor]: Dictionary containing positive template and search crops.
+        Build a positive training sample — one where the search crop DOES
+        contain the target and the labels point to its real location.
+ 
+        We also sample a "dynamic" pair from an intermediate frame between
+        the template and search frames.  This gives the model a view of how
+        the target appearance evolves over time, which helps with sequences
+        that have scale changes, rotation, or deformation.
+ 
+        Falls back to _dummy_negative() if 10 consecutive sequence attempts
+        all fail (e.g. the chosen sequences have mostly invalid annotations).
         """
         for _ in range(10):
             seq = self.rng.choice(self.sequences)
-
+ 
             t_crop, t_idx, template_bbox, s_crop, s_idx, bbox_in_c, ok = (
                 self.sample_search_template_pair(
                     self.rng, seq, max_frame_gap=self.max_frame_gap
@@ -504,7 +585,7 @@ class UAVTrackingDataset(Dataset):
             )
             if not ok:
                 continue
-
+ 
             dt_crop, _, _, ds_crop, _, _, ok_dyn = self.sample_search_template_pair(
                 self.rng,
                 seq,
@@ -513,23 +594,24 @@ class UAVTrackingDataset(Dataset):
                 max_frame_gap=0,
             )
             if not ok_dyn:
+                # If we can't get a good intermediate frame, reuse the static crops.
                 dt_crop = t_crop
                 ds_crop = s_crop
-
+ 
             if not self.is_valid_bbox(bbox_in_c):
                 continue
             x, y, w, h = bbox_in_c
             if (x + w) > self.instance_size or (y + h) > self.instance_size:
                 continue
-
+ 
             encoded = self.box_coder.encode(torch.from_numpy(bbox_in_c).reshape(1, 4))
             cls_label = encoded.classification_label[0].numpy()
             bbox_label = encoded.regression_map[0].numpy()
-
+ 
             reg_weight = _regression_weight_label(
                 bbox_in_c, self.instance_size, self.score_size
             ).numpy()
-
+ 
             return self._pack(
                 t_crop,
                 dt_crop,
@@ -541,9 +623,9 @@ class UAVTrackingDataset(Dataset):
                 is_positive=True,
                 path=seq.frame_path(s_idx),
             )
-
+ 
         return self._dummy_negative()
-
+ 
     def sample_search_template_pair(
         self,
         rng: random.Random,
@@ -553,20 +635,16 @@ class UAVTrackingDataset(Dataset):
         max_frame_gap=None,
     ):
         """
-        Sample a (template_crop, search_crop) pair from a sequence.
-
-        Args:
-            rng (random.Random): Random number generator.
-            seq (TrackingSequence): The sequence to sample from.
-            lower_end, upper_end (Optional[int]): Range bounds.
-            max_frame_gap (Optional[int]): Max temporal distance.
-
-        Returns:
-            Tuple: (t_crop, t_idx, t_bbox, s_crop, s_idx, s_bbox, success).
+        Pick and crop a (template, search) pair from a sequence.
+ 
+        This is the main building block for both positive and negative samples.
+        It handles frame index sampling, image loading, and crop extraction.
+        Returns a 7-tuple ending in False if anything goes wrong — callers
+        check the last element before using the rest.
         """
         failure = (None, None, None, None, None, None, False)
         frame_gap = self.max_frame_gap if max_frame_gap is None else max_frame_gap
-
+ 
         t_idx, s_idx, s_bbox = seq.sample_search_template_idx_pair(
             rng,
             max_frame_gap=frame_gap,
@@ -575,30 +653,29 @@ class UAVTrackingDataset(Dataset):
         )
         if t_idx is None or s_idx is None or s_bbox is None:
             return failure
-
+ 
         t_bbox = seq.get_bbox(t_idx)
         t_img = self._load_image(seq.frame_path(t_idx))
         s_img = self._load_image(seq.frame_path(s_idx))
-
+ 
         t_crop, template_bbox = self.get_template_crop(t_img, t_bbox)
         s_crop, bbox_in_c, _ = self.get_search_crop(s_img, s_bbox)
-
+ 
         return t_crop, t_idx, template_bbox, s_crop, s_idx, bbox_in_c, True
-
+ 
     def get_template_crop(
         self,
         image: np.ndarray,
         rect: np.ndarray,
     ):
         """
-        Extract and preprocess a template crop from an image.
-
-        Args:
-            image (np.ndarray): Source RGB image.
-            rect (np.ndarray): Target bounding box [x, y, w, h].
-
-        Returns:
-            Tuple[torch.Tensor, np.ndarray]: (preprocessed_crop, crop_bbox).
+        Cut out and preprocess a template crop from an image.
+ 
+        We apply a small random shift and scale to the bounding box before
+        cropping.  This augments the template so the model sees the target
+        from slightly different viewpoints and scales during training, which
+        makes it more robust to the kind of small jitter that happens between
+        frames in real tracking.
         """
         shifted = self.apply_shift_scale(
             rect,
@@ -608,7 +685,7 @@ class UAVTrackingDataset(Dataset):
         )
         if not self.is_valid_bbox(shifted):
             shifted = rect
-
+ 
         context = extend_bbox(
             shifted,
             offset=self.template_bbox_offset,
@@ -623,22 +700,20 @@ class UAVTrackingDataset(Dataset):
         )
         img = self._preprocess_image(crop, self._template_transform)
         return img, template_bbox
-
+ 
     def get_search_crop(
         self,
         image: np.ndarray,
         bbox: np.ndarray,
     ):
         """
-        Extract and preprocess a search crop from an image.
-
-        Args:
-            image (np.ndarray): Source RGB image.
-            bbox (np.ndarray): Target bounding box [x, y, w, h].
-
-        Returns:
-            Tuple[torch.Tensor, np.ndarray, np.ndarray]:
-                (preprocessed_crop, search_bbox, context_rect).
+        Cut out and preprocess a search-region crop from an image.
+ 
+        Like the template crop but larger (controlled by search_context).
+        We also randomise the context multiplier slightly on each call via
+        _get_random_context() — this teaches the model to handle search
+        regions of varying scale, which matters when the tracker's estimated
+        object size drifts during inference.
         """
         shifted = self.apply_shift_scale(
             bbox,
@@ -662,71 +737,97 @@ class UAVTrackingDataset(Dataset):
         )
         img = self._preprocess_image(crop, self._search_transform)
         return img, search_bbox, ctx
-
+ 
     def _negative_sample(
         self,
     ) -> Dict[str, torch.Tensor]:
         """
-        Build a negative training sample with the following strict structure:
-
-          template         – positive target crop (template-style) from frame t_idx
-          dynamic_template – positive target crop (template-style) from frame dyn_idx
-          dynamic_search   – positive target crop (search-style)   from frame dyn_idx
-                             dyn_idx ∈ [t_idx, s_idx] — SAME frame for both dynamic crops
-          search           – negative crop: context window is GUARANTEED not to
-                             overlap the actual target bbox in its source frame.
-
-        The "guaranteed" part is enforced by _bboxes_overlap(), which is called
-        after every candidate crop window is proposed.  No target pixel can appear
-        in the search crop.
+        Build a negative training sample — one where the search crop is
+        GUARANTEED to not contain the target.
+ 
+        ──────────────────────────────────────────────────────────────────────
+        WHY WE NEED THIS
+        ──────────────────────────────────────────────────────────────────────
+ 
+        SiamABC's head assigns a classification confidence score to every
+        cell in its output map.  If you only train it on positive pairs (where
+        the target is always present in the search region), the head learns
+        to be confident everywhere — it literally never sees a case where "no
+        target" is the right answer.
+ 
+        During inference this is catastrophic.  The tracker drifts, gets
+        stuck on distractors, and its confidence output is useless as a signal
+        because it's always high regardless of whether the target is actually
+        visible.
+ 
+        By feeding negative samples, we give the head explicit training signal
+        for the "target is not here" case.  The all-zeros classification label
+        means the loss pushes confidence toward zero for these crops.  After
+        training, high confidence becomes a genuinely informative signal.
+ 
+        ──────────────────────────────────────────────────────────────────────
+        STRUCTURE
+        ──────────────────────────────────────────────────────────────────────
+ 
+        template + dynamic_template + dynamic_search are all POSITIVE crops —
+        we still want the model to see a real target in those positions.
+        Only the `search` crop is negative.  The all-zeros cls_label tells
+        the loss that there's nothing to find in the search region.
+ 
+        75% of the time we use the "shifted" strategy (anchor pushed far from
+        the target in a random cardinal direction).  25% of the time we use
+        the "distractor" strategy (random background patch anywhere in the
+        image).  Both strategies validate every candidate with _bboxes_overlap()
+        before accepting it — no target pixel can sneak into the crop.
         """
         for _ in range(15):
             seq = self.rng.choice(self.sequences)
-
+ 
             t_idx, s_idx, s_bbox = seq.sample_search_template_idx_pair(
                 self.rng, max_frame_gap=self.max_frame_gap
             )
             if t_idx is None:
                 continue
-
+ 
             t_bbox = seq.get_bbox(t_idx)
             if not seq.is_valid_bbox(t_bbox):
                 continue
-
+ 
             t_img = self._load_image(seq.frame_path(t_idx))
-
+ 
             t_crop, _ = self.get_template_crop(t_img, t_bbox)
-
+ 
             dyn_idx = seq.sample_valid_frame(self.rng, lower_end=t_idx, upper_end=s_idx)
             if dyn_idx is None:
-
+                # No valid intermediate frame — just reuse the template frame.
                 dyn_idx = t_idx
                 dyn_img = t_img
                 dyn_bbox = t_bbox.copy()
             else:
                 dyn_img = self._load_image(seq.frame_path(dyn_idx))
                 dyn_bbox = seq.get_bbox(dyn_idx)
-
+ 
             if not seq.is_valid_bbox(dyn_bbox):
                 continue
-
+ 
             dynamic_template, _ = self.get_template_crop(dyn_img, dyn_bbox)
-
             dynamic_search, _, _ = self.get_search_crop(dyn_img, dyn_bbox)
-
+ 
+            # Pick which negative strategy to use this time.
             if self.rng.random() < 0.75:
                 s_crop = self._build_shifted_negative_search(seq, s_idx, s_bbox)
             else:
                 s_crop = self._build_distractor_negative_search(seq, s_idx, s_bbox)
-
+ 
             if s_crop is None:
                 continue
-
+ 
+            # All-zeros labels tell the loss: nothing to find here.
             S = self.score_size
             cls_label = np.zeros((1, S, S), dtype=np.float32)
             bbox_label = np.zeros((4, S, S), dtype=np.float32)
             reg_weight = np.zeros((S, S), dtype=np.float32)
-
+ 
             return self._pack(
                 t_crop,
                 dynamic_template,
@@ -737,32 +838,34 @@ class UAVTrackingDataset(Dataset):
                 reg_weight,
                 is_positive=False,
             )
-
+ 
         return self._dummy_negative()
-
+ 
     @staticmethod
     def _bboxes_overlap(
         a: np.ndarray,
         b: np.ndarray,
     ) -> bool:
         """
-        Return True if two [x, y, w, h] bounding boxes have any pixel overlap.
-
-        Handles negative coordinates correctly (context boxes can extend off-screen).
-        This is the definitive safety check used to guarantee that the target bbox
-        does not appear inside any negative search crop.
-
-        Geometry: two axis-aligned rectangles overlap iff their projections onto
-        BOTH axes overlap simultaneously.
-          x-overlap: a.x1 < b.x2  AND  a.x2 > b.x1
-          y-overlap: a.y1 < b.y2  AND  a.y2 > b.y1
+        Return True if two [x, y, w, h] boxes share any pixels at all.
+ 
+        This is the definitive safety gate for negative sample construction.
+        Every candidate negative crop goes through this check — if it returns
+        True, we throw the candidate away and try again.
+ 
+        The math: two axis-aligned rectangles overlap on both axes at the same
+        time iff their x-intervals overlap AND their y-intervals overlap.
+        Intervals [a1, a2] and [b1, b2] overlap iff a1 < b2 AND a2 > b1.
+ 
+        Handles negative coordinates correctly, which matters because context
+        windows can extend off the image boundary.
         """
         ax1, ay1 = float(a[0]), float(a[1])
         ax2, ay2 = ax1 + float(a[2]), ay1 + float(a[3])
         bx1, by1 = float(b[0]), float(b[1])
         bx2, by2 = bx1 + float(b[2]), by1 + float(b[3])
         return ax1 < bx2 and ax2 > bx1 and ay1 < by2 and ay2 > by1
-
+ 
     def _build_shifted_negative_search(
         self,
         seq: TrackingSequence,
@@ -770,42 +873,57 @@ class UAVTrackingDataset(Dataset):
         target_bbox: np.ndarray,
     ) -> Optional[torch.Tensor]:
         """
-        Build a negative search crop from `frame_idx` by shifting the crop
-        anchor far away from `target_bbox`.
-
-        Strategy
-        --------
-        1. Clamp `target_bbox` to image boundaries → `target_clamped`.
-        2. Pick a random cardinal direction and a shift magnitude of at least
-           (search_context + 1.1) × object_dimension.  This magnitude is the
-           theoretical minimum needed to clear the context window past the target
-           edge in the chosen direction, plus a 10% margin.
-        3. After clamping the shifted anchor to the image, compute the context
-           window and call `_bboxes_overlap(context, target_clamped)`.
-        4. If overlap → reject and retry.  This is the definitive correctness
-           guarantee — the magnitude is just a sampling bias.
-
-        Returns None after 50 failed attempts.
+        Build a negative search crop by moving the crop anchor far away from
+        the target in one of the four cardinal directions.
+ 
+        ──────────────────────────────────────────────────────────────────────
+        WHY THIS STRATEGY EXISTS
+        ──────────────────────────────────────────────────────────────────────
+ 
+        We want the negative search crop to come from the SAME frame as the
+        real search crop.  That makes the negative hard: the background texture
+        and lighting are identical to what the tracker actually sees during
+        inference, so the head can't cheat by learning "brighter = target" or
+        similar low-level cues.
+ 
+        ──────────────────────────────────────────────────────────────────────
+        WHY THE SHIFT MAGNITUDE IS (search_context + 1.1) × dimension
+        ──────────────────────────────────────────────────────────────────────
+ 
+        With search_context=2.0, the context window extends 2× the object
+        width on every side.  The full window is therefore 5× the object wide
+        (2 left + 1 object + 2 right).  For a shift of magnitude s along X,
+        the nearest edge of the context window is at distance s - 2.5w from
+        the target center.  No overlap requires that distance to be positive:
+            s > 2.5w  →  s > (1 + search_context) × w
+ 
+        We use (search_context + 1.1) × w as the minimum — the extra 0.1
+        is a margin so we don't land exactly on the edge.  The minimum is
+        just a sampling bias to avoid wasting rejection-sampling iterations;
+        the actual correctness guarantee comes from _bboxes_overlap() at the end.
+ 
+        Returns None after 50 failed attempts (e.g. the object is so large
+        there's nowhere on this frame to put a non-overlapping crop).
         """
         if not os.path.exists(seq.frame_path(frame_idx)):
             return None
-
+ 
         img = self._load_image(seq.frame_path(frame_idx))
         H, W = img.shape[:2]
         mean_color = np.mean(img, axis=(0, 1))
-
+ 
         target_clamped = clamp_bbox(target_bbox.astype(np.float32), img.shape[:2])
         if not self.is_valid_bbox(target_clamped):
             return None
-
+ 
         x, y, w, h = target_clamped.astype(float)
-
+ 
         min_shift_x = (1.0 + self.search_context + 0.1) * w
         min_shift_y = (1.0 + self.search_context + 0.1) * h
-
+ 
         for _ in range(50):
             direction = self.rng.choice(("left", "right", "up", "down"))
-
+ 
             if direction == "right":
                 shift_x = self.rng.uniform(min_shift_x, min_shift_x + 2.0 * w)
                 shift_y = self.rng.uniform(-0.5, 0.5) * h
@@ -818,24 +936,25 @@ class UAVTrackingDataset(Dataset):
             else:
                 shift_x = self.rng.uniform(-0.5, 0.5) * w
                 shift_y = -self.rng.uniform(min_shift_y, min_shift_y + 2.0 * h)
-
+ 
             anchor = clamp_bbox(
                 np.array([x + shift_x, y + shift_y, w, h], dtype=np.float32),
                 img.shape[:2],
             )
             if not self.is_valid_bbox(anchor):
                 continue
-
+ 
             context = extend_bbox(
                 anchor,
                 offset=self.search_context,
                 image_width=W,
                 image_height=H,
             )
-
+ 
+            # Hard geometric gate — reject if even one pixel of target is visible.
             if self._bboxes_overlap(context, target_clamped):
                 continue
-
+ 
             raw_crop, _, _ = get_extended_crop(
                 image=img,
                 bbox=anchor,
@@ -844,9 +963,9 @@ class UAVTrackingDataset(Dataset):
                 padding_value=mean_color,
             )
             return self._preprocess_image(raw_crop, self._search_transform)
-
+ 
         return None
-
+ 
     def _build_distractor_negative_search(
         self,
         seq: TrackingSequence,
@@ -854,51 +973,66 @@ class UAVTrackingDataset(Dataset):
         target_bbox: np.ndarray,
     ) -> Optional[torch.Tensor]:
         """
-        Build a negative search crop from `frame_idx` by randomly sampling
-        a background anchor position whose context window does NOT overlap
-        with `target_bbox`.
-
-        The anchor's size matches the target so the crop has similar scale
-        characteristics (hard negative).  All positions are tested with
-        `_bboxes_overlap` before accepting — this is the definitive guarantee.
-
+        Build a negative search crop by randomly placing a same-size anchor
+        anywhere in the image and keeping it only if it doesn't overlap the target.
+ 
+        ──────────────────────────────────────────────────────────────────────
+        WHY THIS STRATEGY EXISTS (AND COMPLEMENTS THE SHIFTED ONE)
+        ──────────────────────────────────────────────────────────────────────
+ 
+        The shifted strategy always places the anchor in a specific cardinal
+        direction from the target.  Over many training steps the head could
+        theoretically learn "if the crop is to the right of the target it's
+        negative" — a spatial bias we don't want.
+ 
+        Random placement avoids that.  It also samples background regions that
+        the shifted strategy might never reach (e.g. the far corner diagonally
+        opposite the target), giving the head more variety in what "no target"
+        looks like.
+ 
+        We keep the anchor size the same as the target to produce hard negatives:
+        same scale, similar context window size, just a different location.
+ 
+        Like the shifted strategy, _bboxes_overlap() is the definitive check.
+        We never accept a crop until it provably contains zero target pixels.
+ 
         Returns None after 50 failed attempts.
         """
         if not os.path.exists(seq.frame_path(frame_idx)):
             return None
-
+ 
         img = self._load_image(seq.frame_path(frame_idx))
         H, W = img.shape[:2]
         mean_color = np.mean(img, axis=(0, 1))
-
+ 
         target_clamped = clamp_bbox(target_bbox.astype(np.float32), img.shape[:2])
         if not self.is_valid_bbox(target_clamped):
             return None
-
+ 
         _, _, w, h = target_clamped.astype(float)
-
+ 
         for _ in range(50):
-
             cx_bg = self.rng.uniform(0.0, float(W))
             cy_bg = self.rng.uniform(0.0, float(H))
-
+ 
             anchor = clamp_bbox(
                 np.array([cx_bg - w / 2.0, cy_bg - h / 2.0, w, h], dtype=np.float32),
                 img.shape[:2],
             )
             if not self.is_valid_bbox(anchor):
                 continue
-
+ 
             context = extend_bbox(
                 anchor,
                 offset=self.search_context,
                 image_width=W,
                 image_height=H,
             )
-
+ 
+            # Hard geometric gate — same as the shifted strategy.
             if self._bboxes_overlap(context, target_clamped):
                 continue
-
+ 
             raw_crop, _, _ = get_extended_crop(
                 image=img,
                 bbox=anchor,
@@ -907,23 +1041,18 @@ class UAVTrackingDataset(Dataset):
                 padding_value=mean_color,
             )
             return self._preprocess_image(raw_crop, self._search_transform)
-
+ 
         return None
-
+ 
     def _get_template_crop(
         self,
         img: np.ndarray,
         bbox: np.ndarray,
     ) -> Optional[torch.Tensor]:
         """
-        Helper to extract and preprocess a template crop.
-
-        Args:
-            img (np.ndarray): Source image.
-            bbox (np.ndarray): Bounding box.
-
-        Returns:
-            Optional[torch.Tensor]: Preprocessed template crop or None if invalid.
+        Convenience helper that clamps the bbox, builds a context window,
+        and returns a preprocessed template crop — or None if the bbox
+        is invalid after clamping.
         """
         bbox = clamp_bbox(bbox, img.shape)
         if not self.is_valid_bbox(bbox):
@@ -941,21 +1070,15 @@ class UAVTrackingDataset(Dataset):
             crop_size=self.template_size,
         )
         return self._preprocess_image(crop, self._template_transform)
-
+ 
     def _get_search_crop(
         self,
         img: np.ndarray,
         bbox: np.ndarray,
     ) -> Optional[torch.Tensor]:
         """
-        Helper to extract and preprocess a search crop.
-
-        Args:
-            img (np.ndarray): Source image.
-            bbox (np.ndarray): Bounding box.
-
-        Returns:
-            Optional[torch.Tensor]: Preprocessed search crop or None if invalid.
+        Convenience helper that clamps the bbox, builds a search-size context
+        window, and returns a preprocessed search crop — or None if invalid.
         """
         bbox = clamp_bbox(bbox, img.shape)
         if not self.is_valid_bbox(bbox):
@@ -974,7 +1097,7 @@ class UAVTrackingDataset(Dataset):
             padding_value=np.mean(img, axis=(0, 1)),
         )
         return self._preprocess_image(crop, self._search_transform)
-
+ 
     def _pack(
         self,
         template,
@@ -988,21 +1111,8 @@ class UAVTrackingDataset(Dataset):
         path: Optional[str] = None,
     ) -> Dict[str, torch.Tensor]:
         """
-        Pack the crops and labels into a standard dictionary format.
-
-        Args:
-            template: Base template crop.
-            dynamic_template: Dynamic template crop.
-            search: Search crop.
-            dynamic_search: Dynamic search crop.
-            cls_label (np.ndarray): Classification label map.
-            bbox_label (np.ndarray): Bounding box regression map.
-            reg_weight (np.ndarray): Regression weight map.
-            is_positive (bool): Whether the sample is positive.
-            path (Optional[str]): Path to the search frame image.
-
-        Returns:
-            Dict[str, torch.Tensor]: Formatted training sample.
+        Assemble all the pieces of a training sample into a single dict
+        that the DataLoader can batch and the trainer can consume directly.
         """
         return {
             "template": self._to_tensor(template),
@@ -1015,15 +1125,16 @@ class UAVTrackingDataset(Dataset):
             "is_positive": torch.tensor(is_positive, dtype=torch.bool),
             "path": path if path is not None else "None",
         }
-
+ 
     def _dummy_negative(
         self,
     ) -> Dict[str, torch.Tensor]:
         """
-        Generate a zero-filled dummy negative sample as a fallback.
-
-        Returns:
-            Dict[str, torch.Tensor]: Dummy sample dictionary.
+        Return a zero-filled sample when everything else has failed.
+ 
+        This exists purely to keep the DataLoader alive.  A run that
+        produces many dummy negatives is a sign that something is wrong
+        with the data paths or annotations — check the [warn] logs.
         """
         S, T, i = self.score_size, self.template_size, self.instance_size
         return {
@@ -1037,89 +1148,64 @@ class UAVTrackingDataset(Dataset):
             "is_positive": torch.tensor(False, dtype=torch.bool),
             "path": "None",
         }
-
+ 
     @staticmethod
     def _load_image(
         path: str,
     ) -> np.ndarray:
         """
-        Load an image from disk and convert it to RGB.
-
-        Args:
-            path (str): File path to the image.
-
-        Returns:
-            np.ndarray: Loaded RGB image.
+        Load an image from disk as RGB.  Raises FileNotFoundError immediately
+        if the file is missing — we prefer a clear error over a silent NaN.
         """
         img = cv2.imread(path)
         if img is None:
             raise FileNotFoundError(f"Could not read image: {path}")
         return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-
+ 
     @staticmethod
     def _to_tensor(
         x,
     ) -> torch.Tensor:
-        """
-        Convert a numpy array or tensor to a float tensor.
-
-        Args:
-            x: Input array or tensor.
-
-        Returns:
-            torch.Tensor: Float tensor.
-        """
+        """Convert a numpy array or existing tensor to float32."""
         if isinstance(x, torch.Tensor):
             return x.float()
         return torch.from_numpy(x).float()
-
+ 
     def _preprocess_image(
         self,
         image: np.ndarray,
         transform: Callable,
     ) -> torch.Tensor:
         """
-        Apply albumentations transforms and convert image to batch format.
-
-        Args:
-            image (np.ndarray): Source image.
-            transform (Callable): Transform pipeline.
-
-        Returns:
-            torch.Tensor: Preprocessed image tensor.
+        Normalise an image and convert it to a (C, H, W) float tensor.
+ 
+        We normalise with ImageNet statistics (mean/std) because the backbone
+        was pretrained on ImageNet.  The channel transpose from (H,W,C) to
+        (C,H,W) is what PyTorch's conv layers expect.
         """
         img = transform(image[:, :, :3])
         if image.shape[2] > 3:
             img = np.concatenate([img, image[:, :, 3:]], axis=2)
         return self._array_to_batch(img).float()
-
+ 
     @staticmethod
     def _array_to_batch(
         x: np.ndarray,
     ) -> torch.Tensor:
-        """
-        Transpose image array from (H, W, C) to (C, H, W).
-
-        Args:
-            x (np.ndarray): Image array.
-
-        Returns:
-            torch.Tensor: Transposed tensor.
-        """
+        """Transpose (H, W, C) → (C, H, W) for PyTorch."""
         return torch.from_numpy(np.transpose(x, (2, 0, 1)))
-
+ 
     def _get_default_transform(
         self,
         img_size: int,
     ) -> Callable:
         """
-        Get the default image normalization transform.
-
-        Args:
-            img_size (int): Target image size.
-
-        Returns:
-            Callable: Transformation function.
+        Build the standard normalisation pipeline.
+ 
+        Just ImageNet mean/std normalisation via albumentations.
+        We keep this as a callable so it's easy to swap in heavier augmentation
+        pipelines (colour jitter, blur, etc.) later without changing the
+        calling code.
         """
         pipeline = albu.Compose(
             [
@@ -1127,7 +1213,7 @@ class UAVTrackingDataset(Dataset):
             ]
         )
         return lambda a: pipeline(image=a)["image"]
-
+ 
     def apply_shift_scale(
         self,
         bbox: np.ndarray,
@@ -1136,16 +1222,15 @@ class UAVTrackingDataset(Dataset):
         scale_factor=0.0,
     ) -> np.ndarray:
         """
-        Apply random translation and scaling to a bounding box.
-
-        Args:
-            bbox (np.ndarray): Original bounding box.
-            img_shape (Tuple[int, int]): Image dimensions (H, W).
-            shift_factor (float): Max translation ratio.
-            scale_factor (float): Max scaling ratio.
-
-        Returns:
-            np.ndarray: Shifted and scaled bounding box.
+        Randomly jitter a bounding box position and size.
+ 
+        shift_factor controls how far the center can move (as a fraction of
+        the box dimension).  scale_factor controls how much the size can change.
+        Both default to 0 so the method is safe to call even when no augmentation
+        is wanted.
+ 
+        The result is clamped to the image boundaries so we never try to crop
+        outside the frame.
         """
         x, y, w, h = bbox
         cx, cy = x + w / 2.0, y + h / 2.0
@@ -1158,30 +1243,29 @@ class UAVTrackingDataset(Dataset):
             dtype=np.float32,
         )
         return clamp_bbox(new_bbox, shape=img_shape[:2])
-
+ 
     def _get_random_context(
         self,
     ) -> float:
         """
-        Generate a randomized search context multiplier.
-
-        Returns:
-            float: Random context scale factor.
+        Return a slightly randomised context multiplier around search_context.
+ 
+        Varying the context scale by ±20% during training means the model
+        learns to handle search regions that are a bit tighter or looser than
+        the nominal size.  This matters because the tracker's size estimate
+        drifts during long sequences, so the search region it gets during
+        inference won't always be exactly the right scale.
         """
         return np.random.uniform(self.search_context * 0.8, self.search_context * 1.2)
-
+ 
     @staticmethod
     def is_valid_bbox(
         bbox: np.ndarray,
     ) -> bool:
         """
-        Check if a bounding box is valid.
-
-        Args:
-            bbox (np.ndarray): Bounding box [x, y, w, h].
-
-        Returns:
-            bool: True if valid.
+        Check whether a bounding box is safe to use.
+        Same criteria as TrackingSequence.is_valid_bbox — no NaN, non-negative
+        coordinates, and at least 5px in each dimension.
         """
         return (
             not np.any(np.isnan(bbox))
@@ -1190,6 +1274,6 @@ class UAVTrackingDataset(Dataset):
             and bbox[0] >= 0
             and bbox[1] >= 0
         )
-
-
+ 
+ 
 UAV123TrackingDataset = UAVTrackingDataset

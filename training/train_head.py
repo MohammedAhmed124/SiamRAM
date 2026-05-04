@@ -1,3 +1,44 @@
+"""
+SiamABC Classification Head Fine-Tuning
+========================================
+
+Background & Motivation
+------------------------
+When we received the pretrained SiamABC checkpoints, we discovered a critical flaw in
+the classification head: it had essentially zero discrimination power. Regardless of
+the input, the head would almost always saturate to a score of 1 — confidently labelling
+every candidate region as a positive match, even in clearly negative situations where the
+target is absent or the search region contains nothing but background.
+
+This makes the out-of-the-box model unreliable for real-world UAV tracking scenarios,
+where the tracker must robustly decide *whether* the target is present before committing
+to *where* it is. A head that always fires positive collapses that two-stage reasoning
+into a blind "always track something", causing the tracker to latch onto irrelevant
+background clutter whenever the true target drifts out of frame.
+
+Purpose of This Script
+-----------------------
+This script fine-tunes *only* the classification head (and the lightweight connection
+module) of SiamABC on the UAV123 and other datasets, while keeping the backbone encoder frozen.
+The goal is to teach the head to correctly distinguish between:
+
+  - Positive pairs  → the search crop genuinely contains the target object
+  - Negative pairs  → the search crop is background-only, or from a different sequence
+
+We use a focal loss on the classification branch (to handle the natural class imbalance
+between positives and the flood of easy negatives) combined with a bounding-box
+regression loss on positive samples to preserve localisation quality throughout training.
+
+By the end of fine-tuning the head should produce well-calibrated scores: high confidence
+when the target is present, and near-zero confidence when it is not — restoring the
+discriminative behaviour that was missing from the original checkpoints.
+
+Usage example:
+-----
+    python train_head.py --config config.yaml
+    python train_head.py --config config.yaml --csv_path /data/uav123_sequences.csv
+"""
+
 import argparse
 import os
 import sys

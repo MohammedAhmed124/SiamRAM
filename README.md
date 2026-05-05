@@ -13,12 +13,7 @@
 
 ## Abstract
 
-SiamRAM is a hybrid visual object tracker designed for robust long-term tracking under occlusion. It combines a Siamese
-network base tracker (SiamABC) with YOLO-based re-detection, an Extended Kalman Filter (EKF) for motion-compensated
-region-of-interest prediction, and a Distractor-Aware Memory (DAM/DRM) bank for candidate verification during
-reacquisition. When the primary tracker loses confidence, SiamRAM enters a structured multi-phase recovery pipeline that
-expands the search region, filters YOLO detections against the appearance memory, and re-initialises the tracker only on
-high-confidence matches — substantially reducing false reacquisitions caused by distractors.
+SiamRAM is a hybrid visual object tracker built for robust long-term tracking under occlusion. It combines a Siamese network base tracker (SiamABC) with YOLO-based re-detection, an Extended Kalman Filter (EKF) for motion-compensated ROI prediction, and a Distractor-Aware Memory (DAM/DRM) bank for candidate verification during reacquisition. When the primary tracker loses confidence, SiamRAM enters a structured recovery pipeline that expands the search region, filters YOLO detections against the appearance memory, and re-initialises the tracker only on high-confidence matches — substantially reducing false reacquisitions caused by distractors.
 
 ## Table of Contents
 
@@ -31,6 +26,8 @@ high-confidence matches — substantially reducing false reacquisitions caused b
 - [Authors](#authors)
 - [Citation](#citation)
 
+---
+
 ## System Architecture
 
 ![System Architecture](docs/system_diagram.png)
@@ -39,55 +36,66 @@ SiamRAM is organised around three cooperating subsystems.
 
 ### 1. Normal Tracking
 
-SiamABC runs every frame, producing a bounding-box prediction and confidence score. High-confidence frames are admitted
-into a short-term appearance buffer (`AppearanceMemory`) and used to update the EKF.
+SiamABC runs every frame, producing a bounding-box prediction and a confidence score. Frames that exceed the confidence threshold are admitted into a short-term appearance buffer (`AppearanceMemory`) and used to keep the EKF updated.
 
 ### 2. EKF and Camera-Motion Compensation
 
-`BBoxEKF` tracks the target centre with a constant-velocity model, optionally compensating for camera motion via a
-homography matrix. Its prediction defines the search ROI when tracking fails.
+`BBoxEKF` tracks the target centre using a constant-velocity model, with optional camera-motion compensation via a homography matrix. When tracking fails, the EKF prediction defines where in the frame to search next.
 
 ### 3. Multi-Phase Reacquisition Pipeline (DAM/DRM)
 
-When confidence drops below `conf_threshold`, SiamRAM enters occlusion mode:
+When confidence drops below `conf_threshold`, SiamRAM switches to occlusion mode and works through three steps to find the target again:
 
-1. **ROI search** — a growing window centred on the EKF prediction is searched.
-2. **YOLO candidates** — detections inside the ROI are scored against the appearance memory (cosine similarity, IoU,
-   motion, temporal decay).
-3. **DRM verification** — the top candidate re-initialises SiamABC; tracking resumes only if the resulting score exceeds
-   `reacq_threshold`.
+1. **ROI search** — a window centred on the EKF prediction is expanded progressively.
+2. **YOLO candidates** — detections inside the ROI are scored against the appearance memory using cosine similarity, IoU, motion consistency, and temporal decay.
+3. **DRM verification** — the best candidate re-initialises SiamABC, and tracking only resumes if the resulting confidence clears `reacq_threshold`.
 
 For full design details see the [System Description](docs/system_description.pdf).
 
+---
+
 ## Installation
 
-For Docker, VSCode Devcontainer, and local `uv` options see the dedicated guides:
+Depending on whether your machine has a GPU, follow one of these guides:
 
-- [CUDA / GPU Installation Guide](docs/install-CUDA.md) — covers Native Docker, VSCode Devcontainer, and local `uv` with
-  CUDA
-- [CPU-only Installation Guide](docs/install-CPU.md) — covers Native Docker, VSCode Devcontainer, and local `uv` without
-  GPU
+- [CUDA / GPU Installation Guide](docs/install-CUDA.md) — Native Docker, VSCode Devcontainer, or local `uv` with CUDA
+- [CPU-only Installation Guide](docs/install-CPU.md) — Native Docker, VSCode Devcontainer, or local `uv` without a GPU
+
+Throughout this README, every runnable step is shown for all three environments. If you are unsure which one applies to you:
+
+> 💡 **Which environment am I in?**
+>
+> | How you installed | Your environment |
+> |---|---|
+> | Ran `poe gpu_setup` or `poe cpu_setup` in a terminal | **Native Docker** |
+> | Opened the project via *Dev Containers: Reopen in Container* in VSCode | **VSCode Devcontainer** |
+> | Ran `uv sync` directly on your machine | **Local uv** |
+
+---
 
 ## Checkpoints
 
-SiamRAM uses two weight files in `checkpoints/`:
+The model needs two weight files to run, both stored in `checkpoints/`:
 
-- `inference_checkpoint.pth` this is SiamABC checkpoint used for inference.
-- `yolo11n.pt` this is yolo checkpoint for used for inference.
-- `SiamABC_init_checkpoint.pth` start checkpoint for SiamABC training.
+- `inference_checkpoint.pth` — the SiamABC weights.
+- `yolo11n.pt` — the YOLO weights.
+- `SiamABC_init_checkpoint.pth` — only needed if you plan to train from scratch.
 
-Download them manually with the provided scripts:
-- Direct Python (all platforms):
+You can download them by running:
 
 ```bash
 python checkpoints/download_checkpoints.py
 ```
 
-`run_inference.py` now auto-downloads these checkpoints if they are missing.
+Or grab them directly from [Google Drive](https://drive.google.com/drive/folders/1BRPhnBnU9CDLU5qQPv-zQeKtqv1HMsl4?usp=drive_link) and place them in `checkpoints/`.
+
+> 📝 **Note:** If you skip this, `run_inference.py` will download the checkpoints automatically on first run.
+
+---
 
 ## Quick Start
 
-The script assumes the AIC-4 competition data layout:
+`run_inference.py` expects the AIC-4 competition data layout under `data/`:
 
 ```
 data/
@@ -100,16 +108,42 @@ data/
         └── <video_id>.txt     # single line: x,y,w,h
 ```
 
-All default paths are resolved relative to the repository root, so the script works correctly regardless of which
-directory you invoke it from.
+All paths default to being relative to the repo root, so it doesn't matter where you call the script from.
 
-Place your data under `data/`, then run with defaults:
+---
+
+### Native Docker
+
+> 📝 **Note:** You only need to start the container once per session — it stays running until you stop it or restart your machine. If it isn't up yet, run `poe gpu_up` (or `poe cpu_up` for CPU-only) before your first command. You don't need to repeat this between scripts.
+
+Run with all defaults:
+
+```bash
+poe gpu_run run_inference.py
+```
+
+Or with custom paths and settings:
+
+```bash
+poe gpu_run run_inference.py \
+    --data_dir data/ \
+    --manifest_path data/metadata/contestant_manifest.json \
+    --weights_path checkpoints/inference_checkpoint.pth \
+    --outputs_dir outputs/SiamRAM \
+    --submission_csv submission.csv
+```
+
+### VSCode Devcontainer
+
+Open a terminal in VSCode — you are already inside the container, so just run the script directly.
+
+Run with all defaults:
 
 ```bash
 python run_inference.py
 ```
 
-Override any path or setting via flags:
+Or with custom paths and settings:
 
 ```bash
 python run_inference.py \
@@ -120,48 +154,94 @@ python run_inference.py \
     --submission_csv submission.csv
 ```
 
-### CLI arguments
+### Local uv
 
-| Argument             | Default                                  | Description                                                                               |
-|----------------------|------------------------------------------|-------------------------------------------------------------------------------------------|
-| `--data_dir`         | `data`                                   | Root directory containing video files and annotation sub-folders                          |
-| `--manifest_path`    | `data/metadata/contestant_manifest.json` | Path to the competition manifest JSON file                                                |
-| `--weights_path`     | `checkpoints/head_epoch_000.pth`         | Path to the SiamABC checkpoint (`.pth` file)                                              |
-| `--yaml_config_path` | `config/inference_config.yaml`           | Path to the inference config YAML file                                                    |
-| `--outputs_dir`      | `outputs/SiamRAM`                        | Directory where per-video bounding-box predictions are written                            |
-| `--model_size`       | `M`                                      | SiamABC model size (`S`, `M`, or `L`)                                                     |
-| `--lambda_tta`       | `0.1`                                    | TTA lambda for the base tracker                                                           |
-| `--datasets`         | all sub-dirs in `--data_dir`             | Dataset names to include; defaults to every folder inside `data/` (excluding `metadata/`) |
-| `--submission_csv`   | `submission.csv`                         | Output path for the submission CSV file                                                   |
+Run with all defaults:
+
+```bash
+uv run run_inference.py
+```
+
+Or with custom paths and settings:
+
+```bash
+uv run run_inference.py \
+    --data_dir data/ \
+    --manifest_path data/metadata/contestant_manifest.json \
+    --weights_path checkpoints/inference_checkpoint.pth \
+    --outputs_dir outputs/SiamRAM \
+    --submission_csv submission.csv
+```
+
+---
+
+### CLI Arguments
+
+| Argument | Default | Description |
+|---|---|---|
+| `--data_dir` | `data` | Root directory containing video files and annotation sub-folders |
+| `--manifest_path` | `data/metadata/contestant_manifest.json` | Path to the competition manifest JSON |
+| `--weights_path` | `checkpoints/head_epoch_000.pth` | SiamABC checkpoint to use for inference |
+| `--yaml_config_path` | `config/inference_config.yaml` | Inference config YAML |
+| `--outputs_dir` | `outputs/SiamRAM` | Where per-video bounding-box predictions are written |
+| `--model_size` | `M` | SiamABC model size — `S`, `M`, or `L` |
+| `--lambda_tta` | `0.1` | TTA lambda for the base tracker |
+| `--datasets` | all sub-dirs in `--data_dir` | Specific dataset folders to run; defaults to everything in `data/` except `metadata/` |
+| `--submission_csv` | `submission.csv` | Output path for the final submission CSV |
+
+---
 
 ## Training
 
-Training the SiamRAM head is a two-step process.
+Training is a two-step process: first you build a frame-level index from the raw videos, then you fine-tune the tracking head against it.
 
 ### Step 1 — Build the dataset index
 
-Before training, videos must be decoded into frames and an index must be built. Run:
+This decodes the raw videos in `data/` into individual frames under `data_imgs/` and writes the CSV index files the training loader expects. You only need to do this once per dataset.
+
+**Native Docker:**
+
+```bash
+poe gpu_run data_prep/build_dataset_index.py
+```
+
+**VSCode Devcontainer:**
 
 ```bash
 python data_prep/build_dataset_index.py
 ```
 
-This script reads the raw videos from `data/` and writes extracted frames into `data_imgs/`, alongside CSV index files
-used by the training data loader. You only need to run this once per dataset.
+**Local uv:**
+
+```bash
+uv run data_prep/build_dataset_index.py
+```
 
 ### Step 2 — Fine-tune the tracking head
 
-Once the index is ready, launch training with:
+All training hyperparameters — learning rate, batch size, number of epochs, checkpoint interval — are set in `config/training_config.yaml`. Edit that file before running.
+
+**Native Docker:**
+
+```bash
+poe gpu_run training/train_head.py
+```
+
+**VSCode Devcontainer:**
 
 ```bash
 python training/train_head.py
 ```
 
-Training behaviour (learning rate, batch size, epochs, checkpoint interval, etc.) is controlled by
-`config/training_config.yaml`. Edit that file to adjust hyperparameters before running.
+**Local uv:**
 
-Checkpoints are saved to `checkpoints/` as `head_epoch_<NNN>.pth`. The latest checkpoint can be passed directly to
-`run_inference.py` via `--weights_path`.
+```bash
+uv run training/train_head.py
+```
+
+Checkpoints are saved to `checkpoints/` as `head_epoch_<NNN>.pth`. To run inference with a freshly trained checkpoint, pass it via `--weights_path`.
+
+---
 
 ## Project Structure
 
@@ -173,36 +253,38 @@ SiamRAM/
 │   ├── motion_model.py           # BBoxEKF (Extended Kalman Filter)
 │   └── SiamABC/                  # Siamese base tracker
 ├── utils/                        # Shared utilities (IoU, descriptors, cosine sim, losses, etc.)
-├── config/                       # YAML configuration files
+├── config/
 │   ├── inference_config.yaml
 │   └── training_config.yaml
-├── data_prep/                    # Data preparation scripts
-│   └── build_dataset_index.py   # Decodes videos to frames and builds CSV index
-├── training/                     # Training scripts
+├── data_prep/
+│   └── build_dataset_index.py   # Decodes videos to frames and builds the CSV index
+├── training/
 │   └── train_head.py            # Fine-tunes the SiamABC tracking head
-├── vis/                          # Visualisation and inference runner
-├── containers/                   # Docker Compose files and verification script
+├── vis/                          # Visualisation tools
+├── containers/                   # Docker Compose files and environment verification
 │   ├── Dockerfile.cpu
 │   ├── Dockerfile.gpu
 │   ├── docker-compose.gpu.yml
 │   ├── docker-compose.cpu.yml
 │   └── test.py
-├── docs/                         # Installation guides and assets
+├── docs/
 │   ├── install-CUDA.md
 │   ├── install-CPU.md
 │   ├── system_description.pdf
 │   └── system_diagram.png
-├── data/                         # Raw videos, annotations, manifest, and CSV indices
-├── data_imgs/                    # Extracted frames produced by build_dataset_index.py
-├── checkpoints/                  # Model weight files
+├── data/                         # Raw videos, annotations, manifest
+├── data_imgs/                    # Extracted frames (generated by build_dataset_index.py)
+├── checkpoints/                  # Model weights and download scripts
 │   ├── download_checkpoints.py
 │   ├── download-checkpoints.sh
 │   └── download-checkpoints.bat
-├── pyproject.toml                # uv dependencies and poe task definitions (GPU)
+├── pyproject.toml                # uv dependencies and poe tasks (GPU)
 ├── pyproject.cpu.toml            # uv dependencies (CPU-only)
-├── requirements.txt              # Pip dependencies (device-agnostic)
-└── run_inference.py              # Entry-point inference script
+├── requirements.txt              # pip dependencies (device-agnostic)
+└── run_inference.py              # Main inference entry point
 ```
+
+---
 
 ## Authors
 
@@ -210,7 +292,9 @@ SiamRAM/
 - Yousif Abdulhafiz — [@ysif9](https://github.com/ysif9)
 - Ahmed Lotfy — [@alofty25](https://github.com/alofty25)
 - Philopater Guirgis — [@Philodoescode](https://github.com/Philodoescode)
-- Soliman Elhassanein - [@SolimanElhassanein](https://github.com/Soliman-Elhassanein)
+- Soliman Elhassanein — [@SolimanElhassanein](https://github.com/Soliman-Elhassanein)
+
+---
 
 ## Citation
 

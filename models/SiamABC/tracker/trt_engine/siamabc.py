@@ -56,7 +56,7 @@ from typing import Dict, Optional, Set, Tuple
 
 import torch
 import torch.nn as nn
-import torch_tensorrt
+# import torch_tensorrt
 
 from ...model import constants
 from ...model.adaptive_batch_norm import AdaptiveBatchNorm
@@ -66,6 +66,9 @@ from .trt_utils import _AttentionNeck, _FeatureExtractorModule, _cast_module
 log = logging.getLogger(__name__)
 logging.getLogger("torch_tensorrt").setLevel(logging.ERROR)
 logging.getLogger("torch_tensorrt.dynamo.conversion").setLevel(logging.ERROR)
+logging.getLogger("torch_tensorrt.dynamo.conversion.aten_ops_converters").setLevel(logging.CRITICAL + 1)
+
+import torch_tensorrt
 import sys
 import warnings
 import contextlib
@@ -92,6 +95,7 @@ _NOISY_LOGGERS = [
     "torch.fx",
     "torch.compile",
     "tensorrt",
+    "torch_tensorrt.dynamo.conversion.aten_ops_converters",  
 ]
 
 @contextlib.contextmanager
@@ -231,6 +235,9 @@ class TRTSiamABCNet:
                 device=self._device,
             )
         _clog("  [SiamRAM] Connect engines ready.", _GREEN)
+        with _suppress_external_logs():
+            self.get_features(torch.randn(1, 3, template_size, template_size, device=self._device))
+
 
     def _compile_feat(
         self,

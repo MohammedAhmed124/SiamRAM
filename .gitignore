@@ -187,3 +187,5 @@ yolo11n.pt
 debug_frames/
 
 yolo11n.onnx
+
+data_imgs/

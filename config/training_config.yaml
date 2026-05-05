@@ -1,5 +1,5 @@
 data:
-  csv_path: "../data/train_dataframe.csv"
+  csv_path: "data/train_dataframe.csv"
   seed: 42
 
 tracking:
@@ -45,6 +45,7 @@ model:
   model_size: M
   max_layer: 4
   crop_template_features: false
+  build_simsiam_heads: false
 
 training:
   num_epochs: 30

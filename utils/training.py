@@ -76,10 +76,14 @@ def freeze_backbone_only(
         model.polarized_self_attention,
         model.attention_neck,
         model.connect_model,
-        model.similarity_avgpool,
+        # model.similarity_avgpool,
     ]
     if model.build_simsiam_heads:
-        trainable_modules += [model.avgpool, model.classifier, model.predictor]
+        trainable_modules += [
+            # model.avgpool,
+            model.classifier,
+            model.predictor
+            ]
 
     for module in trainable_modules:
         for param in module.parameters():

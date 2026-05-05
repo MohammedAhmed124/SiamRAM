@@ -85,6 +85,7 @@ def load_and_split(cfg: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     data_cfg = cfg["data"]
     df = pd.read_csv(data_cfg["csv_path"])
+    df = df[df["ann_len"]>1].copy()
     print(f"Loaded {len(df)} sequences from {data_cfg['csv_path']}")
 
     val_ratio = cfg["dataset"]["val_split_ratio"]
@@ -308,7 +309,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--config",
         type=str,
-        default="config.yaml",
+        default="config/training_config.yaml",
         help="Path to YAML config file (default: config.yaml)",
     )
     parser.add_argument(

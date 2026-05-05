@@ -86,6 +86,8 @@ from utils.utils import (
 # The patterns we try when auto-detecting how a dataset names its frames.
 # Order matters: more common patterns come first so detection is fast.
 _FRAME_PATTERNS = [
+    "{:08d}.jpg",
+    "img/{:08d}.jpg",
     "{:06d}.jpg",
     "img/{:04d}.jpg",
     "{:04d}.jpg",
@@ -279,9 +281,9 @@ class TrackingSequence:
                     x, y, w, h = (float(v) for v in vals[:4])
                     bboxes.append(np.array([x, y, w, h], dtype=np.float32))
                 except (ValueError, IndexError):
-                    print(
-                        f"[warn] failed to parse bbox: {self.annot_path!r} | {line!r}"
-                    )
+                    # print(
+                    #     f"[warn] failed to parse bbox: {self.annot_path!r} | {line!r}"
+                    # )
                     bboxes.append(np.full(4, np.nan, dtype=np.float32))
         self._bboxes = bboxes
  

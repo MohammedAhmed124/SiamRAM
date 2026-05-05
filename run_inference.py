@@ -278,12 +278,10 @@ def _resolve_data_dir(path_value: str) -> Path:
     candidate = (BASE_DIR / path).resolve()
     if candidate.exists():
         return candidate
-    # If they asked for "dataset" but we only have "data", swap silently.
     if path.name == "dataset":
         alt = (BASE_DIR / "data").resolve()
         if alt.exists():
             return alt
-    # And vice versa.
     if path.name == "data":
         alt = (BASE_DIR / "dataset").resolve()
         if alt.exists():
@@ -466,14 +464,14 @@ def main():
     """
 
     # ------------------------------------------------------------------
-    # Step 1: Parse and normalise all input paths
+    # Parse and normalise all input paths
     # ------------------------------------------------------------------
     args = parse_args()
     args.data_dir = str(_resolve_data_dir(args.data_dir))
     args.manifest_path = str(_resolve_manifest_path(args.manifest_path))
 
     # ------------------------------------------------------------------
-    # Step 2: Load YAML config, resolve checkpoint paths, auto-download
+    # Load YAML config, resolve checkpoint paths, auto-download
     #         if anything is missing or corrupted.
     # ------------------------------------------------------------------
     config = OmegaConf.load(args.yaml_config_path)
@@ -489,7 +487,7 @@ def main():
     config.model.model_size = args.model_size
 
     # ------------------------------------------------------------------
-    # Step 3: Build the tracker.
+    # Build the tracker.
     #
     # Two paths:
     #   - TRT (TensorRT): faster inference, higher setup cost, GPU-only.
@@ -513,7 +511,7 @@ def main():
     tracker = SiamRAMTracker(siam_tracker=wrapped, **config.ram_tracker)
 
     # ------------------------------------------------------------------
-    # Step 4: Load the manifest and decide which videos to process.
+    # Load the manifest and decide which videos to process.
     #
     # The manifest's "public_lb" section is the leaderboard split —
     # those are the videos we need to submit predictions for.
@@ -540,7 +538,7 @@ def main():
     }
 
     # ------------------------------------------------------------------
-    # Step 5: Run frame-by-frame inference on every video.
+    # Run frame-by-frame inference on every video.
     #
     # For each video we:
     #   a) Build the full path to the video file and its annotation.
@@ -575,7 +573,7 @@ def main():
         )
 
     # ------------------------------------------------------------------
-    # Step 6: Stitch all per-video bbox files into one submission CSV.
+    #  Stitch all per-video bbox files into one submission CSV.
     #
     # run_inference() writes a text file at:
     #   <outputs_dir>/<video_path_stem>/bboxes/<video_id>.txt

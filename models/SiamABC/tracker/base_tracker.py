@@ -99,7 +99,6 @@ class Tracker(ABC):
             if "tracking_config" not in tracking_config.keys()
             else tracking_config["tracking_config"]
         )
-        print(tracking_config)
         self.tracking_config = tracking_config
         self.tracking_state = TrackingState()
         self.net = model

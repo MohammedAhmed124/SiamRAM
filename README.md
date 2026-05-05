@@ -26,6 +26,7 @@ high-confidence matches — substantially reducing false reacquisitions caused b
 - [Installation](#installation)
 - [Checkpoints](#checkpoints)
 - [Quick Start](#quick-start)
+- [Training](#training)
 - [Project Structure](#project-structure)
 - [Authors](#authors)
 - [Citation](#citation)
@@ -71,23 +72,11 @@ For Docker, VSCode Devcontainer, and local `uv` options see the dedicated guides
 
 SiamRAM uses two weight files in `checkpoints/`:
 
-- `head_epoch_000.pth`
-- `yolo11n.pt`
+- `inference_checkpoint.pth` this is SiamABC checkpoint used for inference.
+- `yolo11n.pt` this is yolo checkpoint for used for inference.
+- `SiamABC_init_checkpoint.pth` start checkpoint for SiamABC training.
 
 Download them manually with the provided scripts:
-
-- Linux/macOS:
-
-```bash
-./checkpoints/download-checkpoints.sh
-```
-
-- Windows:
-
-```bat
-checkpoints\download-checkpoints.bat
-```
-
 - Direct Python (all platforms):
 
 ```bash
@@ -145,36 +134,74 @@ python run_inference.py \
 | `--datasets`         | all sub-dirs in `--data_dir`             | Dataset names to include; defaults to every folder inside `data/` (excluding `metadata/`) |
 | `--submission_csv`   | `submission.csv`                         | Output path for the submission CSV file                                                   |
 
+## Training
+
+Training the SiamRAM head is a two-step process.
+
+### Step 1 — Build the dataset index
+
+Before training, videos must be decoded into frames and an index must be built. Run:
+
+```bash
+python data_prep/build_dataset_index.py
+```
+
+This script reads the raw videos from `data/` and writes extracted frames into `data_imgs/`, alongside CSV index files
+used by the training data loader. You only need to run this once per dataset.
+
+### Step 2 — Fine-tune the tracking head
+
+Once the index is ready, launch training with:
+
+```bash
+python training/train_head.py
+```
+
+Training behaviour (learning rate, batch size, epochs, checkpoint interval, etc.) is controlled by
+`config/training_config.yaml`. Edit that file to adjust hyperparameters before running.
+
+Checkpoints are saved to `checkpoints/` as `head_epoch_<NNN>.pth`. The latest checkpoint can be passed directly to
+`run_inference.py` via `--weights_path`.
+
 ## Project Structure
 
 ```
 SiamRAM/
-├── models/                  # Tracker implementations
-│   ├── SiamRAM.py           # Main SiamRAMTracker class
-│   ├── ram_memory.py        # AppearanceMemory and DRM bank
-│   ├── motion_model.py      # BBoxEKF (Extended Kalman Filter)
-│   └── SiamABC/             # Siamese base tracker
-├── utils/                   # Shared utilities (IoU, descriptors, cosine sim)
-├── config/                  # YAML configuration files
-│   └── inference_config.yaml
-├── vis/                     # Visualisation and inference runner
-├── training/                # Training scripts and data loaders
-├── containers/              # Docker Compose files and verification script
+├── models/                       # Tracker implementations
+│   ├── SiamRAM.py                # Main SiamRAMTracker class
+│   ├── ram_memory.py             # AppearanceMemory and DRM bank
+│   ├── motion_model.py           # BBoxEKF (Extended Kalman Filter)
+│   └── SiamABC/                  # Siamese base tracker
+├── utils/                        # Shared utilities (IoU, descriptors, cosine sim, losses, etc.)
+├── config/                       # YAML configuration files
+│   ├── inference_config.yaml
+│   └── training_config.yaml
+├── data_prep/                    # Data preparation scripts
+│   └── build_dataset_index.py   # Decodes videos to frames and builds CSV index
+├── training/                     # Training scripts
+│   └── train_head.py            # Fine-tunes the SiamABC tracking head
+├── vis/                          # Visualisation and inference runner
+├── containers/                   # Docker Compose files and verification script
+│   ├── Dockerfile.cpu
+│   ├── Dockerfile.gpu
 │   ├── docker-compose.gpu.yml
 │   ├── docker-compose.cpu.yml
 │   └── test.py
-├── notebooks/               # Jupyter notebooks
-│   └── SiamRAM.ipynb
-├── docs/                    # Installation guides and assets
+├── docs/                         # Installation guides and assets
 │   ├── install-CUDA.md
 │   ├── install-CPU.md
 │   ├── system_description.pdf
 │   └── system_diagram.png
-├── data/                    # Put your data here (videos, annotations, manifest)
-├── checkpoints/             # Model weight files (not tracked)
-├── requirements.txt         # Pip dependencies (device-agnostic)
-├── pyproject.toml           # uv dependencies and poe task definitions
-└── run_inference.py         # Entry-point inference script
+├── data/                         # Raw videos, annotations, manifest, and CSV indices
+├── data_imgs/                    # Extracted frames produced by build_dataset_index.py
+├── checkpoints/                  # Model weight files
+│   ├── download_checkpoints.py
+│   ├── download-checkpoints.sh
+│   └── download-checkpoints.bat
+├── pyproject.toml                # uv dependencies and poe task definitions (GPU)
+├── pyproject.cpu.toml            # uv dependencies (CPU-only)
+├── requirements.txt              # Pip dependencies (device-agnostic)
+└── run_inference.py              # Entry-point inference script
 ```
 
 ## Authors

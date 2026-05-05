@@ -66,7 +66,61 @@ from .trt_utils import _AttentionNeck, _FeatureExtractorModule, _cast_module
 log = logging.getLogger(__name__)
 logging.getLogger("torch_tensorrt").setLevel(logging.ERROR)
 logging.getLogger("torch_tensorrt.dynamo.conversion").setLevel(logging.ERROR)
+import sys
+import warnings
+import contextlib
+import os
 
+# ── ANSI helpers ────────────────────────────────────────────────────────────
+_RED    = "\033[1;31m"
+_GREEN  = "\033[1;32m"
+_YELLOW = "\033[1;33m"
+_RESET  = "\033[0m"
+
+def _clog(msg: str, colour: str = _RESET) -> None:
+    """Print a coloured status line that bypasses the logging machinery."""
+    print(f"{colour}{msg}{_RESET}", flush=True)
+
+
+# ── Log suppression context manager ─────────────────────────────────────────
+_NOISY_LOGGERS = [
+    "torch_tensorrt",
+    "torch_tensorrt.dynamo",
+    "torch_tensorrt.dynamo.conversion",
+    "torch._dynamo",
+    "torch._inductor",
+    "torch.fx",
+    "torch.compile",
+    "tensorrt",
+]
+
+@contextlib.contextmanager
+def _suppress_external_logs():
+    saved_levels = {}
+    for name in _NOISY_LOGGERS:
+        logger = logging.getLogger(name)
+        saved_levels[name] = logger.level
+        logger.setLevel(logging.CRITICAL + 1)
+
+    devnull_fd = os.open(os.devnull, os.O_WRONLY)
+    saved_stderr_fd = os.dup(2)
+    os.dup2(devnull_fd, 2)
+
+    saved_sys_stderr = sys.stderr
+    sys.stderr = open(os.devnull, "w")
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            yield
+        finally:
+            sys.stderr.close()
+            sys.stderr = saved_sys_stderr
+            os.dup2(saved_stderr_fd, 2)
+            os.close(saved_stderr_fd)
+            os.close(devnull_fd)
+            for name, level in saved_levels.items():
+                logging.getLogger(name).setLevel(level)
 
 class TRTSiamABCNet:
     """
@@ -134,39 +188,49 @@ class TRTSiamABCNet:
         _, C, h_t, w_t = t_feat_shape
         _, _, h_s, w_s = s_feat_shape
 
-        self._trt_feat = self._compile_feat(
-            model,
-            min_hw=template_size,
-            opt_hw=template_size,
-            max_hw=instance_size,
-            min_batch=min_batch,
-            opt_batch=opt_batch,
-            max_batch=max_batch,
-            enabled_precisions=enabled_precisions,
-        )
+        # ── backbone TRT engine ──────────────────────────────────────────────
+        _clog("  [SiamRAM] Compiling backbone TRT engine …", _RED)
+        with _suppress_external_logs():
+            self._trt_feat = self._compile_feat(
+                model,
+                min_hw=template_size,
+                opt_hw=template_size,
+                max_hw=instance_size,
+                min_batch=min_batch,
+                opt_batch=opt_batch,
+                max_batch=max_batch,
+                enabled_precisions=enabled_precisions,
+            )
+        _clog("  [SiamRAM] Backbone engine ready.", _GREEN)
 
+        # ── attention neck (torch.compile) ───────────────────────────────────
+        _clog("  [SiamRAM] Compiling attention neck …", _RED)
         _attn_mod = _AttentionNeck(model).eval().to(self._device).float()
-        self._trt_attn = torch.compile(_attn_mod, dynamic=True, fullgraph=True)
+        with _suppress_external_logs():
+            self._trt_attn = torch.compile(_attn_mod, dynamic=True, fullgraph=True)
+            with torch.no_grad():
+                for hw in (h_t, h_s):
+                    _dummy = torch.randn(
+                        1,
+                        adjust_channels * 2,
+                        hw, hw,
+                        device=self._device,
+                        dtype=torch.float32,
+                    )
+                    self._trt_attn(_dummy)   # trigger actual compilation
+        _clog("  [SiamRAM] Attention neck ready.", _GREEN)
 
-        with torch.no_grad():
-            for hw in (h_t, h_s):
-                _dummy = torch.randn(
-                    1,
-                    adjust_channels * 2,
-                    hw,
-                    hw,
-                    device=self._device,
-                    dtype=torch.float32,
-                )
-                self._trt_attn(_dummy)
-
-        self._connect_engines = _build_connect_engines(
-            model,
-            s_feat_shape=s_feat_shape,
-            t_feat_shape=t_feat_shape,
-            norm_lambda=norm_lambda,
-            device=self._device,
-        )
+        # ── connect engines ──────────────────────────────────────────────────
+        _clog("  [SiamRAM] Compiling connect engines …", _RED)
+        with _suppress_external_logs():
+            self._connect_engines = _build_connect_engines(
+                model,
+                s_feat_shape=s_feat_shape,
+                t_feat_shape=t_feat_shape,
+                norm_lambda=norm_lambda,
+                device=self._device,
+            )
+        _clog("  [SiamRAM] Connect engines ready.", _GREEN)
 
     def _compile_feat(
         self,
@@ -300,19 +364,11 @@ def get_trt_tracker(
     fp16: bool = True,
     cuda_id: int = 0,
 ):
-    """
-    Drop-in replacement for get_tracker() that returns a TRT-compiled tracker.
-
-    Example
-    -------
-        tracker = get_trt_tracker(config, "weights/model.pth",
-                                  lambda_tta=0.1, fp16=True)
-    """
     from hydra.utils import instantiate
     from pytorch_toolbelt.utils import transfer_weights
-
     from ..SiamABC_Tracker import SiamABCTracker
 
+    _clog("\n[SiamRAM] Loading model weights …", _YELLOW)
     model: nn.Module = instantiate(
         config["model"], inference_mode=True, norm_lambda=lambda_tta
     )
@@ -333,6 +389,7 @@ def get_trt_tracker(
     template_size = int(tracking_cfg["template_size"])
     instance_size = int(tracking_cfg["instance_size"])
 
+    _clog("[SiamRAM] Starting TRT compilation — this takes ~1–3 min on first run.\n", _YELLOW)
     trt_model = TRTSiamABCNet(
         model=model,
         template_size=template_size,
@@ -341,6 +398,7 @@ def get_trt_tracker(
         cuda_id=cuda_id,
         fp16=fp16,
     )
+    _clog("\n[SiamRAM] ✓ Compilation complete. Tracker is ready.\n", _GREEN)
 
     tracker: SiamABCTracker = instantiate(config["tracker"], model=trt_model)
     return tracker

@@ -119,6 +119,7 @@ def parse_args():
       --lambda_tta      : test-time augmentation strength for the base tracker
       --datasets        : optionally restrict to specific dataset sub-folders
       --submission_csv  : where to write the final submission CSV
+      --output_video    : if set, writes annotated debug videos to outputs_dir
 
     Returns
     -------
@@ -179,6 +180,15 @@ def parse_args():
         "--submission_csv",
         default=str(BASE_DIR / "submission.csv"),
         help="Output path for the submission CSV file.",
+    )
+    parser.add_argument(
+        "--output_video",
+        "--output_videos",
+        action="store_true",
+        help=(
+            "Write annotated debug videos (slower). "
+            "When not set, runs in fast-inference mode and writes bbox files only."
+        ),
     )
     return parser.parse_args()
 
@@ -484,6 +494,11 @@ def main():
     # Write the resolved paths back so the rest of the code uses them.
     args.weights_path = str(resolved_weights_path)
     config.ram_tracker.yolo_weights = str(resolved_yolo_path)
+    osnet_model_path_raw = str(getattr(config.ram_tracker, "osnet_model_path", "")).strip()
+    if osnet_model_path_raw:
+        config.ram_tracker.osnet_model_path = str(
+            _resolve_weights_path(osnet_model_path_raw)
+        )
     config.model.model_size = args.model_size
 
     # ------------------------------------------------------------------
@@ -569,7 +584,7 @@ def main():
             initial_bbox=init_bbox,
             tracker=tracker,
             output_path=output_path,
-            output_video=False,   # We only need bbox .txt files, not re-encoded video.
+            output_video=args.output_video,
         )
 
     # ------------------------------------------------------------------

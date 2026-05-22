@@ -34,6 +34,7 @@ dependencies = [
   "shapely>=2.1.2",
   "six>=1.17.0",
   "spikingjelly>=0.0.0.0.14",
+  "tensorboard>=2.16.0",
   "tensorboardx>=2.6.5",
   "timm>=1.0.26",
   "torchmetrics>=1.9.0",
@@ -47,6 +48,12 @@ dependencies = [
   "omegaconf>=2.3.0",
   "triton-windows==3.6.0.post26; sys_platform == 'win32' and platform_machine == 'AMD64'",
   "triton==3.6.0; sys_platform != 'win32'",
+  "torchreid",
+  "cython>=3.0.0",
+  "h5py>=3.10.0",
+  "future>=1.0.0",
+  "yacs>=0.1.8",
+  "chardet>=5.2.0",
 ]
 
 [tool.uv.sources]
@@ -55,6 +62,30 @@ torch = { index = "pytorch-cu128" }
 torchvision = { index = "pytorch-cu128" }
 torch-tensorrt = { index = "pytorch-cu128" }
 tensorrt = { index = "pytorch-cu128" }
+torchreid = { git = "https://github.com/KaiyangZhou/deep-person-reid.git" }
+
+[tool.uv.extra-build-dependencies]
+torchreid = [
+  "numpy>=2.2.6",
+  "Cython>=3.0.0",
+  "h5py>=3.10.0",
+  "pillow>=12.2.0",
+  "six>=1.17.0",
+  "scipy>=1.15.3",
+  "opencv-python>=4.13.0.92",
+  "matplotlib>=3.10.9",
+  "tb-nightly",
+  "future>=1.0.0",
+  "yacs>=0.1.8",
+  "gdown>=6.0.0",
+  "flake8",
+  "yapf",
+  "isort==4.3.21",
+  "imageio>=2.37.3",
+  "chardet>=5.2.0",
+  "torch==2.11.0",
+  "torchvision==0.26.0",
+]
 
 [[tool.uv.index]]
 name = "pytorch-cu128"

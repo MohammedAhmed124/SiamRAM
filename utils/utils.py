@@ -8,9 +8,9 @@ the rest of the project, but almost everything in the project imports from here.
 Concretely, it provides six categories of helpers:
 
 1. APPEARANCE DESCRIPTORS
-   _extract_descriptor() — builds the 384-d appearance fingerprint ϕ(It, b) from
-   Section 3.1 of the paper. Used by the RAM/DRM memory buffers and by Phase-2
-   reacquisition scoring.
+   _extract_descriptor() — builds OSNet appearance embeddings ϕ(It, b) for one
+   bbox or a batch of bboxes. Used by the RAM/DRM memory buffers and by
+   Phase-2 reacquisition scoring.
 
 2. GEOMETRIC CHECKS
    _iou() — lightweight single-pair IoU for the RAM admission gate (Section 3.2).
@@ -36,7 +36,7 @@ Concretely, it provides six categories of helpers:
    needed arithmetic and device-management helpers.
 """
 
-from typing import Any, Optional, Tuple, Union
+from typing import Any, Optional, Sequence, Tuple, Union
 
 import cv2
 import numpy as np
@@ -46,109 +46,149 @@ from torch import Tensor
 from torch.nn import Module
 
 
+BBoxLike = Union[np.ndarray, Sequence[float], Sequence[Sequence[float]]]
+DescriptorOutput = Union[Optional[np.ndarray], list[Optional[np.ndarray]]]
+
+
+class _OSNetDescriptorExtractor:
+    """Lazy OSNet descriptor extractor wrapper."""
+
+    def __init__(self, model_name: str, model_path: str, device: str) -> None:
+        try:
+            from torchreid.utils import FeatureExtractor
+        except Exception as exc:
+            raise RuntimeError(
+                "OSNet descriptor backend requires torchreid. "
+                "Install it in the active environment first."
+            ) from exc
+
+        self._extractor = FeatureExtractor(
+            model_name=model_name,
+            model_path=model_path,
+            image_size=(256, 128),
+            device=device,
+            verbose=False,
+        )
+
+    def extract_batch(self, rgb_patches: list[np.ndarray]) -> np.ndarray:
+        features = self._extractor(rgb_patches)
+        if isinstance(features, torch.Tensor):
+            features_t = features.detach()
+        else:
+            features_t = torch.as_tensor(features)
+        features_t = torch.nn.functional.normalize(features_t, p=2, dim=1)
+        return features_t.cpu().numpy().astype(np.float32)
+
+
+_OSNET_EXTRACTOR: Optional[_OSNetDescriptorExtractor] = None
+_DESCRIPTOR_BACKEND: str = "osnet"
+_OSNET_MODEL_NAME: str = "osnet_x1_0"
+_OSNET_MODEL_PATH: str = ""
+_OSNET_DEVICE: str = "auto"
+
+
+def configure_descriptor_backend(
+    descriptor_backend: str = "osnet",
+    osnet_model_name: str = "osnet_x1_0",
+    osnet_model_path: str = "",
+    osnet_device: str = "auto",
+) -> None:
+    """
+    Configure global descriptor extraction backend options.
+
+    This resets the lazy OSNet extractor instance so the next descriptor request
+    uses the newly configured settings.
+    """
+    global _OSNET_EXTRACTOR
+    global _DESCRIPTOR_BACKEND, _OSNET_MODEL_NAME, _OSNET_MODEL_PATH, _OSNET_DEVICE
+
+    _DESCRIPTOR_BACKEND = descriptor_backend.strip().lower()
+    _OSNET_MODEL_NAME = osnet_model_name.strip()
+    _OSNET_MODEL_PATH = osnet_model_path.strip()
+    _OSNET_DEVICE = osnet_device.strip().lower()
+    _OSNET_EXTRACTOR = None
+
+
+def _get_osnet_extractor() -> _OSNetDescriptorExtractor:
+    global _OSNET_EXTRACTOR
+    if _OSNET_EXTRACTOR is None:
+        if _OSNET_DEVICE in ("", "auto"):
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        else:
+            device = _OSNET_DEVICE
+        _OSNET_EXTRACTOR = _OSNetDescriptorExtractor(
+            model_name=_OSNET_MODEL_NAME,
+            model_path=_OSNET_MODEL_PATH,
+            device=device,
+        )
+    return _OSNET_EXTRACTOR
+
+
+def _as_bbox_batch(bbox: BBoxLike) -> tuple[np.ndarray, bool]:
+    arr = np.asarray(bbox, dtype=float)
+    if arr.ndim == 1:
+        if arr.shape[0] != 4:
+            raise ValueError("Single bbox input must have shape (4,).")
+        return arr.reshape(1, 4), True
+    if arr.ndim == 2 and arr.shape[1] == 4:
+        return arr, False
+    raise ValueError("Bbox input must have shape (4,) or (N, 4).")
+
+
 def _extract_descriptor(
     frame: np.ndarray,
-    bbox,
+    bbox: BBoxLike,
     size: int = 16,
     w_gray: float = 0.4,
     w_color: float = 0.6,
     _PROC_SIZE: int = 64,
-) -> Optional[np.ndarray]:
+) -> DescriptorOutput:
     """
-    Compute the 384-dimensional appearance descriptor ϕ(It, b) for a given target
-    region in a video frame.
+    Extract OSNet descriptors for one box or a batch of boxes.
 
-    What is this and why does it exist?
-    ------------------------------------
-    The Distractor-Aware Memory (DAM) module (Section 3.1) needs a compact, comparable
-    "fingerprint" of what the target looks like at any given frame. That fingerprint is
-    this descriptor. It is used in three places:
-
-      1. RAM admission (Section 3.2): each new box is described and stored; future boxes
-         are compared against stored ones to detect appearance consistency.
-      2. DRM promotion (Eq. 8): if the last W=5 RAM descriptors are mutually similar
-         (cosine similarity ≥ 0.60), the current frame is promoted to the stable DRM
-         bank as a long-term anchor.
-      3. Phase-2 reacquisition scoring (Eq. 10): each YOLO candidate is described and
-         compared against all DRM anchors; the best match score S*(ci) determines whether
-         the candidate is actually the target or a distractor.
-
-    The descriptor is a weighted concatenation of two independently L2-normalised
-    components, following Equation 6 of the paper:
-
-        ϕ(It, b) = [w_gray * p̂ ; w_color * ĥ] / ‖[w_gray * p̂ ; w_color * ĥ]‖
-
-    where:
-      - p̂ ∈ R^256 is a flattened, normalised 16×16 grayscale patch (texture).
-      - ĥ ∈ R^128 is a normalised 8×4×4 HSV histogram (colour).
-
-    Colour is deliberately up-weighted (w_color=0.6 > w_gray=0.4) because colour
-    is more discriminative than raw texture when re-identifying the target after a
-    background-heavy occlusion, as noted in Section 3.1.
-
-    Step-by-step:
-    -------------
-    1. Clip the box to valid pixel coordinates and crop the patch from the frame.
-    2. Resize the patch to a fixed 64×64 internal size for normalisation.
-    3. Convert to grayscale, resize again to size×size (default 16×16), flatten and
-       L2-normalise → texture component p̂.
-    4. Convert to HSV, compute an 8×4×4 joint histogram over (H, S, V), flatten and
-       L2-normalise → colour component ĥ.
-    5. Form the weighted concatenation and re-normalise the whole 384-d vector.
-
-    Args:
-        frame (np.ndarray):
-            The full BGR video frame as a NumPy array with shape (H, W, 3).
-            This is the raw camera output — no pre-processing required before passing.
-        bbox:
-            The target bounding box in [x, y, w, h] format (top-left corner, width,
-            height), in pixel units relative to `frame`. Can be a list, tuple, or array.
-        size (int):
-            The side length of the grayscale patch after downsampling. Default 16 gives
-            a 16×16 = 256-dimensional texture vector. Increase for richer texture at the
-            cost of a larger descriptor.
-        w_gray (float):
-            Weight applied to the normalised grayscale texture component before
-            concatenation. Default 0.4 as per Equation 6.
-        w_color (float):
-            Weight applied to the normalised HSV histogram component before
-            concatenation. Default 0.6 as per Equation 6.
-        _PROC_SIZE (int):
-            Internal processing resolution. The patch is first resized to this square
-            size before computing both the grayscale and HSV features. This
-            standardises descriptor quality regardless of the original bbox aspect ratio.
-            Default 64. Not intended to be changed by callers.
-
-    Returns:
-        Optional[np.ndarray]:
-            A 384-dimensional float32 vector lying on the unit hypersphere (L2 norm ≈ 1).
-            Returns None if the bbox is degenerate (zero area) or lies entirely outside
-            the frame — callers must check for None before using the result.
+    The legacy arguments (`size`, `w_gray`, `w_color`, `_PROC_SIZE`) are kept for
+    backward compatibility and intentionally unused.
     """
-    x, y, w, h = map(int, bbox)
-    x, y = max(0, x), max(0, y)
-    w, h = max(1, w), max(1, h)
-    patch = frame[y: y + h, x: x + w]
-    if patch.size == 0:
-        return None
+    del size, w_gray, w_color, _PROC_SIZE
 
-    small = cv2.resize(patch, (_PROC_SIZE, _PROC_SIZE), interpolation=cv2.INTER_LINEAR)
+    bbox_batch, single_input = _as_bbox_batch(bbox)
+    h_fr, w_fr = frame.shape[:2]
 
-    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-    p = cv2.resize(gray, (size, size)).flatten().astype(np.float32)
-    p /= np.linalg.norm(p) + 1e-8
+    valid_indices: list[int] = []
+    rgb_patches: list[np.ndarray] = []
+    output: list[Optional[np.ndarray]] = [None] * len(bbox_batch)
 
-    hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
-    h_hist = (
-        cv2.calcHist([hsv], [0, 1, 2], None, [8, 4, 4], [0, 180, 0, 256, 0, 256])
-        .flatten()
-        .astype(np.float32)
-    )
-    h_hist /= np.linalg.norm(h_hist) + 1e-8
+    for idx, bb in enumerate(bbox_batch):
+        x, y, w, h = map(int, bb)
+        w = max(1, w)
+        h = max(1, h)
+        x1 = max(0, x)
+        y1 = max(0, y)
+        x2 = min(w_fr, x + w)
+        y2 = min(h_fr, y + h)
 
-    desc = np.concatenate([w_gray * p, w_color * h_hist])
-    norm = np.linalg.norm(desc)
-    return desc / (norm + 1e-8)
+        if x1 >= x2 or y1 >= y2:
+            continue
+
+        patch_bgr = frame[y1:y2, x1:x2]
+        if patch_bgr.size == 0:
+            continue
+
+        rgb_patches.append(cv2.cvtColor(patch_bgr, cv2.COLOR_BGR2RGB))
+        valid_indices.append(idx)
+
+    if _DESCRIPTOR_BACKEND != "osnet":
+        raise RuntimeError(
+            f"Unsupported descriptor_backend='{_DESCRIPTOR_BACKEND}'. "
+            "Only 'osnet' is currently implemented."
+        )
+
+    if rgb_patches:
+        desc_batch = _get_osnet_extractor().extract_batch(rgb_patches)
+        for local_i, global_i in enumerate(valid_indices):
+            output[global_i] = desc_batch[local_i]
+
+    return output[0] if single_input else output
 
 
 def _iou(
@@ -211,7 +251,7 @@ def _cos_sim(
 
     What is this and why does it exist?
     ------------------------------------
-    Once we have two 384-d appearance descriptors (from _extract_descriptor), we need a
+    Once we have two appearance descriptors (from _extract_descriptor), we need a
     single number that answers "how similar are these two patches?" Cosine similarity is
     the right tool here because the descriptors are L2-normalised — cosine similarity on
     unit vectors is equivalent to their dot product, and it is invariant to overall
@@ -232,11 +272,10 @@ def _cos_sim(
 
     Args:
         a (np.ndarray):
-            First descriptor vector, shape (384,). Expected to be L2-normalised (output
-            of _extract_descriptor), but the function handles un-normalised inputs safely
-            via the denominator guard.
+            First descriptor vector. Expected to be L2-normalised output from
+            _extract_descriptor, but un-normalised vectors are handled safely.
         b (np.ndarray):
-            Second descriptor vector, shape (384,). Same requirements as `a`.
+            Second descriptor vector. Same requirements as `a`.
 
     Returns:
         float:

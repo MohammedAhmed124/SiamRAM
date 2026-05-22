@@ -148,8 +148,8 @@ class AppearanceMemory:
         if ref is None or not candidates:
             return None, -1.0
         best_box, best_score = None, -1.0
-        for bbox in candidates:
-            desc = _extract_descriptor(frame, bbox)
+        cand_descs = _extract_descriptor(frame, candidates)
+        for bbox, desc in zip(candidates, cand_descs):
             if desc is None:
                 continue
             s = _cos_sim(ref, desc)
@@ -221,9 +221,9 @@ class AppearanceMemory:
         vel_norm = float(np.linalg.norm(velocity)) + 1e-8
 
         scored: List[Tuple[np.ndarray, float]] = []
+        cand_descs = _extract_descriptor(frame, candidates)
 
-        for cand_bbox in candidates:
-            cand_desc = _extract_descriptor(frame, cand_bbox)
+        for cand_bbox, cand_desc in zip(candidates, cand_descs):
             if cand_desc is None:
                 continue
 
@@ -245,7 +245,7 @@ class AppearanceMemory:
 
                 raw = s_iou + s_app + s_mot + s_time
 
-                if distractor_bank:
+                if gamma > 0.0 and distractor_bank:
                     pen = max(_cos_sim(dk_desc, nu) for nu in distractor_bank)
                     raw -= gamma * pen
 

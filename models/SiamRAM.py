@@ -16,7 +16,12 @@ import numpy as np
 from numpy._typing import NDArray
 from ultralytics import YOLO
 
-from utils.utils import _cos_sim, _extract_descriptor, _iou
+from utils.utils import (
+    _cos_sim,
+    _extract_descriptor,
+    _iou,
+    configure_descriptor_backend,
+)
 
 from .SiamABC.tracker.SiamABC_Tracker import SiamABCTracker
 from .motion_model import BBoxEKF
@@ -72,6 +77,10 @@ class SiamRAMTracker:
         self,
         siam_tracker: SiamABCTracker,
         yolo_weights: str = "yolo11n.pt",
+        descriptor_backend: str = "osnet",
+        osnet_model_name: str = "osnet_x1_0",
+        osnet_model_path: str = "",
+        osnet_device: str = "auto",
         conf_threshold: float = 0.60,
         occ_siam_reacq_threshold=0.8,
         reacq_threshold: float = 0.55,
@@ -216,6 +225,12 @@ class SiamRAMTracker:
             yolo_class_detect_frames (any): stride used during the class warm-up period
     """
         self.tracker: SiamABCTracker = siam_tracker
+        configure_descriptor_backend(
+            descriptor_backend=descriptor_backend,
+            osnet_model_name=osnet_model_name,
+            osnet_model_path=osnet_model_path,
+            osnet_device=osnet_device,
+        )
 
         if copile_yolo:
             self.yolo = self.load_yolo_compiled(yolo_weights)
@@ -286,6 +301,9 @@ class SiamRAMTracker:
         }
 
         self._drm_lam_cand_dir = drm_lam_cand_dir
+        self._use_distractor_bank = (
+            self._distractor_bank_maxlen > 0 and self._drm_kwargs["gamma"] > 0.0
+        )
         self._vel_score_min_speed = vel_score_min_speed
         self._entry_patience = max(1, entry_patience)
         self._cand_collection_frames = max(1, cand_collection_frames)
@@ -947,7 +965,7 @@ class SiamRAMTracker:
                 candidates=[pred_bbox],
                 ref_bbox=held_box,
                 velocity=self.velocity,
-                distractor_bank=self._distractor_bank,
+                distractor_bank=self._distractor_bank if self._use_distractor_bank else (),
                 search_cx=self._search_cx,
                 search_cy=self._search_cy,
                 dist_sigma=self._effective_dist_sigma(frame),
@@ -1023,19 +1041,18 @@ class SiamRAMTracker:
         self._last_yolo = detections
 
         frame_cands = []
-        for bbox in detections:
-            desc = _extract_descriptor(frame, bbox)
+        det_descs = _extract_descriptor(frame, detections) if detections else []
+        for bbox, desc in zip(detections, det_descs):
             if desc is not None:
                 frame_cands.append((np.array(bbox, dtype=int), desc.copy()))
 
         self._cand_frames.append(frame_cands)
 
-        for det in detections:
-            held_box = self.held_box
-            assert held_box is not None
-            if _iou(det, held_box) >= self.tau_occ:
-                det_desc = _extract_descriptor(frame, det)
-                if det_desc is not None:
+        if self._use_distractor_bank:
+            for det, det_desc in zip(detections, det_descs):
+                held_box = self.held_box
+                assert held_box is not None
+                if _iou(det, held_box) >= self.tau_occ and det_desc is not None:
                     self._distractor_bank.append(det_desc)
 
         collection_phase_num = self._occ_phase
@@ -1162,7 +1179,7 @@ class SiamRAMTracker:
             candidates=fully_tracked_bboxes,
             ref_bbox=self.held_box,
             velocity=self.velocity,
-            distractor_bank=self._distractor_bank,
+            distractor_bank=self._distractor_bank if self._use_distractor_bank else (),
             search_cx=self._search_cx,
             search_cy=self._search_cy,
             dist_sigma=dist_sigma,
@@ -1755,13 +1772,17 @@ class SiamRAMTracker:
         hcx = held_box[0] + held_box[2] / 2.0
         hcy = held_box[1] + held_box[3] / 2.0
 
+        det_descs = (
+            _extract_descriptor(frame, detections) if ref is not None and detections else []
+        )
+
         best_det, best_rank = None, float("inf")
-        for det in detections:
+        for idx, det in enumerate(detections):
             dcx = det[0] + det[2] / 2.0
             dcy = det[1] + det[3] / 2.0
             dist = np.hypot(dcx - hcx, dcy - hcy)
             if ref is not None:
-                desc = _extract_descriptor(frame, det)
+                desc = det_descs[idx]
                 sim = _cos_sim(ref, desc) if desc is not None else 0.0
                 rank = dist * (1.0 - 0.5 * sim)
             else:

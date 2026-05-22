@@ -54,11 +54,25 @@ trt_engine:
 # SiamRAMTracker (Occlusion & DRM Management)
 # --------------------------------------------------------------------------- #
 ram_tracker:
+  # Path to YOLO weights used for re-detection during occlusion.
   yolo_weights: "checkpoints/yolo11n.pt"
+  # YOLO confidence threshold for candidate detections.
   yolo_conf: 0.3
+  # If true, restrict YOLO detections to the inferred target class.
   yolo_filter_class: false
+  # Frame cadence used while warming up target-class voting.
   yolo_class_detect_frames: 5
+  # If true, use compiled YOLO backend (when available).
   copile_yolo: False
+
+  # Descriptor backend selector. Supported: "osnet".
+  descriptor_backend: "osnet"
+  # OSNet model name from torchreid (examples: osnet_x1_0, osnet_x0_75, osnet_ain_x1_0).
+  osnet_model_name: "osnet_x1_0"
+  # Optional local OSNet weights path; empty means torchreid pretrained/cached weights.
+  osnet_model_path: ""
+  # Device for descriptor extraction: "auto", "cuda", or "cpu".
+  osnet_device: "auto"
   
   # Core Thresholds & Hysteresis
   conf_threshold: 0.55

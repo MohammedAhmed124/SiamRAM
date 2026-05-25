@@ -74,7 +74,7 @@ import cv2
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, get_worker_info
  
 from utils.box_coder import SiamABCBoxCoder
 from utils.utils import (
@@ -155,8 +155,31 @@ def _regression_weight_label(
         np.where(dist_to_center < r_neg, 0.5 * np.ones_like(y), np.zeros_like(y)),
     )
     return torch.from_numpy(label.astype(np.float32))
- 
- 
+
+
+def _iou_label_from_regression_map(
+    regression_map: np.ndarray,
+    eps: float = 1e-6,
+) -> np.ndarray:
+    """
+    Build an IoU-proxy target map from FCOS distances.
+
+    regression_map is expected in [4, H, W] channel order:
+      0: left, 1: top, 2: right, 3: bottom
+    """
+    l = regression_map[0]
+    t = regression_map[1]
+    r = regression_map[2]
+    b = regression_map[3]
+
+    valid = (l > 0) & (t > 0) & (r > 0) & (b > 0)
+    lr = np.minimum(l, r) / (np.maximum(l, r) + eps)
+    tb = np.minimum(t, b) / (np.maximum(t, b) + eps)
+    centerness = np.sqrt(np.clip(lr * tb, 0.0, 1.0))
+    iou_proxy = np.where(valid, centerness, 0.0).astype(np.float32)
+    return iou_proxy[None, ...]
+
+
 class TrackingSequence:
     """
     A single annotated video sequence, dataset-agnostic.
@@ -188,7 +211,10 @@ class TrackingSequence:
         self.start_idx = int(row["start_idx"])
         self.end_idx = int(row["end_idx"])
         self.n_frames = int(row["n_frames"])
-        self.cls = row["class"]
+        cls_value = row.get("yolo_target_class", row.get("class"))
+        if pd.isna(cls_value):
+            cls_value = row.get("class")
+        self.cls = cls_value
         self.dataset = row["dataset"]
  
         self._frame_pattern: Optional[str] = row.get("frame_pattern") or None
@@ -509,10 +535,45 @@ class UAVTrackingDataset(Dataset):
         self._dynamic_search_transform = self._get_default_transform(
             tracking_config["instance_size"]
         )
+
+        # Occlusion/degradation augmentations for positive search crops.
+        self.occlusion_aug_prob = float(
+            np.clip(tracking_config.get("occlusion_aug_prob", 0.35), 0.0, 1.0)
+        )
+        self.occlusion_min_area = float(
+            tracking_config.get("occlusion_min_area", 0.04)
+        )
+        self.occlusion_max_area = float(
+            tracking_config.get("occlusion_max_area", 0.20)
+        )
+        self.occlusion_max_patches = int(
+            max(1, tracking_config.get("occlusion_max_patches", 2))
+        )
+        self.search_blur_prob = float(
+            np.clip(tracking_config.get("search_blur_prob", 0.15), 0.0, 1.0)
+        )
+        self.search_jpeg_prob = float(
+            np.clip(tracking_config.get("search_jpeg_prob", 0.15), 0.0, 1.0)
+        )
+
+        # Hard negative mining knobs.
+        self.neg_cross_seq_prob = float(
+            np.clip(tracking_config.get("neg_cross_seq_prob", 0.45), 0.0, 1.0)
+        )
+        self.neg_same_class_prob = float(
+            np.clip(tracking_config.get("neg_same_class_prob", 0.70), 0.0, 1.0)
+        )
+        self.neg_shifted_prob = float(
+            np.clip(tracking_config.get("neg_shifted_prob", 0.40), 0.0, 1.0)
+        )
  
         self.neg_ratio = neg_ratio
         self.num_samples = num_samples
-        self.rng = random.Random(seed)
+        self.seed = int(seed)
+        self.rng = random.Random(self.seed)
+        self.np_rng = np.random.default_rng(self.seed)
+        self._rng_worker_id: Optional[int] = None
+        self._rng_worker_seed: Optional[int] = None
  
         self.box_coder = SiamABCBoxCoder(tracking_config)
  
@@ -520,6 +581,11 @@ class UAVTrackingDataset(Dataset):
             TrackingSequence(row.to_dict())
             for _, row in dataframe.reset_index(drop=True).iterrows()
         ]
+        self.class_to_indices: Dict[str, List[int]] = {}
+        for idx, seq in enumerate(self.sequences):
+            cls_key = self._sequence_class_key(seq.cls)
+            if cls_key:
+                self.class_to_indices.setdefault(cls_key, []).append(idx)
  
         if "dataset" in dataframe.columns:
             breakdown = dataframe["dataset"].value_counts().to_dict()
@@ -530,6 +596,9 @@ class UAVTrackingDataset(Dataset):
             f"[Dataset] {len(self.sequences)} sequences | "
             f"sources={breakdown} | "
             f"num_samples={num_samples} | neg_ratio={neg_ratio:.0%} | "
+            f"cross_seq_neg={self.neg_cross_seq_prob:.0%} | "
+            f"same_class_neg={self.neg_same_class_prob:.0%} | "
+            f"occlusion_aug={self.occlusion_aug_prob:.0%} | "
             f"template_size={self.template_size} | instance_size={self.instance_size} | "
             f"score_size={self.score_size}"
         )
@@ -551,6 +620,7 @@ class UAVTrackingDataset(Dataset):
         attempts (bad sequence, all frames corrupt, etc.) we fall back to a
         zero-filled dummy negative so the DataLoader never stalls.
         """
+        self._ensure_worker_rng()
         for attempt in range(5):
             try:
                 if self.rng.random() >= self.neg_ratio:
@@ -561,6 +631,36 @@ class UAVTrackingDataset(Dataset):
                 if attempt == 4:
                     return self._dummy_negative()
         return self._dummy_negative()
+
+    def _ensure_worker_rng(
+        self,
+    ) -> None:
+        """
+        Ensure each DataLoader worker has an independent RNG stream.
+
+        PyTorch forks dataset objects across workers. If we keep a single RNG that
+        was seeded in __init__, workers will generate identical sample sequences.
+        We derive worker-local seeds from PyTorch's worker seed so every worker
+        follows a distinct, deterministic random stream.
+        """
+        worker = get_worker_info()
+        if worker is None:
+            worker_id = -1
+            worker_seed = self.seed
+        else:
+            worker_id = int(worker.id)
+            worker_seed = int(worker.seed) & 0xFFFFFFFF
+
+        if (
+            self._rng_worker_id == worker_id
+            and self._rng_worker_seed == worker_seed
+        ):
+            return
+
+        self.rng = random.Random(worker_seed)
+        self.np_rng = np.random.default_rng(worker_seed)
+        self._rng_worker_id = worker_id
+        self._rng_worker_seed = worker_seed
  
     def _positive_sample(
         self,
@@ -609,7 +709,8 @@ class UAVTrackingDataset(Dataset):
             encoded = self.box_coder.encode(torch.from_numpy(bbox_in_c).reshape(1, 4))
             cls_label = encoded.classification_label[0].numpy()
             bbox_label = encoded.regression_map[0].numpy()
- 
+            iou_label = _iou_label_from_regression_map(bbox_label)
+
             reg_weight = _regression_weight_label(
                 bbox_in_c, self.instance_size, self.score_size
             ).numpy()
@@ -621,6 +722,7 @@ class UAVTrackingDataset(Dataset):
                 ds_crop,
                 cls_label,
                 bbox_label,
+                iou_label,
                 reg_weight,
                 is_positive=True,
                 path=seq.frame_path(s_idx),
@@ -707,6 +809,7 @@ class UAVTrackingDataset(Dataset):
         self,
         image: np.ndarray,
         bbox: np.ndarray,
+        apply_occlusion_aug: bool = True,
     ):
         """
         Cut out and preprocess a search-region crop from an image.
@@ -737,6 +840,8 @@ class UAVTrackingDataset(Dataset):
             context=context,
             padding_value=np.mean(image, axis=(0, 1)),
         )
+        if apply_occlusion_aug:
+            crop = self._apply_search_augmentations(crop)
         img = self._preprocess_image(crop, self._search_transform)
         return img, search_bbox, ctx
  
@@ -782,54 +887,71 @@ class UAVTrackingDataset(Dataset):
         image).  Both strategies validate every candidate with _bboxes_overlap()
         before accepting it — no target pixel can sneak into the crop.
         """
-        for _ in range(15):
+        for _ in range(20):
             seq = self.rng.choice(self.sequences)
- 
+
             t_idx, s_idx, s_bbox = seq.sample_search_template_idx_pair(
                 self.rng, max_frame_gap=self.max_frame_gap
             )
             if t_idx is None:
                 continue
- 
+
             t_bbox = seq.get_bbox(t_idx)
             if not seq.is_valid_bbox(t_bbox):
                 continue
- 
+
             t_img = self._load_image(seq.frame_path(t_idx))
- 
             t_crop, _ = self.get_template_crop(t_img, t_bbox)
- 
+
             dyn_idx = seq.sample_valid_frame(self.rng, lower_end=t_idx, upper_end=s_idx)
             if dyn_idx is None:
-                # No valid intermediate frame — just reuse the template frame.
-                dyn_idx = t_idx
                 dyn_img = t_img
                 dyn_bbox = t_bbox.copy()
             else:
                 dyn_img = self._load_image(seq.frame_path(dyn_idx))
                 dyn_bbox = seq.get_bbox(dyn_idx)
- 
+
             if not seq.is_valid_bbox(dyn_bbox):
                 continue
- 
+
             dynamic_template, _ = self.get_template_crop(dyn_img, dyn_bbox)
             dynamic_search, _, _ = self.get_search_crop(dyn_img, dyn_bbox)
- 
-            # Pick which negative strategy to use this time.
-            if self.rng.random() < 0.75:
-                s_crop = self._build_shifted_negative_search(seq, s_idx, s_bbox)
-            else:
+
+            strategy_roll = self.rng.random()
+            s_crop: Optional[torch.Tensor] = None
+
+            # Hard negative: wrong target from a different sequence.
+            if strategy_roll < self.neg_cross_seq_prob:
+                s_crop = self._build_cross_sequence_negative_search(anchor_seq=seq)
+
+            # Hard negative: near-target background from same frame.
+            if s_crop is None and strategy_roll < (self.neg_cross_seq_prob + self.neg_shifted_prob):
+                s_crop = self._build_shifted_negative_search(
+                    seq,
+                    s_idx,
+                    s_bbox,
+                    hard_mode=True,
+                )
+
+            # Wider background fallback.
+            if s_crop is None:
                 s_crop = self._build_distractor_negative_search(seq, s_idx, s_bbox)
- 
+            if s_crop is None:
+                s_crop = self._build_shifted_negative_search(
+                    seq,
+                    s_idx,
+                    s_bbox,
+                    hard_mode=False,
+                )
             if s_crop is None:
                 continue
- 
-            # All-zeros labels tell the loss: nothing to find here.
+
             S = self.score_size
             cls_label = np.zeros((1, S, S), dtype=np.float32)
             bbox_label = np.zeros((4, S, S), dtype=np.float32)
+            iou_label = np.zeros((1, S, S), dtype=np.float32)
             reg_weight = np.zeros((S, S), dtype=np.float32)
- 
+
             return self._pack(
                 t_crop,
                 dynamic_template,
@@ -837,11 +959,76 @@ class UAVTrackingDataset(Dataset):
                 dynamic_search,
                 cls_label,
                 bbox_label,
+                iou_label,
                 reg_weight,
                 is_positive=False,
             )
  
         return self._dummy_negative()
+
+    @staticmethod
+    def _sequence_class_key(
+        cls_value: Any,
+    ) -> str:
+        if cls_value is None:
+            return ""
+        key = str(cls_value).strip().lower()
+        if key in {"", "nan", "none"}:
+            return ""
+        return key
+
+    def _sample_negative_source_sequence(
+        self,
+        anchor_seq: TrackingSequence,
+    ) -> Optional[TrackingSequence]:
+        if len(self.sequences) < 2:
+            return None
+
+        anchor_cls = self._sequence_class_key(anchor_seq.cls)
+        same_class_pool: List[TrackingSequence] = []
+        if anchor_cls:
+            same_indices = self.class_to_indices.get(anchor_cls, [])
+            same_class_pool = [
+                self.sequences[idx]
+                for idx in same_indices
+                if self.sequences[idx] is not anchor_seq
+            ]
+
+        if same_class_pool and self.rng.random() < self.neg_same_class_prob:
+            return self.rng.choice(same_class_pool)
+
+        other_pool = [seq for seq in self.sequences if seq is not anchor_seq]
+        if not other_pool:
+            return None
+        return self.rng.choice(other_pool)
+
+    def _build_cross_sequence_negative_search(
+        self,
+        anchor_seq: TrackingSequence,
+    ) -> Optional[torch.Tensor]:
+        source_seq = self._sample_negative_source_sequence(anchor_seq)
+        if source_seq is None:
+            return None
+
+        frame_idx = source_seq.sample_valid_frame(self.rng)
+        if frame_idx is None:
+            return None
+
+        frame_path = source_seq.frame_path(frame_idx)
+        if not os.path.exists(frame_path):
+            return None
+        img = self._load_image(frame_path)
+
+        bbox = source_seq.get_bbox(frame_idx)
+        if not source_seq.is_valid_bbox(bbox):
+            return None
+
+        search_crop, _, _ = self.get_search_crop(
+            image=img,
+            bbox=bbox,
+            apply_occlusion_aug=False,
+        )
+        return search_crop
  
     @staticmethod
     def _bboxes_overlap(
@@ -873,6 +1060,7 @@ class UAVTrackingDataset(Dataset):
         seq: TrackingSequence,
         frame_idx: int,
         target_bbox: np.ndarray,
+        hard_mode: bool = True,
     ) -> Optional[torch.Tensor]:
         """
         Build a negative search crop by moving the crop anchor far away from
@@ -922,22 +1110,25 @@ class UAVTrackingDataset(Dataset):
  
         min_shift_x = (1.0 + self.search_context + 0.1) * w
         min_shift_y = (1.0 + self.search_context + 0.1) * h
+        max_extra_x = (0.65 if hard_mode else 2.0) * w
+        max_extra_y = (0.65 if hard_mode else 2.0) * h
+        ortho_jitter = 0.25 if hard_mode else 0.5
  
         for _ in range(50):
             direction = self.rng.choice(("left", "right", "up", "down"))
  
             if direction == "right":
-                shift_x = self.rng.uniform(min_shift_x, min_shift_x + 2.0 * w)
-                shift_y = self.rng.uniform(-0.5, 0.5) * h
+                shift_x = self.rng.uniform(min_shift_x, min_shift_x + max_extra_x)
+                shift_y = self.rng.uniform(-ortho_jitter, ortho_jitter) * h
             elif direction == "left":
-                shift_x = -self.rng.uniform(min_shift_x, min_shift_x + 2.0 * w)
-                shift_y = self.rng.uniform(-0.5, 0.5) * h
+                shift_x = -self.rng.uniform(min_shift_x, min_shift_x + max_extra_x)
+                shift_y = self.rng.uniform(-ortho_jitter, ortho_jitter) * h
             elif direction == "down":
-                shift_x = self.rng.uniform(-0.5, 0.5) * w
-                shift_y = self.rng.uniform(min_shift_y, min_shift_y + 2.0 * h)
+                shift_x = self.rng.uniform(-ortho_jitter, ortho_jitter) * w
+                shift_y = self.rng.uniform(min_shift_y, min_shift_y + max_extra_y)
             else:
-                shift_x = self.rng.uniform(-0.5, 0.5) * w
-                shift_y = -self.rng.uniform(min_shift_y, min_shift_y + 2.0 * h)
+                shift_x = self.rng.uniform(-ortho_jitter, ortho_jitter) * w
+                shift_y = -self.rng.uniform(min_shift_y, min_shift_y + max_extra_y)
  
             anchor = clamp_bbox(
                 np.array([x + shift_x, y + shift_y, w, h], dtype=np.float32),
@@ -1045,6 +1236,91 @@ class UAVTrackingDataset(Dataset):
             return self._preprocess_image(raw_crop, self._search_transform)
  
         return None
+
+    def _apply_search_augmentations(
+        self,
+        crop: np.ndarray,
+    ) -> np.ndarray:
+        """
+        Apply robustification transforms to positive search crops.
+        """
+        if crop.ndim != 3 or crop.shape[2] < 3:
+            return crop
+
+        out = crop.copy()
+
+        if self.np_rng.random() < self.occlusion_aug_prob:
+            out = self._apply_random_occluder(out)
+
+        if self.np_rng.random() < self.search_blur_prob:
+            k = int(self.rng.choice((3, 5)))
+            out = cv2.GaussianBlur(out, (k, k), 0)
+
+        if self.np_rng.random() < self.search_jpeg_prob:
+            quality = int(self.np_rng.integers(30, 86))
+            out = self._jpeg_compress(out, quality=quality)
+
+        return out
+
+    def _apply_random_occluder(
+        self,
+        image: np.ndarray,
+    ) -> np.ndarray:
+        h, w = image.shape[:2]
+        if h < 8 or w < 8:
+            return image
+
+        out = image.copy()
+        min_area = max(1e-6, min(self.occlusion_min_area, self.occlusion_max_area))
+        max_area = max(min_area, self.occlusion_max_area)
+        patch_count = int(self.np_rng.integers(1, self.occlusion_max_patches + 1))
+        mean_rgb = np.mean(out[:, :, :3], axis=(0, 1))
+
+        for _ in range(patch_count):
+            area = self.np_rng.uniform(min_area, max_area) * float(h * w)
+            aspect = self.np_rng.uniform(0.5, 2.0)
+            occ_w = int(np.sqrt(area * aspect))
+            occ_h = int(np.sqrt(area / max(aspect, 1e-6)))
+            occ_w = int(np.clip(occ_w, 4, w))
+            occ_h = int(np.clip(occ_h, 4, h))
+            max_x = max(1, w - occ_w + 1)
+            max_y = max(1, h - occ_h + 1)
+            x0 = int(self.np_rng.integers(0, max_x))
+            y0 = int(self.np_rng.integers(0, max_y))
+            x1 = x0 + occ_w
+            y1 = y0 + occ_h
+
+            if self.np_rng.random() < 0.55:
+                color = np.clip(
+                    mean_rgb + self.np_rng.normal(0.0, 35.0, size=3),
+                    0,
+                    255,
+                ).astype(np.uint8)
+                out[y0:y1, x0:x1, :3] = color
+            else:
+                patch = out[y0:y1, x0:x1, :3]
+                out[y0:y1, x0:x1, :3] = cv2.GaussianBlur(patch, (5, 5), 0)
+
+        return out
+
+    @staticmethod
+    def _jpeg_compress(
+        image: np.ndarray,
+        quality: int = 70,
+    ) -> np.ndarray:
+        quality = int(np.clip(quality, 5, 100))
+        bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+        ok, encoded = cv2.imencode(
+            ".jpg",
+            bgr,
+            [int(cv2.IMWRITE_JPEG_QUALITY), quality],
+        )
+        if not ok:
+            return image
+        decoded = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+        if decoded is None:
+            return image
+        return cv2.cvtColor(decoded, cv2.COLOR_BGR2RGB)
  
     def _get_template_crop(
         self,
@@ -1108,6 +1384,7 @@ class UAVTrackingDataset(Dataset):
         dynamic_search,
         cls_label: np.ndarray,
         bbox_label: np.ndarray,
+        iou_label: np.ndarray,
         reg_weight: np.ndarray,
         is_positive: bool,
         path: Optional[str] = None,
@@ -1123,6 +1400,7 @@ class UAVTrackingDataset(Dataset):
             "dynamic_search": self._to_tensor(dynamic_search),
             "cls_label": torch.from_numpy(cls_label),
             "bbox_label": torch.from_numpy(bbox_label),
+            "iou_label": torch.from_numpy(iou_label),
             "reg_weight": torch.from_numpy(reg_weight),
             "is_positive": torch.tensor(is_positive, dtype=torch.bool),
             "path": path if path is not None else "None",
@@ -1146,6 +1424,7 @@ class UAVTrackingDataset(Dataset):
             "dynamic_search": torch.zeros(3, i, i),
             "cls_label": torch.zeros(1, S, S),
             "bbox_label": torch.zeros(4, S, S),
+            "iou_label": torch.zeros(1, S, S),
             "reg_weight": torch.zeros(S, S),
             "is_positive": torch.tensor(False, dtype=torch.bool),
             "path": "None",
@@ -1236,9 +1515,9 @@ class UAVTrackingDataset(Dataset):
         """
         x, y, w, h = bbox
         cx, cy = x + w / 2.0, y + h / 2.0
-        shift_x = np.random.uniform(-shift_factor, shift_factor) * w
-        shift_y = np.random.uniform(-shift_factor, shift_factor) * h
-        scale = np.random.uniform(1.0 - scale_factor, 1.0 + scale_factor)
+        shift_x = self.np_rng.uniform(-shift_factor, shift_factor) * w
+        shift_y = self.np_rng.uniform(-shift_factor, shift_factor) * h
+        scale = self.np_rng.uniform(1.0 - scale_factor, 1.0 + scale_factor)
         new_w, new_h = w * scale, h * scale
         new_bbox = np.array(
             [cx + shift_x - new_w / 2, cy + shift_y - new_h / 2, new_w, new_h],
@@ -1258,7 +1537,7 @@ class UAVTrackingDataset(Dataset):
         drifts during long sequences, so the search region it gets during
         inference won't always be exactly the right scale.
         """
-        return np.random.uniform(self.search_context * 0.8, self.search_context * 1.2)
+        return self.np_rng.uniform(self.search_context * 0.8, self.search_context * 1.2)
  
     @staticmethod
     def is_valid_bbox(

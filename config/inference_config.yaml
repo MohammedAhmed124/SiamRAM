@@ -1,3 +1,5 @@
+weights_path: "training/checkpoints/training_run1/head_epoch_040.pth"
+
 model:
   _target_: models.SiamABC.model.SiamABC.SiamABCNet
   backbone: custom_fbnet
@@ -15,6 +17,7 @@ model:
   model_size: M
   max_layer: 4
   crop_template_features: false
+  build_iou_head: true
 
 tracker:
   _target_: models.SiamABC.tracker.SiamABC_Tracker.SiamABCTracker
@@ -35,15 +38,24 @@ tracker:
   instance_size: 256
   template_size: 128
   memory_window_size: 20
-  dynamic_update_threshold: 0.87
-  running_confidence_floor_value: 60
+  dynamic_update_threshold: 0.85
+  running_confidence_floor_value: 0.50
   iou_threshold: 0.6
   warmup_frames: 35
   warmup_window_size: 8
+  use_iou_score: false
+  iou_power: 1.0
+  use_iou_gate: False
+  use_iou_gate_for_score: false
+  iou_gate_warmup_frames: 20
+  iou_gate_ema_beta: 0.9
+  iou_gate_use_ema: true
+  iou_gate_threshold: 0.2
+  iou_gate_fail_closed: false
 
 
 
-make_trt_engine: True
+make_trt_engine: False
 
 trt_engine:
   lambda_tta: 0.1
@@ -73,16 +85,23 @@ ram_tracker:
   osnet_model_path: ""
   # Device for descriptor extraction: "auto", "cuda", or "cpu".
   osnet_device: "auto"
+  # Max number of detections per frame passed to OSNet (-1/0 disables cap).
+  osnet_max_candidate_batch: 0
   
   # Core Thresholds & Hysteresis
-  conf_threshold: 0.55
+  conf_threshold: 0.50
   reacq_threshold: 0.7
-  occ_siam_reacq_threshold: 0.80
-  app_match_threshold: 0.1
+  occ_siam_reacq_threshold: 0.5
+  app_match_threshold: 0.6
   occ_siam_margin: 0.5
   nudge_alpha: 0.0
   entry_patience: 1
   enter_occlusion_on_loss: true
+  # Warm-up ROI behavior (center crop) used in early frames or after failed recovery.
+  yolo_warmup_frames: 60
+  yolo_warmup_center_scale: 0.4
+  # Processing resolution cap for long edge. 1280 preserves current behavior.
+  max_proc_long_edge: 1280
   
   # Dynamic Recovery Module (DRM)
   cand_collection_frames: 1
@@ -91,7 +110,7 @@ ram_tracker:
   drm_capacity: 20
   drm_margin: 0.6
   drm_skip_threshold: 23
-  drm_top_k: 100
+  drm_top_k: 3
   drm_gamma: 0
   
   # DRM Weights (Lambda)
@@ -131,6 +150,9 @@ ram_tracker:
   tiny_search_expand_growth_every: 50
   tiny_search_expand_max: 40.0
 
+  # Homography estimator mode: "classic" (existing fast grid+affine) or
+  # "accurate" (feature-tracked full homography, more robust but slower).
+  homography_mode: "classic"
 
   disable_camera_motion: False
   

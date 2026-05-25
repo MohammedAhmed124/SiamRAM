@@ -178,12 +178,20 @@ class SiamABCNet(nn.Module):
         conv_block: str = "regular",
         model_size="S",
         build_simsiam_heads=True,
+        build_iou_head: bool = False,
         inference_mode: bool = False,
         norm_lambda: float = 0.1,
         **kwargs,
     ):
+        legacy_build_quality = kwargs.pop("build_quality_head", None)
+        if legacy_build_quality is not None and not build_iou_head:
+            build_iou_head = bool(legacy_build_quality)
+        kwargs.pop("build_embedding_head", None)
+        kwargs.pop("embedding_dim", None)
+
         max_layer2name = {3: "layer2", 4: "layer1"}
         self.build_simsiam_heads = build_simsiam_heads
+        self.build_iou_head = build_iou_head
         assert max_layer in max_layer2name
 
         super().__init__()
@@ -221,6 +229,16 @@ class SiamABCNet(nn.Module):
             conv_block=conv_block,
             inference_mode=inference_mode,
             norm_lambda=norm_lambda,
+        )
+        iou_hidden = max(32, adjust_channels // 2)
+        self.iou_head = (
+            nn.Sequential(
+                nn.Conv2d(adjust_channels, iou_hidden, kernel_size=3, padding=1),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(iou_hidden, 1, kernel_size=1),
+            )
+            if self.build_iou_head
+            else None
         )
 
         self.similarity = nn.CosineSimilarity(dim=1)
@@ -365,6 +383,11 @@ class SiamABCNet(nn.Module):
             search=search_features,
             lam=lam,
         )
+        iou_pred = (
+            self.iou_head(search_mixed_attention)
+            if self.iou_head is not None
+            else None
+        )
 
         simsiam_out_search = None
         simsiam_out_dynamic = None
@@ -372,6 +395,7 @@ class SiamABCNet(nn.Module):
         return {
             constants.TARGET_REGRESSION_LABEL_KEY: bbox_pred,
             constants.TARGET_CLASSIFICATION_KEY: cls_pred,
+            constants.TARGET_IOU_KEY: iou_pred,
             constants.SIMSIAM_SEARCH_OUT_KEY: simsiam_out_search,
             constants.SIMSIAM_DYNAMIC_OUT_KEY: simsiam_out_dynamic,
             constants.TRACKER_TARGET_SEARCH_SIM_SCORE: None,
@@ -425,9 +449,15 @@ class SiamABCNet(nn.Module):
             search=search_features,
             lam=lam,
         )
+        iou_pred = (
+            self.iou_head(search_mixed_attention)
+            if self.iou_head is not None
+            else None
+        )
         return {
             constants.TARGET_REGRESSION_LABEL_KEY: bbox_pred,
             constants.TARGET_CLASSIFICATION_KEY: cls_pred,
+            constants.TARGET_IOU_KEY: iou_pred,
             constants.TRACKER_TARGET_SEARCH_SIM_SCORE: None,
             constants.TRACKER_ATTENTION_MAP: search_mixed_attention,
         }

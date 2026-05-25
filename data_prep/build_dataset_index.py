@@ -1,4 +1,4 @@
-﻿"""
+"""
 Generic dataset index builder for SiamRAM training.
 
 This script discovers tracking sequences automatically from a data root,
@@ -54,6 +54,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
 from PIL import Image
+from PIL import UnidentifiedImageError
 from tqdm import tqdm
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -68,6 +69,81 @@ REQUIRED_COLUMNS = [
     "class",
     "dataset",
 ]
+
+
+def _is_decodable_image(path: Path) -> bool:
+    """
+    Return True only if the image can be fully decoded.
+    """
+    try:
+        with Image.open(path) as img:
+            img.load()
+            w, h = img.size
+            return w > 0 and h > 0
+    except (UnidentifiedImageError, OSError, ValueError):
+        return False
+
+
+def _partition_decodable_images(
+    frames: List[Path],
+) -> Tuple[List[Path], List[Path]]:
+    good: List[Path] = []
+    bad: List[Path] = []
+    for frame in frames:
+        if _is_decodable_image(frame):
+            good.append(frame)
+        else:
+            bad.append(frame)
+    return good, bad
+
+
+def _cleanup_bad_images(
+    bad_frames: List[Path],
+) -> int:
+    removed = 0
+    for frame in bad_frames:
+        try:
+            frame.unlink()
+            removed += 1
+        except OSError:
+            continue
+    return removed
+
+
+def _clear_frame_dir(
+    img_dir: Path,
+) -> None:
+    """
+    Remove extracted frame files (and temp leftovers) from img_dir.
+    """
+    if not img_dir.is_dir():
+        return
+    for p in img_dir.iterdir():
+        if not p.is_file():
+            continue
+        low = p.name.lower()
+        if p.suffix.lower() in IMAGE_EXTS or low.endswith(".tmp"):
+            try:
+                p.unlink()
+            except OSError:
+                continue
+
+
+def _validate_frame_dir(
+    img_dir: Path,
+    delete_bad: bool = False,
+) -> Tuple[int, int]:
+    """
+    Return (good_count, bad_count) for JPEG/PNG files in img_dir.
+    Optionally deletes bad files.
+    """
+    frames = _image_files(img_dir)
+    if not frames:
+        return 0, 0
+    good, bad = _partition_decodable_images(frames)
+    if delete_bad and bad:
+        _cleanup_bad_images(bad)
+    return len(good), len(bad)
 
 
 # ---------------------------------------------------------------------------
@@ -165,12 +241,19 @@ def _extract_frames_ffmpeg(video_path: Path, img_dir: Path, jpg_quality: int) ->
     Assumes the caller has already validated the file via _probe_video —
     a single extraction attempt is therefore sufficient.
     """
-    img_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        img_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        print(f"  [warn] mkdir failed for {img_dir}: {exc}")
+        return 0
     output_pattern = str(img_dir / "%08d.jpg")
     qscale = max(1, min(31, round(31 * (1.0 - (jpg_quality - 1) / 94.0))))
 
     cmd = [
         "ffmpeg", "-y",
+        "-v", "error",
+        "-fflags", "+discardcorrupt",
+        "-err_detect", "ignore_err",
         "-i", str(video_path),
         "-pix_fmt", "yuvj420p",
         "-q:v", str(qscale),
@@ -202,7 +285,12 @@ def _extract_frames_cv2(video_path: Path, img_dir: Path, jpg_quality: int) -> in
         print("[error] Neither ffmpeg nor opencv-python is available.")
         return 0
 
-    img_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        img_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        print(f"  [warn] mkdir failed for {img_dir}: {exc}")
+        return 0
+
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         print(f"  [warn] cv2 could not open {video_path.name}")
@@ -210,12 +298,41 @@ def _extract_frames_cv2(video_path: Path, img_dir: Path, jpg_quality: int) -> in
 
     idx = 1
     encode_params = [cv2.IMWRITE_JPEG_QUALITY, jpg_quality]
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        cv2.imwrite(str(img_dir / f"{idx:08d}.jpg"), frame, encode_params)
-        idx += 1
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            out_path = img_dir / f"{idx:08d}.jpg"
+            tmp_path = img_dir / f".{idx:08d}.jpg.tmp"
+            ok, encoded = cv2.imencode(".jpg", frame, encode_params)
+            if not ok:
+                print(f"  [warn] cv2 failed to encode frame {idx} for {video_path.name}")
+                break
+            try:
+                with open(tmp_path, "wb") as f:
+                    f.write(encoded.tobytes())
+                tmp_path.replace(out_path)
+            except OSError as exc:
+                print(
+                    f"  [warn] cv2 failed to atomically write frame {idx} "
+                    f"for {video_path.name}: {exc}"
+                )
+                try:
+                    if tmp_path.exists():
+                        tmp_path.unlink()
+                except OSError:
+                    pass
+                print(f"  [warn] cv2 failed to write frame {idx} for {video_path.name}")
+                break
+            idx += 1
+    except OSError as exc:
+        # Common on unstable mounts / external disks / Docker bind mounts.
+        print(f"  [warn] cv2 extraction I/O error for {video_path.name}: {exc}")
+        return 0
+    except Exception as exc:
+        print(f"  [warn] cv2 extraction error for {video_path.name}: {exc}")
+        return 0
     cap.release()
 
     extracted = idx - 1
@@ -228,6 +345,8 @@ def extract_video_to_frames(
     seq_dir: Path,
     img_out_dir: Path,
     jpg_quality: int = 95,
+    force_reextract: bool = False,
+    validate_frames: bool = True,
 ) -> bool:
     """
     Extract frames from a video inside seq_dir into img_out_dir.
@@ -238,22 +357,58 @@ def extract_video_to_frames(
 
     Returns True if frames are available after the call.
     """
-    if img_out_dir.is_dir() and len(list(img_out_dir.glob("*.jpg"))) > 0:
-        return True
+    if img_out_dir.is_dir():
+        existing = _image_files(img_out_dir)
+        if existing:
+            if force_reextract:
+                _clear_frame_dir(img_out_dir)
+            elif validate_frames:
+                good_count, bad_count = _validate_frame_dir(
+                    img_out_dir, delete_bad=True
+                )
+                if bad_count > 0:
+                    print(
+                        f"  [warn] found {bad_count} corrupted extracted frames in "
+                        f"{img_out_dir}; re-extracting sequence."
+                    )
+                    _clear_frame_dir(img_out_dir)
+                elif good_count > 0:
+                    return True
+            else:
+                return True
 
     video = _find_video_file(seq_dir)
     if video is None:
         return False
 
-    if _ffmpeg_available():
-        if not _probe_video(video):
-            print(f"  [skip] {video.name}: corrupt or unreadable — skipping extraction")
-            return False
-        n = _extract_frames_ffmpeg(video, img_out_dir, jpg_quality)
-    else:
-        n = _extract_frames_cv2(video, img_out_dir, jpg_quality)
+    try:
+        if _ffmpeg_available():
+            if not _probe_video(video):
+                print(f"  [skip] {video.name}: corrupt or unreadable — skipping extraction")
+                return False
+            n = _extract_frames_ffmpeg(video, img_out_dir, jpg_quality)
+        else:
+            n = _extract_frames_cv2(video, img_out_dir, jpg_quality)
+    except OSError as exc:
+        print(f"  [warn] extraction I/O error for {video.name}: {exc}")
+        return False
+    except Exception as exc:
+        print(f"  [warn] extraction failed for {video.name}: {exc}")
+        return False
 
-    return n > 0
+    if n <= 0:
+        return False
+
+    if validate_frames:
+        good_count, bad_count = _validate_frame_dir(img_out_dir, delete_bad=True)
+        if bad_count > 0:
+            print(
+                f"  [warn] removed {bad_count} corrupted frames after extraction "
+                f"for {video.name}"
+            )
+        return good_count > 0
+
+    return True
 
 
 def extract_all_videos(
@@ -262,6 +417,8 @@ def extract_all_videos(
     dataset_name: str,
     jpg_quality: int = 95,
     workers: int = 4,
+    force_reextract: bool = False,
+    validate_frames: bool = True,
 ) -> None:
     """
     Walk dataset_root, find every sequence that contains a video whose frames
@@ -277,8 +434,12 @@ def extract_all_videos(
 
         img_out_dir = _seq_img_dir(p, dataset_root, imgs_root, dataset_name)
 
-        if img_out_dir.is_dir() and len(list(img_out_dir.glob("*.jpg"))) > 0:
-            continue
+        if img_out_dir.is_dir() and not force_reextract:
+            good_count, bad_count = _validate_frame_dir(
+                img_out_dir, delete_bad=validate_frames
+            )
+            if good_count > 0 and bad_count == 0:
+                continue
 
         pending.append((p, img_out_dir))
 
@@ -296,15 +457,31 @@ def extract_all_videos(
 
     def _worker(args: Tuple[Path, Path]) -> Tuple[Path, bool]:
         seq_dir, img_out_dir = args
-        ok = extract_video_to_frames(seq_dir, img_out_dir, jpg_quality)
+        ok = extract_video_to_frames(
+            seq_dir,
+            img_out_dir,
+            jpg_quality=jpg_quality,
+            force_reextract=force_reextract,
+            validate_frames=validate_frames,
+        )
         return seq_dir, ok
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(_worker, item): item for item in pending}
         for fut in tqdm(as_completed(futures), total=len(futures), desc="Extracting"):
-            seq_dir, ok = fut.result()
-            if not ok:
+            try:
+                seq_dir, ok = fut.result()
+                if not ok:
+                    failed.append(seq_dir)
+            except OSError as exc:
+                # Keep going when a worker fails due to storage/mount errors.
+                seq_dir, _ = futures[fut]
                 failed.append(seq_dir)
+                print(f"  [warn] worker OSError on {seq_dir}: {exc}")
+            except Exception as exc:
+                seq_dir, _ = futures[fut]
+                failed.append(seq_dir)
+                print(f"  [warn] worker failed on {seq_dir}: {exc}")
 
     if failed:
         print(f"  [warn] Extraction failed or skipped for {len(failed)} sequences:")
@@ -354,9 +531,37 @@ def _frame_indices(frames: Iterable[Path]) -> List[int]:
     return sorted(out)
 
 
+def _contiguous_end_index(
+    frame_idxs: List[int],
+    start_idx: int,
+    max_end_idx: int,
+) -> int:
+    """
+    Return the last contiguous frame index starting from start_idx, capped by max_end_idx.
+    """
+    frame_set = set(frame_idxs)
+    end_idx = start_idx
+    while (end_idx + 1) in frame_set and (end_idx + 1) <= max_end_idx:
+        end_idx += 1
+    return min(end_idx, max_end_idx)
+
+
 def _image_size(first_image: Path) -> Tuple[int, int]:
     with Image.open(first_image) as img:
         return img.size  # (W, H)
+
+
+def _first_valid_image_size(frames: List[Path]) -> Optional[Tuple[int, int]]:
+    """
+    Return size from the first decodable image in `frames`.
+    Corrupt images are skipped.
+    """
+    for frame in frames:
+        try:
+            return _image_size(frame)
+        except (UnidentifiedImageError, OSError):
+            continue
+    return None
 
 
 def _infer_frame_pattern(img_dir: Path) -> Optional[str]:
@@ -464,7 +669,7 @@ def _pick_best_seq_dir(
     best_count = 0
     for c in candidates:
         frame_dir = _resolve_frame_dir(c, dataset_root, imgs_root, dataset_name)
-        count = len(_image_files(frame_dir))
+        count, _ = _validate_frame_dir(frame_dir, delete_bad=False)
         if count > best_count:
             best_count = count
             best = c
@@ -487,7 +692,15 @@ def _build_record(
     ``frame_pattern`` is inferred relative to that same directory.
     """
     frame_dir = _resolve_frame_dir(seq_dir, dataset_root, imgs_root, dataset_name)
-    frames = _image_files(frame_dir)
+    frames_all = _image_files(frame_dir)
+    if not frames_all:
+        return None
+    frames, bad = _partition_decodable_images(frames_all)
+    if bad:
+        removed = _cleanup_bad_images(bad)
+        print(
+            f"  [warn] removed {removed} corrupted frame files while indexing: {frame_dir}"
+        )
     if not frames:
         return None
 
@@ -500,12 +713,22 @@ def _build_record(
         return None
 
     start_idx = frame_idxs[0]
-    end_idx   = frame_idxs[-1]
-    # Number of frames spanned by the index range; TrackingSequence uses
-    # start_idx/end_idx for sampling and handles gaps via is_valid_bbox/NaN.
+    end_idx_from_ann = start_idx + ann_len - 1
+    end_idx = _contiguous_end_index(
+        frame_idxs=frame_idxs,
+        start_idx=start_idx,
+        max_end_idx=end_idx_from_ann,
+    )
+    # Keep index range aligned to both annotations and actually present frames.
     n_frames = end_idx - start_idx + 1
+    if n_frames <= 0:
+        return None
 
-    w, h = _image_size(frames[0])
+    size = _first_valid_image_size(frames)
+    if size is None:
+        print(f"  [warn] no decodable frames for sequence: {frame_dir}")
+        return None
+    w, h = size
     class_name = _clean_class_name(seq_dir.name)
 
     return {
@@ -549,7 +772,7 @@ def _compat_filter(df: pd.DataFrame) -> Tuple[pd.DataFrame, int]:
     df["end_idx"]   = df["end_idx"].astype(int)
     df = df[df["end_idx"] >= df["start_idx"]]
     df["n_frames"]  = (df["end_idx"] - df["start_idx"] + 1).astype(int)
-    df = df[df["n_frames"] > 0]
+    df = df[df["n_frames"] > 1]
 
     for col in ["seq_path", "annot_path", "class", "dataset"]:
         df[col] = df[col].astype(str)
@@ -621,6 +844,16 @@ def parse_args() -> argparse.Namespace:
                    help="JPEG quality for extracted frames (1-95, default 95).")
     p.add_argument("--workers", type=int, default=4,
                    help="Parallel workers for frame extraction (default 4).")
+    p.add_argument(
+        "--force-reextract",
+        action="store_true",
+        help="Re-extract frames even when img/ already contains frames.",
+    )
+    p.add_argument(
+        "--no-validate-frames",
+        action="store_true",
+        help="Disable post-extraction frame decode validation (faster, less safe).",
+    )
     return p.parse_args()
 
 
@@ -652,51 +885,73 @@ def main() -> None:
     if not args.skip_extraction:
         backend = "ffmpeg" if _ffmpeg_available() else "cv2 (ffmpeg not found)"
         print(f"Extraction : enabled [{backend}]  (skipped per-sequence if frames exist)")
+        if args.force_reextract:
+            print("             force re-extract: ON")
+        if not args.no_validate_frames:
+            print("             frame validation: ON (corrupted outputs removed/retried)")
+        else:
+            print("             frame validation: OFF")
     else:
         print("Extraction : skipped (--skip-extraction)")
 
     all_frames: List[pd.DataFrame] = []
+    partial_combined_path = output_dir / f"{args.combined_name}.partial"
 
-    for ds_name in dataset_dirs:
-        ds_root = data_root / ds_name
-        print(f"\n── {ds_name} ──────────────────────────")
+    interrupted = False
+    try:
+        for ds_name in dataset_dirs:
+            ds_root = data_root / ds_name
+            print(f"\n── {ds_name} ──────────────────────────")
 
-        if not args.skip_extraction:
-            extract_all_videos(
-                ds_root,
-                imgs_root=imgs_root,
-                dataset_name=ds_name,
-                jpg_quality=args.jpg_quality,
-                workers=args.workers,
-            )
+            if not args.skip_extraction:
+                extract_all_videos(
+                    ds_root,
+                    imgs_root=imgs_root,
+                    dataset_name=ds_name,
+                    jpg_quality=args.jpg_quality,
+                    workers=args.workers,
+                    force_reextract=args.force_reextract,
+                    validate_frames=not args.no_validate_frames,
+                )
 
-        df = discover_dataset_rows(ds_root, ds_name, imgs_root=imgs_root)
-        df, dropped = _compat_filter(df)
+            df = discover_dataset_rows(ds_root, ds_name, imgs_root=imgs_root)
+            df, dropped = _compat_filter(df)
 
-        out_path = output_dir / f"{ds_name}.csv"
-        df.to_csv(out_path, index=False)
+            out_path = output_dir / f"{ds_name}.csv"
+            df.to_csv(out_path, index=False)
 
-        print(f"  sequences      : {len(df)}")
-        print(f"  unique classes : {df['class'].nunique() if not df.empty else 0}")
-        print(f"  total frames   : {int(df['n_frames'].sum()) if not df.empty else 0:,}")
-        if dropped:
-            print(f"  dropped rows   : {dropped}")
-        print(f"  saved to       : {out_path}")
+            print(f"  sequences      : {len(df)}")
+            print(f"  unique classes : {df['class'].nunique() if not df.empty else 0}")
+            print(f"  total frames   : {int(df['n_frames'].sum()) if not df.empty else 0:,}")
+            if dropped:
+                print(f"  dropped rows   : {dropped}")
+            print(f"  saved to       : {out_path}")
 
-        if not df.empty:
-            all_frames.append(df)
+            if not df.empty:
+                all_frames.append(df)
+                partial = pd.concat(all_frames, ignore_index=True, sort=False)
+                partial, _ = _compat_filter(partial)
+                partial.to_csv(partial_combined_path, index=False)
+                print(f"  partial combined: {partial_combined_path} ({len(partial)} rows)")
+    except KeyboardInterrupt:
+        interrupted = True
+        print("\n[warn] Interrupted. Keeping the latest partial CSV.")
 
-    if all_frames:
+    if all_frames and not interrupted:
         combined = pd.concat(all_frames, ignore_index=True, sort=False)
         combined, dropped = _compat_filter(combined)
         combined_path = output_dir / args.combined_name
         combined.to_csv(combined_path, index=False)
+        if partial_combined_path.exists():
+            partial_combined_path.unlink()
 
         print("\n── Combined ───────────────────────────")
         print(f"  rows         : {len(combined)}")
         if dropped:
             print(f"  dropped rows : {dropped}")
         print(f"  saved to     : {combined_path}")
+    elif all_frames:
+        print(f"[warn] Partial combined CSV preserved at: {partial_combined_path}")
     else:
         print("\n[warn] No sequences discovered; combined CSV was not written.")
 

@@ -1,5 +1,5 @@
 from collections import deque
-from typing import Dict, Tuple, Union
+from typing import Dict, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -204,6 +204,47 @@ class SiamABCTracker(Tracker):
 
         self.update_lambda = 0.1
         self.running_confidence = 0.5
+        self.use_iou_score = bool(
+            self.tracking_config.get(
+                "use_iou_score",
+                self.tracking_config.get("use_quality_score", False),
+            )
+        )
+        self.iou_power = float(
+            self.tracking_config.get(
+                "iou_power",
+                self.tracking_config.get("quality_power", 1.0),
+            )
+        )
+        self.use_iou_gate = bool(self.tracking_config.get("use_iou_gate", False))
+        self.iou_gate_threshold = float(
+            self.tracking_config.get("iou_gate_threshold", 0.35)
+        )
+        self.use_iou_gate_for_score = bool(
+            self.tracking_config.get("use_iou_gate_for_score", False)
+        )
+        self.iou_gate_fail_closed = bool(
+            self.tracking_config.get("iou_gate_fail_closed", False)
+        )
+        self.iou_gate_warmup_frames = int(
+            self.tracking_config.get("iou_gate_warmup_frames", 20)
+        )
+        self.iou_gate_ema_beta = float(
+            self.tracking_config.get("iou_gate_ema_beta", 0.9)
+        )
+        self.iou_gate_use_ema = bool(
+            self.tracking_config.get("iou_gate_use_ema", True)
+        )
+        self.latest_iou_score = 1.0
+        self.latest_iou_score_ema = 1.0
+        self._last_iou_gate_pass = True
+
+        raw_floor = float(
+            self.tracking_config.get("running_confidence_floor_value", 0.6)
+        )
+        if raw_floor > 1.0:
+            raw_floor /= 100.0
+        self.running_confidence_floor_value = float(np.clip(raw_floor, 0.0, 1.0))
 
         self._best_idx = 0
         self._best_score = 0.5
@@ -573,11 +614,22 @@ class SiamABCTracker(Tracker):
         self.tracking_state.pred_score = pred_score
         self.tracking_state.paths.append(pred_bbox)
         if self.dynamic_update:
+            gate_iou = (
+                self.latest_iou_score_ema
+                if self.iou_gate_use_ema
+                else self.latest_iou_score
+            )
+            gate_ready = self.idx >= self.iou_gate_warmup_frames
+            iou_head_ok = (
+                not self.use_iou_gate
+                or not gate_ready
+                or gate_iou >= self.iou_gate_threshold
+            )
             score_ok = (
                 pred_score > self.running_confidence
                 or pred_score >= self.dynamic_update_threshold
             )
-            if score_ok:
+            if score_ok and iou_head_ok:
                 iou_ok = self._compute_iou(
                     pred_bbox, self._prev_bbox
                 ) >= self.tracking_config.get("iou_threshold", 0.3)
@@ -606,7 +658,7 @@ class SiamABCTracker(Tracker):
                 self.update_lambda * pred_score
                 + (1 - self.update_lambda) * self.running_confidence
             )
-            self.running_confidence = min(
+            self.running_confidence = max(
                 self.running_confidence, self.running_confidence_floor_value
             )
 
@@ -777,6 +829,10 @@ class SiamABCTracker(Tracker):
                   for debugging or visualisation. Not used in the main tracking loop.
         """
         cls_score = track_result[constants.TARGET_CLASSIFICATION_KEY].float().sigmoid()
+        iou_map = track_result.get(constants.TARGET_IOU_KEY)
+        iou_score_map = iou_map.float().sigmoid() if iou_map is not None else None
+        if self.use_iou_score and iou_score_map is not None:
+            cls_score = cls_score * iou_score_map.pow(self.iou_power)
         regression_map = (
             track_result[constants.TARGET_REGRESSION_LABEL_KEY].detach().float()
         )
@@ -796,11 +852,46 @@ class SiamABCTracker(Tracker):
             decoded_info=decoded_info, cls_score=cls_score, penalty=penalty
         )
         r_max, c_max = decoded_info.pred_coords[0]
+        peak_iou_score: Optional[float] = None
+        if iou_score_map is not None:
+            iou_np = iou_score_map.squeeze().detach().cpu().numpy()
+            peak_iou_score = float(iou_np[r_max, c_max])
+
+        if peak_iou_score is None:
+            self.latest_iou_score = 0.0 if self.iou_gate_fail_closed else 1.0
+        else:
+            self.latest_iou_score = peak_iou_score
+        beta = float(np.clip(self.iou_gate_ema_beta, 0.0, 0.999))
+        self.latest_iou_score_ema = (
+            beta * self.latest_iou_score_ema
+            + (1.0 - beta) * self.latest_iou_score
+        )
+
+        peak_cls_score = float(cls_score[r_max, c_max].item())
+        gate_iou = (
+            self.latest_iou_score_ema
+            if self.iou_gate_use_ema
+            else self.latest_iou_score
+        )
+        gate_ready = self.idx >= self.iou_gate_warmup_frames
+        if (
+            self.use_iou_gate
+            and self.use_iou_gate_for_score
+            and gate_ready
+            and gate_iou < self.iou_gate_threshold
+        ):
+            # Keep a confidence penalty instead of hard-zeroing the score.
+            # Hard-zero caused frequent false occlusion entries with noisy IoU maps.
+            peak_cls_score *= 0.25
+            self._last_iou_gate_pass = False
+        else:
+            self._last_iou_gate_pass = True
+
         sim_score_raw = track_result[constants.TRACKER_TARGET_SEARCH_SIM_SCORE]
         sim_score = sim_score_raw.item() if sim_score_raw is not None else 0.0
         return (
             pred_bbox,
-            cls_score[r_max, c_max].item(),
+            peak_cls_score,
             sim_score,
             track_result[constants.TRACKER_ATTENTION_MAP],
         )

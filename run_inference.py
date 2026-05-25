@@ -54,6 +54,7 @@ Typical usage:
 """
 
 import argparse
+import csv
 import json
 import logging
 import os
@@ -68,9 +69,16 @@ import pandas as pd
 from omegaconf import OmegaConf
 
 from models.SiamABC.tracker.tracker_setup import get_tracker
-from models.SiamABC.tracker.trt_engine.siamabc import get_trt_tracker
 from models.SiamRAM import SiamRAMTracker
+from models.SiamRAM_experiment import SiamRAMExperimentTracker
 from vis.test_model import run_inference
+
+try:
+    from models.SiamABC.tracker.trt_engine.siamabc import get_trt_tracker
+    _trt_import_error: Exception | None = None
+except ModuleNotFoundError as exc:
+    get_trt_tracker = None  # type: ignore[assignment]
+    _trt_import_error = exc
 
 # ---------------------------------------------------------------------------
 # Silence noisy third-party warnings that clutter the terminal output.
@@ -118,6 +126,7 @@ def parse_args():
       --model_size      : S / M / L — larger = more accurate but slower
       --lambda_tta      : test-time augmentation strength for the base tracker
       --datasets        : optionally restrict to specific dataset sub-folders
+      --video_key       : run only one manifest/sequence entry by key
       --submission_csv  : where to write the final submission CSV
       --output_video    : if set, writes annotated debug videos to outputs_dir
 
@@ -131,9 +140,51 @@ def parse_args():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
+        "--split",
+        default=None,
+        choices=["train", "test", "all"],
+        help=(
+            "Convenience split selector. "
+            "'test' maps to manifest public_lb, "
+            "'train' maps to manifest train, "
+            "'all' runs both train and test in one pass."
+        ),
+    )
+    parser.add_argument(
+        "--run_split",
+        default="public_lb",
+        choices=["public_lb", "train", "train_csv", "all"],
+        help=(
+            "Which split to run. "
+            "'public_lb' reads manifest public_lb entries (test), "
+            "'train' reads manifest train entries, "
+            "'all' runs both manifest train + public_lb, "
+            "'train_csv' reads --train_csv_path sequences."
+        ),
+    )
+    parser.add_argument(
+        "--train_csv_path",
+        default=str(BASE_DIR / "data" / "train_dataframe.csv"),
+        help=(
+            "Training dataframe CSV path used when --run_split train_csv. "
+            "Expected columns include img_path/seq_path and annot_path."
+        ),
+    )
+    parser.add_argument(
         "--data_dir",
         default=str(BASE_DIR / "data"),
         help="Root directory containing video files and annotation sub-folders.",
+    )
+    parser.add_argument(
+        "--max_sequences",
+        type=int,
+        default=0,
+        help="Optional cap on number of sequences to process (0 means no cap).",
+    )
+    parser.add_argument(
+        "--id_prefix",
+        default="pred",
+        help="Prefix for generated frame IDs in the output CSV (train split).",
     )
     parser.add_argument(
         "--outputs_dir",
@@ -174,6 +225,15 @@ def parse_args():
         help=(
             "Dataset names to include from the manifest public_lb split. "
             "Defaults to all sub-directories found inside --data_dir (excluding 'metadata')."
+        ),
+    )
+    parser.add_argument(
+        "--video_key",
+        default=None,
+        help=(
+            "Optional single-sequence selector. "
+            "Matches manifest key/source_key (for example: dataset1/volleyball). "
+            "When used with --run_split all, the matching entry is selected from the merged map."
         ),
     )
     parser.add_argument(
@@ -335,6 +395,210 @@ def _resolve_manifest_path(path_value: str) -> Path:
     return candidates[0]
 
 
+def _resolve_data_asset_path(
+    path_value: str,
+    data_dir: str,
+) -> str:
+    """
+    Resolve sequence/annotation paths from either manifest-relative or CSV rows.
+
+    Supports stale Docker-prefixed paths such as /app/... by remapping to BASE_DIR.
+    """
+    raw = str(path_value or "").strip()
+    if not raw:
+        return raw
+
+    path = Path(raw).expanduser()
+    candidates: list[Path] = []
+
+    if path.is_absolute():
+        candidates.append(path)
+    else:
+        candidates.append((Path(data_dir) / path).resolve())
+        candidates.append((BASE_DIR / path).resolve())
+
+    norm = raw.replace("\\", "/")
+    if norm.startswith("/app/"):
+        candidates.append((BASE_DIR / norm[len("/app/"):]).resolve())
+    elif "/app/" in norm:
+        candidates.append((BASE_DIR / norm.split("/app/", 1)[1]).resolve())
+
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+
+    return str(candidates[0]) if candidates else raw
+
+
+def _load_initial_bbox(
+    annotation_path: str,
+) -> list[float]:
+    """
+    Load initial bbox from the first non-empty line of annotation txt.
+    Accepts comma or whitespace separators.
+    """
+    with open(annotation_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.replace(",", " ").split()
+            if len(parts) < 4:
+                raise ValueError(
+                    f"Invalid bbox line in {annotation_path}: {line!r}"
+                )
+            return [float(parts[0]), float(parts[1]), float(parts[2]), float(parts[3])]
+    raise ValueError(f"Annotation file is empty: {annotation_path}")
+
+
+def _build_manifest_entries(
+    manifest: dict,
+    target_datasets: set[str],
+    split_name: str,
+    key_prefix: str = "",
+    output_prefix: str = "",
+) -> dict[str, dict]:
+    """
+    Build a uniform entry dictionary from a manifest split.
+    """
+    split_entries = manifest.get(split_name, {})
+    entries: dict[str, dict] = {}
+    for key, value in split_entries.items():
+        if value["dataset"] not in target_datasets:
+            continue
+        out_rel_path = value["video_path"]
+        if output_prefix:
+            out_rel_path = os.path.join(output_prefix, out_rel_path)
+        out_key = f"{key_prefix}{key}"
+        entries[out_key] = {
+            "dataset": value["dataset"],
+            "video_path": value["video_path"],
+            "annotation_path": value["annotation_path"],
+            "output_rel_path": out_rel_path,
+            "split": split_name,
+            "source_key": key,
+        }
+    return entries
+
+
+def _build_train_entries_from_csv(
+    train_csv_path: str,
+    data_dir: str,
+    target_datasets: set[str],
+    max_sequences: int = 0,
+) -> dict[str, dict]:
+    """
+    Build inference entries from training dataframe CSV rows.
+    """
+    entries: dict[str, dict] = {}
+    dropped_missing_path = 0
+    with open(train_csv_path, "r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)
+        for row_idx, row in enumerate(reader, start=1):
+            dataset_name = str(row.get("dataset", "")).strip() or "unknown"
+            if dataset_name not in target_datasets:
+                continue
+
+            seq_raw = row.get("img_path") or row.get("seq_path") or ""
+            ann_raw = row.get("annot_path") or ""
+            seq_path = _resolve_data_asset_path(seq_raw, data_dir)
+            ann_path = _resolve_data_asset_path(ann_raw, data_dir)
+
+            if not os.path.exists(seq_path) or not os.path.exists(ann_path):
+                dropped_missing_path += 1
+                continue
+
+            seq_leaf = Path(seq_path).name
+            seq_name = Path(seq_path).parent.name if seq_leaf == "img" else seq_leaf
+            base_key = f"train_{dataset_name}__{seq_name}"
+            key = base_key
+            suffix = 1
+            while key in entries:
+                suffix += 1
+                key = f"{base_key}_{suffix:03d}"
+
+            output_rel_path = os.path.join(dataset_name, f"{key}.mp4")
+            entries[key] = {
+                "dataset": dataset_name,
+                "video_path": seq_path,
+                "annotation_path": ann_path,
+                "output_rel_path": output_rel_path,
+                "row_idx": row_idx,
+            }
+            if max_sequences > 0 and len(entries) >= max_sequences:
+                break
+
+    if dropped_missing_path > 0:
+        print(
+            f"[train-csv] Skipped {dropped_missing_path} rows with missing seq/annotation paths."
+        )
+    return entries
+
+
+def _filter_run_entries_by_video_key(
+    run_entries: dict[str, dict],
+    video_key: str | None,
+) -> dict[str, dict]:
+    """
+    Filter run entries down to one selected sequence key.
+
+    Matching order:
+      1) exact key / source_key / key without train|test prefix
+      2) case-insensitive substring on the same fields
+    """
+    if not video_key:
+        return run_entries
+
+    needle = str(video_key).strip()
+    if not needle:
+        return run_entries
+    needle_l = needle.lower()
+
+    def _norm_key(
+        key: str,
+    ) -> str:
+        if key.startswith("train/"):
+            return key[len("train/"):]
+        if key.startswith("test/"):
+            return key[len("test/"):]
+        return key
+
+    exact: dict[str, dict] = {}
+    fuzzy: dict[str, dict] = {}
+    for key, value in run_entries.items():
+        source_key = str(value.get("source_key", key))
+        key_norm = _norm_key(key)
+        fields = [
+            key,
+            source_key,
+            key_norm,
+            str(value.get("video_path", "")),
+            str(value.get("annotation_path", "")),
+        ]
+        fields_l = [f.lower() for f in fields]
+
+        if needle in fields or needle_l in fields_l:
+            exact[key] = value
+            continue
+
+        if any(needle_l in f for f in fields_l):
+            fuzzy[key] = value
+
+    chosen = exact if exact else fuzzy
+    if not chosen:
+        sample = list(run_entries.keys())[:20]
+        raise KeyError(
+            f"--video_key '{needle}' did not match any entry. "
+            f"Sample available keys: {sample}"
+        )
+
+    if len(chosen) > 1:
+        raise KeyError(
+            f"--video_key '{needle}' is ambiguous. Matched keys: {list(chosen.keys())}"
+        )
+    return chosen
+
+
 # ---------------------------------------------------------------------------
 # Checkpoint management
 # ---------------------------------------------------------------------------
@@ -477,8 +741,16 @@ def main():
     # Parse and normalise all input paths
     # ------------------------------------------------------------------
     args = parse_args()
+    if args.split is not None:
+        args.run_split = "public_lb" if args.split == "test" else args.split
+
     args.data_dir = str(_resolve_data_dir(args.data_dir))
-    args.manifest_path = str(_resolve_manifest_path(args.manifest_path))
+    if args.run_split in {"public_lb", "train", "all"}:
+        args.manifest_path = str(_resolve_manifest_path(args.manifest_path))
+    else:
+        args.train_csv_path = _resolve_data_asset_path(
+            args.train_csv_path, args.data_dir
+        )
 
     # ------------------------------------------------------------------
     # Load YAML config, resolve checkpoint paths, auto-download
@@ -512,6 +784,11 @@ def main():
     # YOLO-powered re-detection safety net on top.
     # ------------------------------------------------------------------
     if config.make_trt_engine:
+        if get_trt_tracker is None:
+            raise ModuleNotFoundError(
+                "TensorRT tracker dependencies are missing. "
+                "Set make_trt_engine: False in your config or install torch_tensorrt."
+            ) from _trt_import_error
         wrapped = get_trt_tracker(
             config=config, weights_path=args.weights_path, **config.trt_engine
         )
@@ -523,16 +800,30 @@ def main():
             continuous=False,
         )
 
-    tracker = SiamRAMTracker(siam_tracker=wrapped, **config.ram_tracker)
+    ram_impl = str(getattr(config, "ram_tracker_impl", "base")).strip().lower()
+    if ram_impl in {"base", "siamram"}:
+        tracker_cls = SiamRAMTracker
+    elif ram_impl in {"experiment", "exp", "siamram_experiment"}:
+        tracker_cls = SiamRAMExperimentTracker
+    else:
+        raise ValueError(
+            f"Unsupported ram_tracker_impl='{ram_impl}'. "
+            "Expected one of: base, experiment."
+        )
 
-    # ------------------------------------------------------------------
-    # Load the manifest and decide which videos to process.
-    #
-    # The manifest's "public_lb" section is the leaderboard split —
-    # those are the videos we need to submit predictions for.
-    # ------------------------------------------------------------------
-    with open(args.manifest_path, "r") as f:
-        manifest = json.load(f)
+    ram_tracker_kwargs_obj = OmegaConf.to_container(config.ram_tracker, resolve=True)
+    assert isinstance(ram_tracker_kwargs_obj, dict)
+    ram_tracker_kwargs = dict(ram_tracker_kwargs_obj)
+
+    if tracker_cls is SiamRAMExperimentTracker:
+        exp_cfg_obj = OmegaConf.to_container(
+            getattr(config, "ram_tracker_experiment", {}), resolve=True
+        )
+        if isinstance(exp_cfg_obj, dict):
+            ram_tracker_kwargs.update(exp_cfg_obj)
+
+    tracker = tracker_cls(siam_tracker=wrapped, **ram_tracker_kwargs)
+    print(f"Using tracker implementation: {tracker_cls.__name__}")
 
     if args.datasets is not None:
         # The user explicitly named which datasets they want.
@@ -545,12 +836,62 @@ def main():
         }
         print(f"Auto-discovered datasets: {sorted(target_datasets)}")
 
-    # Keep only the manifest entries whose dataset name is in our target set.
-    test_public_lb = {
-        k: v
-        for k, v in manifest["public_lb"].items()
-        if v["dataset"] in target_datasets
-    }
+    # Build a unified entry map regardless of source split.
+    if args.run_split in {"public_lb", "train"}:
+        with open(args.manifest_path, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+        run_entries = _build_manifest_entries(
+            manifest=manifest,
+            target_datasets=target_datasets,
+            split_name=args.run_split,
+        )
+    elif args.run_split == "all":
+        with open(args.manifest_path, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+
+        run_entries = {}
+        run_entries.update(
+            _build_manifest_entries(
+                manifest=manifest,
+                target_datasets=target_datasets,
+                split_name="train",
+                key_prefix="train/",
+                output_prefix="train",
+            )
+        )
+        run_entries.update(
+            _build_manifest_entries(
+                manifest=manifest,
+                target_datasets=target_datasets,
+                split_name="public_lb",
+                key_prefix="test/",
+                output_prefix="test",
+            )
+        )
+    else:  # train_csv
+        if not os.path.exists(args.train_csv_path):
+            raise FileNotFoundError(
+                f"Training CSV not found: {args.train_csv_path}"
+            )
+        run_entries = _build_train_entries_from_csv(
+            train_csv_path=args.train_csv_path,
+            data_dir=args.data_dir,
+            target_datasets=target_datasets,
+            max_sequences=int(args.max_sequences),
+        )
+
+    run_entries = _filter_run_entries_by_video_key(
+        run_entries=run_entries,
+        video_key=args.video_key,
+    )
+
+    if args.max_sequences > 0 and len(run_entries) > args.max_sequences:
+        run_entries = dict(list(run_entries.items())[: args.max_sequences])
+
+    if not run_entries:
+        raise RuntimeError(
+            f"No entries selected for split={args.run_split} and datasets={sorted(target_datasets)}"
+        )
 
     # ------------------------------------------------------------------
     # Run frame-by-frame inference on every video.
@@ -562,22 +903,20 @@ def main():
     #   d) Hand everything off to run_inference(), which handles the actual
     #      tracking loop and writes per-frame bbox predictions to disk.
     # ------------------------------------------------------------------
-    print(f"Starting inference on {len(test_public_lb)} videos...")
-    for i, (key, value) in enumerate(test_public_lb.items()):
-        video_path = os.path.join(args.data_dir, value["video_path"])
-        ann_path = os.path.join(args.data_dir, value["annotation_path"])
-        output_path = os.path.join(args.outputs_dir, value["video_path"])
+    print(f"Starting inference on {len(run_entries)} entries (split={args.run_split})...")
+    for i, (key, value) in enumerate(run_entries.items()):
+        video_path = _resolve_data_asset_path(value["video_path"], args.data_dir)
+        ann_path = _resolve_data_asset_path(value["annotation_path"], args.data_dir)
+        output_path = os.path.join(args.outputs_dir, value["output_rel_path"])
 
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-        print(f"[{i + 1}/{len(test_public_lb)}] Processing: {value['video_path']}")
+        print(f"[{i + 1}/{len(run_entries)}] Processing: {video_path}")
 
         # Load the initial bbox. The annotation file is a single line like:
         #   320.5,140.0,64.0,80.0   (x, y, width, height in pixels)
         # If the file has multiple rows for some reason, we take the first.
-        init_bbox = np.loadtxt(ann_path, delimiter=",", dtype=np.float32).tolist()
-        if isinstance(init_bbox[0], list):
-            init_bbox = init_bbox[0]
+        init_bbox = _load_initial_bbox(ann_path)
 
         run_inference(
             video_path=video_path,
@@ -600,8 +939,8 @@ def main():
     print("\nCompiling submission CSV...")
     submission_df = defaultdict(list)
 
-    for key, value in test_public_lb.items():
-        head, tail = os.path.split(os.path.join(args.outputs_dir, value["video_path"]))
+    for key, value in run_entries.items():
+        head, tail = os.path.split(os.path.join(args.outputs_dir, value["output_rel_path"]))
         bbox_file = os.path.join(head, "bboxes", os.path.splitext(tail)[0] + ".txt")
 
         if os.path.exists(bbox_file):
@@ -609,7 +948,14 @@ def main():
                 lines = f.read().strip().split("\n")
                 for frame_idx, line in enumerate(lines):
                     x, y, w, h = line.strip().split()
-                    submission_df["id"].append(f"{key}_{frame_idx}")
+                    split_name = str(value.get("split", args.run_split))
+                    if args.run_split == "train_csv" or (
+                        args.run_split in {"train", "all"} and split_name == "train"
+                    ):
+                        sample_id = f"{args.id_prefix}_{key}_{frame_idx}"
+                    else:
+                        sample_id = f"{key}_{frame_idx}"
+                    submission_df["id"].append(sample_id)
                     submission_df["x"].append(float(x))
                     submission_df["y"].append(float(y))
                     submission_df["w"].append(float(w))

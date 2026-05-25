@@ -100,6 +100,7 @@ class TrackingHeadLoss(nn.Module):
         self,
         cls_weight=1.0,
         bbox_weight=1.0,
+        iou_weight=1.0,
         focal_alpha=0.25,
         focal_gamma=2.0,
     ):
@@ -115,6 +116,7 @@ class TrackingHeadLoss(nn.Module):
         super().__init__()
         self.cls_weight = cls_weight
         self.bbox_weight = bbox_weight
+        self.iou_weight = iou_weight
         self.focal_alpha = focal_alpha
         self.focal_gamma = focal_gamma
         self.bce = nn.BCEWithLogitsLoss(reduction="none")
@@ -200,6 +202,39 @@ class TrackingHeadLoss(nn.Module):
             return pred.sum() * 0.0
         return self.bbox(p[pos], t[pos])
 
+    def _iou_loss(
+        self,
+        iou_pred: Optional[torch.Tensor],
+        iou_label: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """
+        Compute IoU-map loss (IoU-proxy supervision).
+
+        We balance positive and negative cells equally to avoid the huge
+        background majority dominating gradients.
+        """
+        if iou_pred is None or iou_label is None:
+            if iou_pred is not None:
+                return iou_pred.sum() * 0.0
+            if iou_label is not None:
+                return iou_label.sum() * 0.0
+            return torch.zeros((), dtype=torch.float32)
+
+        pred = iou_pred.view(-1)
+        label = iou_label.view(-1).float()
+        bce = self.bce(pred, label)
+
+        pos = label.gt(0)
+        neg = label.eq(0)
+
+        if pos.any() and neg.any():
+            return 0.5 * bce[pos].mean() + 0.5 * bce[neg].mean()
+        if pos.any():
+            return bce[pos].mean()
+        if neg.any():
+            return bce[neg].mean()
+        return iou_pred.sum() * 0.0
+
     def forward(
         self,
         cls_pred,
@@ -207,6 +242,8 @@ class TrackingHeadLoss(nn.Module):
         cls_label,
         bbox_label,
         reg_weight,
+        iou_pred: Optional[torch.Tensor] = None,
+        iou_label: Optional[torch.Tensor] = None,
     ):
         """
         Executes the full forward pass for the multi-task loss objective.
@@ -224,9 +261,18 @@ class TrackingHeadLoss(nn.Module):
         """
         cls_loss = self._cls_loss(cls_pred, cls_label)
         bbox_loss = self._bbox_loss(bbox_pred, bbox_label, reg_weight)
-        total = self.cls_weight * cls_loss + self.bbox_weight * bbox_loss
+        if iou_pred is None and iou_label is None:
+            iou_loss = cls_pred.sum() * 0.0
+        else:
+            iou_loss = self._iou_loss(iou_pred, iou_label)
+        total = (
+            self.cls_weight * cls_loss
+            + self.bbox_weight * bbox_loss
+            + self.iou_weight * iou_loss
+        )
         return {
             "total": total,
             "cls_loss": cls_loss.detach(),
             "bbox_loss": bbox_loss.detach(),
+            "iou_loss": iou_loss.detach(),
         }

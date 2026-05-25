@@ -78,12 +78,18 @@ def freeze_backbone_only(
         model.connect_model,
         # model.similarity_avgpool,
     ]
-    if model.build_simsiam_heads:
+    if (
+        model.build_simsiam_heads
+        and hasattr(model, "classifier")
+        and hasattr(model, "predictor")
+    ):
         trainable_modules += [
             # model.avgpool,
             model.classifier,
             model.predictor
             ]
+    if hasattr(model, "iou_head") and model.iou_head is not None:
+        trainable_modules.append(model.iou_head)
 
     for module in trainable_modules:
         for param in module.parameters():
@@ -148,6 +154,14 @@ def get_trainable_optimizer(
                           + list(model.predictor.parameters()),
                 "lr": lr,
                 "name": "simsiam_heads",
+            }
+        )
+    if hasattr(model, "iou_head") and model.iou_head is not None:
+        param_groups.append(
+            {
+                "params": list(model.iou_head.parameters()),
+                "lr": lr,
+                "name": "iou_head",
             }
         )
 
@@ -227,6 +241,7 @@ def _train_one_epoch(
     device: torch.device,
     epoch: int,
     log_every: int = 20,
+    train_mode: str | None = None,
 ) -> Dict[str, float]:
     """
     Executes a single pass over the entire training dataset.
@@ -250,10 +265,18 @@ def _train_one_epoch(
     *   **Dict**: Average losses (Total, Classification, and BBox) for the epoch.
     """
     model.train()
+    log_every = max(1, int(log_every))
+
+    if train_mode == "cls_head_only":
+        # Keep all frozen BN layers fully static; only cls branch BN updates.
+        set_bn_eval(model)
+        set_cls_bn_train(model)
 
     running = defaultdict(float)
     t_start = time.time()
     n_steps = len(loader)
+    seen_pos = 0
+    seen_total = 0
 
     for step, batch in enumerate(loader, start=1):
         template = batch["template"].to(device)
@@ -262,21 +285,33 @@ def _train_one_epoch(
         dynamic_search = batch["dynamic_search"].to(device)
         cls_label = batch["cls_label"].to(device)
         bbox_label = batch["bbox_label"].to(device)
+        iou_label = batch.get("iou_label")
+        if iou_label is not None:
+            iou_label = iou_label.to(device)
 
         # SiamABC Forward Pass: Processes 4 input crops simultaneously[cite: 1]
         out = model((template, dynamic_template, search, dynamic_search))
         cls_pred = out[constants.TARGET_CLASSIFICATION_KEY]
         bbox_pred = out[constants.TARGET_REGRESSION_LABEL_KEY]
+        iou_pred = out.get(constants.TARGET_IOU_KEY)
 
         reg_weight = batch["reg_weight"].to(device)
-        losses = criterion(cls_pred, bbox_pred, cls_label, bbox_label, reg_weight)
+        losses = criterion(
+            cls_pred,
+            bbox_pred,
+            cls_label,
+            bbox_label,
+            reg_weight,
+            iou_pred=iou_pred,
+            iou_label=iou_label,
+        )
 
         optimizer.zero_grad(set_to_none=True)
         losses["total"].backward()
 
         # Stabilize training by limiting the magnitude of gradient updates
         nn.utils.clip_grad_norm_(
-            [p for p in model.connect_model.parameters() if p.requires_grad],
+            [p for p in model.parameters() if p.requires_grad],
             max_norm=5.0,
         )
         optimizer.step()
@@ -284,20 +319,44 @@ def _train_one_epoch(
         for k, v in losses.items():
             running[k] += v.item()
 
+        n_pos = int(batch["is_positive"].sum().item())
+        batch_size = int(len(batch["is_positive"]))
+        seen_pos += n_pos
+        seen_total += batch_size
+
         if step % log_every == 0 or step == n_steps:
             elapsed = time.time() - t_start
             avg = {k: v / step for k, v in running.items()}
-            n_pos = batch["is_positive"].sum().item()
+            percent = 100.0 * step / max(1, n_steps)
+            avg_iou = avg.get("iou_loss", 0.0)
+            cls_term = float(criterion.cls_weight) * float(avg["cls_loss"])
+            bbox_term = float(criterion.bbox_weight) * float(avg["bbox_loss"])
+            iou_term = float(criterion.iou_weight) * float(avg_iou)
+            batch_pos_rate = 100.0 * n_pos / max(1, batch_size)
+            avg_pos_rate = 100.0 * seen_pos / max(1, seen_total)
+            samples_per_second = seen_total / max(1e-6, elapsed)
             print(
-                f"  step {step:>4}/{n_steps} | "
-                f"loss={avg['total']:.4f}  "
-                f"cls={avg['cls_loss']:.4f}  "
-                f"bbox={avg['bbox_loss']:.4f}  "
-                f"pos={n_pos}/{len(batch['is_positive'])}  "
-                f"({elapsed:.0f}s)"
+                f"[train][E{epoch:03d}] step {step:>4}/{n_steps:<4} ({percent:5.1f}%) "
+                f"| total={avg['total']:.4f} "
+                f"| raw(c/b/i)={avg['cls_loss']:.4f}/{avg['bbox_loss']:.4f}/{avg_iou:.4f} "
+                f"| w(c/b/i)={cls_term:.4f}/{bbox_term:.4f}/{iou_term:.4f} "
+                f"| pos={n_pos:>2}/{batch_size:<2} ({batch_pos_rate:5.1f}%, avg {avg_pos_rate:5.1f}%) "
+                f"| {samples_per_second:6.1f} samp/s | {elapsed:5.1f}s"
             )
+    if n_steps == 0:
+        return {
+            "total": 0.0,
+            "cls_loss": 0.0,
+            "bbox_loss": 0.0,
+            "iou_loss": 0.0,
+            "pos_rate": 0.0,
+            "epoch_seconds": 0.0,
+        }
 
-    return {k: v / n_steps for k, v in running.items()}
+    epoch_losses = {k: v / n_steps for k, v in running.items()}
+    epoch_losses["pos_rate"] = float(seen_pos) / max(1, seen_total)
+    epoch_losses["epoch_seconds"] = time.time() - t_start
+    return epoch_losses
 
 
 @torch.no_grad()
@@ -330,15 +389,26 @@ def _validate_one_epoch(
         dynamic_search = batch["dynamic_search"].to(device)
         cls_label = batch["cls_label"].to(device)
         bbox_label = batch["bbox_label"].to(device)
+        iou_label = batch.get("iou_label")
+        if iou_label is not None:
+            iou_label = iou_label.to(device)
         reg_weight = batch["reg_weight"].to(device)
 
         out = model((template, dynamic_template, search, dynamic_search))
         cls_pred = out[constants.TARGET_CLASSIFICATION_KEY]
         bbox_pred = out[constants.TARGET_REGRESSION_LABEL_KEY]
+        iou_pred = out.get(constants.TARGET_IOU_KEY)
 
-        losses = criterion(cls_pred, bbox_pred, cls_label, bbox_label, reg_weight)
+        losses = criterion(
+            cls_pred,
+            bbox_pred,
+            cls_label,
+            bbox_label,
+            reg_weight,
+            iou_pred=iou_pred,
+            iou_label=iou_label,
+        )
         for k, v in losses.items():
             running[k] += v.item()
 
     return {k: v / n_steps for k, v in running.items()}
-

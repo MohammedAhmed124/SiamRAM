@@ -10,7 +10,6 @@ from typing import Optional, Union
 import torch
 import torch.nn as nn
 from hydra.utils import instantiate
-from pytorch_toolbelt.utils import transfer_weights
 
 from .SiamABC_Tracker import SiamABCTracker
 
@@ -39,16 +38,60 @@ def load_model(
         map_location=map_location,
         weights_only=False,
     )
-    state_dict = {
-        k.lstrip("module").lstrip("."): v
-        for k, v in checkpoint.items()
-        if k.startswith("module.")
-    }
+    raw_state = checkpoint.get("state_dict", checkpoint)
+    if not isinstance(raw_state, dict):
+        raise RuntimeError(f"Unexpected checkpoint format in {checkpoint_path!r}")
+
+    state_dict = {}
+    for key, value in raw_state.items():
+        if not torch.is_tensor(value):
+            continue
+        clean_key = key[7:] if key.startswith("module.") else key
+        state_dict[clean_key] = value
 
     if strict:
         model.load_state_dict(state_dict, strict=True)
     else:
-        transfer_weights(model, state_dict)
+        model_state = model.state_dict()
+        compatible_state = {}
+        shape_mismatch = []
+        unexpected = []
+
+        for key, value in state_dict.items():
+            if key not in model_state:
+                unexpected.append(key)
+                continue
+            if model_state[key].shape != value.shape:
+                shape_mismatch.append(
+                    (key, tuple(value.shape), tuple(model_state[key].shape))
+                )
+                continue
+            compatible_state[key] = value
+
+        missing = [key for key in model_state.keys() if key not in compatible_state]
+        model.load_state_dict(compatible_state, strict=False)
+
+        total = max(1, len(model_state))
+        loaded = len(compatible_state)
+        pct = 100.0 * loaded / total
+        print(
+            f"[load_model] Loaded {loaded}/{total} tensors ({pct:.1f}%) from {checkpoint_path}"
+        )
+        if shape_mismatch:
+            print(
+                f"[load_model][warn] shape mismatches: {len(shape_mismatch)} "
+                f"(examples: {shape_mismatch[:3]})"
+            )
+        if unexpected:
+            print(
+                f"[load_model][warn] unexpected keys in checkpoint: {len(unexpected)} "
+                f"(examples: {unexpected[:3]})"
+            )
+        if missing:
+            print(
+                f"[load_model][warn] missing keys in checkpoint: {len(missing)} "
+                f"(examples: {missing[:3]})"
+            )
     return model
 
 

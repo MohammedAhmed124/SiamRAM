@@ -124,6 +124,7 @@ class SiamRAMTracker:
         ekf_meas_noise: float = 5.0,
         homo_max_corners: int = 200,
         homo_inlier_threshold: float = 0.50,
+        homography_mode: str = "classic",
         shrinkage_min_drop_frac: float = 0.06,
         shrinkage_max_lookback: int = 60,
         velocity_lookback: int = 3,
@@ -145,8 +146,12 @@ class SiamRAMTracker:
         tiny_search_expand_growth_factor: float = 1.3,
         tiny_search_expand_growth_every: int = 5,
         tiny_search_expand_max: float = 40.0,
+        max_proc_long_edge: int = 1280,
         entry_patience: int = 3,
         cand_collection_frames: int = 3,
+        osnet_max_candidate_batch: int = 0,
+        yolo_warmup_frames: int = 60,
+        yolo_warmup_center_scale: float = 0.4,
         vel_dir_hard_gate: float = 0.5,
         yolo_filter_class: bool = False,
         yolo_class_detect_frames: int = 5,
@@ -195,8 +200,9 @@ class SiamRAMTracker:
             vel_score_min_speed (any): if the EKF velocity magnitude is below this (px/frame) velocity scoring is skipped (returns neutral 0.5)
             ekf_process_noise (any): EKF process noise covariance scalar
             ekf_meas_noise (any): EKF measurement noise covariance scalar
-            homo_max_corners (any): max feature points extracted for homography estimation (unused directly; grid is used)
+            homo_max_corners (any): max GFTT feature points used by the accurate homography mode
             homo_inlier_threshold (any): minimum RANSAC inlier ratio to mark a homography as reliable
+            homography_mode (any): homography estimator mode; "classic" keeps old grid+affine RANSAC, "accurate" uses feature tracking + full homography RANSAC
             shrinkage_min_drop_frac (any): minimum fractional area drop to trigger shrinkage detection
             shrinkage_max_lookback (any): how many frames back shrinkage and drift detection looks
             velocity_lookback (any): how many frames back finite-difference velocity is computed over
@@ -218,8 +224,12 @@ class SiamRAMTracker:
             tiny_search_expand_growth_factor (any): ROI growth factor per interval for tiny objects
             tiny_search_expand_growth_every (any): growth interval (frames) for tiny object ROI
             tiny_search_expand_max (any): hard cap on tiny-object ROI expansion
+            max_proc_long_edge (any): processing resolution cap on the long frame edge
             entry_patience (any): consecutive low-score frames required before declaring occlusion
             cand_collection_frames (any): number of YOLO collection frames before the final DRM phase
+            osnet_max_candidate_batch (any): max detections per frame sent to OSNet; 0 disables capping
+            yolo_warmup_frames (any): initial frame count that uses centered warm-up ROI
+            yolo_warmup_center_scale (any): warm-up ROI side ratio relative to frame size
             vel_dir_hard_gate (any): if cosine similarity between candidate and expected velocity is below -this, velocity score is floored to 0.05
             yolo_filter_class (any): if True, YOLO detections are filtered to the target's class after warm-up
             yolo_class_detect_frames (any): stride used during the class warm-up period
@@ -259,6 +269,13 @@ class SiamRAMTracker:
         self.ekf_meas_noise = ekf_meas_noise
         self.homo_max_corners = homo_max_corners
         self.homo_inlier_threshold = homo_inlier_threshold
+        mode = str(homography_mode).strip().lower()
+        if mode not in {"classic", "accurate"} and self.debug:
+            print(
+                f"[homography] unsupported mode '{homography_mode}', "
+                "falling back to 'classic'"
+            )
+        self._homography_mode = mode if mode in {"classic", "accurate"} else "classic"
 
         self.shrinkage_min_drop_frac = shrinkage_min_drop_frac
         self.shrinkage_max_lookback = shrinkage_max_lookback
@@ -313,6 +330,12 @@ class SiamRAMTracker:
         self.tiny_search_expand_growth_factor = tiny_search_expand_growth_factor
         self.tiny_search_expand_growth_every = tiny_search_expand_growth_every
         self.tiny_search_expand_max = tiny_search_expand_max
+        self._max_proc_long_edge = max(1, int(max_proc_long_edge))
+        self._osnet_max_candidate_batch = max(0, int(osnet_max_candidate_batch))
+        self._yolo_warmup_frames = max(0, int(yolo_warmup_frames))
+        self._yolo_warmup_center_scale = float(
+            np.clip(yolo_warmup_center_scale, 0.05, 1.0)
+        )
 
         self.disable_camera_motion = disable_camera_motion
 
@@ -381,7 +404,7 @@ class SiamRAMTracker:
         """
         Same as the original except:
         1. _frame_scale is computed from the first frame so all subsequent
-            processing is capped at _MAX_PROC_LONG_EDGE px on the long axis.
+            processing is capped at the configured long-edge limit.
         2. The frame passed to the tracker and all internal state is in
             proc-frame (scaled) coordinates from the start.
         3. The caller-supplied bbox (full-frame pixels) is scaled down before
@@ -395,8 +418,8 @@ class SiamRAMTracker:
         h_fr, w_fr = frame.shape[:2]
         long_edge = max(h_fr, w_fr)
         self._frame_scale = (
-            self._MAX_PROC_LONG_EDGE / long_edge
-            if long_edge > self._MAX_PROC_LONG_EDGE
+            self._max_proc_long_edge / long_edge
+            if long_edge > self._max_proc_long_edge
             else 1.0
         )
 
@@ -606,8 +629,13 @@ class SiamRAMTracker:
             if is_exiting:
                 loss_cause = "out_of_frame"
             if self.debug:
+                iou_now = float(getattr(self.tracker, "latest_iou_score", 1.0))
+                iou_ema = float(getattr(self.tracker, "latest_iou_score_ema", iou_now))
+                iou_gate_pass = bool(getattr(self.tracker, "_last_iou_gate_pass", True))
                 print(
                     f"[occlusion entry] frame={self.frame_idx}  "
+                    f"score={score:.3f}  iou={iou_now:.3f}  iou_ema={iou_ema:.3f}  "
+                    f"iou_gate_pass={iou_gate_pass}  "
                     f"loss_cause={loss_cause}  "
                     f"out_of_frame={self._out_of_frame}  exit_edge={self._exit_edge}  "
                     f"entry_streak={entry_streak_val}"
@@ -1015,7 +1043,8 @@ class SiamRAMTracker:
     ) -> Tuple[np.ndarray, float]:
         """
         Runs YOLO on the search ROI for this frame, extracts appearance
-                    descriptors for every detection, and appends (bbox, desc) pairs to
+                    descriptors for detections (optionally capped by
+                    osnet_max_candidate_batch), and appends (bbox, desc) pairs to
                     _cand_frames. Also records the camera velocity vector for this frame
                     in _occ_cam_vels so the final phase can camera-compensate each
                     per-step displacement. Updates the distractor bank with any detection
@@ -1040,20 +1069,27 @@ class SiamRAMTracker:
         detections = self._yolo_detect(frame)
         self._last_yolo = detections
 
-        frame_cands = []
-        det_descs = _extract_descriptor(frame, detections) if detections else []
-        for bbox, desc in zip(detections, det_descs):
-            if desc is not None:
-                frame_cands.append((np.array(bbox, dtype=int), desc.copy()))
+        dets_for_desc = self._limit_osnet_candidates(detections)
+        det_descs = _extract_descriptor(frame, dets_for_desc) if dets_for_desc else []
+        frame_cands = [
+            (np.array(bbox, dtype=int), desc.copy())
+            for bbox, desc in zip(dets_for_desc, det_descs)
+            if desc is not None
+        ]
 
         self._cand_frames.append(frame_cands)
 
-        if self._use_distractor_bank:
-            for det, det_desc in zip(detections, det_descs):
-                held_box = self.held_box
-                assert held_box is not None
-                if _iou(det, held_box) >= self.tau_occ and det_desc is not None:
-                    self._distractor_bank.append(det_desc)
+        if self._use_distractor_bank and dets_for_desc:
+            held_box = self.held_box
+            assert held_box is not None
+            ious = self._iou_many_to_one(
+                np.asarray(dets_for_desc, dtype=np.float64), held_box
+            )
+            self._distractor_bank.extend(
+                det_desc
+                for det_desc, iou in zip(det_descs, ious)
+                if det_desc is not None and iou >= self.tau_occ
+            )
 
         collection_phase_num = self._occ_phase
         if self.debug:
@@ -1131,6 +1167,11 @@ class SiamRAMTracker:
 
         last_frame_cands = self._cand_frames[last_idx]
         last_cand_bboxes = [b for (b, _) in last_frame_cands]
+        last_cand_arr = (
+            np.asarray(last_cand_bboxes, dtype=np.float64)
+            if last_cand_bboxes
+            else np.empty((0, 4), dtype=np.float64)
+        )
 
         cand_vels = self._build_candidate_velocities(last_idx)
 
@@ -1206,12 +1247,11 @@ class SiamRAMTracker:
         def _find_cand_idx(
             drm_bbox,
         ):
-            best_iou, best_idx = 0.3, None
-            for i, cb in enumerate(last_cand_bboxes):
-                v = _iou(drm_bbox, cb)
-                if v > best_iou:
-                    best_iou, best_idx = v, i
-            return best_idx
+            if last_cand_arr.size == 0:
+                return None
+            ious = self._iou_many_to_one(last_cand_arr, drm_bbox)
+            best_idx = int(np.argmax(ious))
+            return best_idx if float(ious[best_idx]) > 0.3 else None
 
         final_scored = []
         for drm_bbox, drm_score in drm_results:
@@ -1377,8 +1417,10 @@ class SiamRAMTracker:
             (w, h): tuple of two ints, median object size in pixels, minimum 1px each
     """
         if self._size_history:
-            w = max(1, int(np.median([s[0] for s in self._size_history])))
-            h = max(1, int(np.median([s[1] for s in self._size_history])))
+            size_arr = np.asarray(self._size_history, dtype=np.float32)
+            med_wh = np.median(size_arr, axis=0)
+            w = max(1, int(med_wh[0]))
+            h = max(1, int(med_wh[1]))
         else:
             held_box = self.held_box
             assert held_box is not None
@@ -1614,36 +1656,47 @@ class SiamRAMTracker:
 
         return float(np.clip(raw, 0.0, 1.0))
 
-    def _estimate_homography(
-        self,
-        frame: np.ndarray,
-    ) -> Tuple[Optional[np.ndarray], bool, np.ndarray]:
+    @staticmethod
+    def _rescale_homography_from_scaled(
+        H_small: np.ndarray,
+        scale: float,
+    ) -> np.ndarray:
         """
-        Estimates the 2D rigid background motion between the previous frame
-                    and the current frame using sparse optical flow (LK) on a regular
-                    grid of background points (excluding the region around the tracked
-                    object). Fits an affine-partial-2D homography via RANSAC and marks it
-                    as reliable if the inlier ratio exceeds homo_inlier_threshold.
+        Convert a homography estimated in scaled-image coordinates to the
+        original frame coordinates.
+        """
+        s = float(scale)
+        S = np.array(
+            [
+                [s, 0.0, 0.0],
+                [0.0, s, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=np.float64,
+        )
+        S_inv = np.array(
+            [
+                [1.0 / (s + 1e-8), 0.0, 0.0],
+                [0.0, 1.0 / (s + 1e-8), 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=np.float64,
+        )
+        H_full = S_inv @ H_small @ S
+        if abs(float(H_full[2, 2])) > 1e-8:
+            H_full /= float(H_full[2, 2])
+        return H_full
 
-                    Operates at half resolution (SCALE=0.5) for speed. Rescales the
-                    translation components of the resulting matrix back to full resolution.
-                    Caches the grid of feature points so they are not recomputed when the
-                    frame size is unchanged.
-
-        Called at the top of every update() before either _normal_update or
-                    _occlusion_update runs. The homography is consumed in three places:
-                    the EKF predict step (to motion-compensate the state), _cam_vel_from_H
-                    (to compute camera velocity for score compensation), and
-                    _h_translation_magnitude (to classify loss cause). Everything related
-                    to camera motion compensation depends on this being accurate.
-        Args:
-            frame (any): current video frame as a numpy BGR array
-        Returns:
-            H: 3×3 np.ndarray homography matrix, or None if estimation failed
-            reliable: bool True when inlier ratio >= homo_inlier_threshold
-            gray: downscaled grayscale frame (stored as prev_gray next call)
-    """
-        _LK_PARAMS = dict(
+    def _estimate_homography_classic(
+        self,
+        prev_gray_scaled: np.ndarray,
+        gray: np.ndarray,
+        scale: float,
+    ) -> Tuple[Optional[np.ndarray], bool]:
+        """
+        Original fast homography path: grid points + affine partial RANSAC.
+        """
+        lk_params = dict(
             winSize=(20, 20),
             maxLevel=2,
             criteria=(
@@ -1652,27 +1705,6 @@ class SiamRAMTracker:
                 0.04,
             ),
         )
-        SCALE = self._flow_scale
-
-        small = cv2.resize(
-            frame, None, fx=SCALE, fy=SCALE, interpolation=cv2.INTER_LINEAR
-        )
-        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-
-        if self.disable_camera_motion:
-            return None, False, gray
-
-        if self.prev_gray is None:
-            return None, False, gray
-
-        if self.prev_gray.shape != gray.shape:
-            prev_gray_scaled = cv2.resize(
-                self.prev_gray,
-                (gray.shape[1], gray.shape[0]),
-                interpolation=cv2.INTER_LINEAR,
-            )
-        else:
-            prev_gray_scaled = self.prev_gray
 
         H = None
         reliable = False
@@ -1693,7 +1725,7 @@ class SiamRAMTracker:
 
         ref_box = self.held_box if self.held_box is not None else self.current_bbox
         if ref_box is not None:
-            x, y, w, h = (v * SCALE for v in map(int, ref_box))
+            x, y, w, h = (v * scale for v in map(int, ref_box))
             pad = max(4, int(max(w, h) * 0.15))
             inside = (
                 (grid[:, 0] >= x - pad)
@@ -1706,21 +1738,19 @@ class SiamRAMTracker:
             pts = grid.reshape(-1, 1, 2)
 
         if len(pts) < 6:
-            return H, reliable, gray
+            return H, reliable
 
         new_pts, status, _ = cv2.calcOpticalFlowPyrLK(
-            prev_gray_scaled, gray, pts, None, **_LK_PARAMS
+            prev_gray_scaled, gray, pts, None, **lk_params
         )
-
         if status is None:
-            return H, reliable, gray
+            return H, reliable
 
         ok = status.ravel() == 1
         good_old = pts[ok]
         good_new = new_pts[ok]
-
         if len(good_old) < 6:
-            return H, reliable, gray
+            return H, reliable
 
         A, inliers = cv2.estimateAffinePartial2D(
             good_old,
@@ -1730,16 +1760,199 @@ class SiamRAMTracker:
             maxIters=500,
             confidence=0.99,
         )
+        if A is None or inliers is None:
+            return H, reliable
 
-        if A is not None and inliers is not None:
-            inlier_ratio = float(inliers.sum()) / len(good_old)
-            reliable = inlier_ratio >= self.homo_inlier_threshold
-            H = np.eye(3, dtype=np.float64)
-            H[:2, :] = A
-            H[0, 2] /= SCALE
-            H[1, 2] /= SCALE
+        inlier_ratio = float(inliers.sum()) / len(good_old)
+        reliable = inlier_ratio >= self.homo_inlier_threshold
+        H = np.eye(3, dtype=np.float64)
+        H[:2, :] = A
+        H[0, 2] /= scale
+        H[1, 2] /= scale
+        return H, reliable
 
+    def _estimate_homography_accurate(
+        self,
+        prev_gray_scaled: np.ndarray,
+        gray: np.ndarray,
+        scale: float,
+    ) -> Tuple[Optional[np.ndarray], bool]:
+        """
+        Higher-accuracy path: GFTT features + LK tracking + forward/backward
+        consistency + full homography RANSAC.
+        """
+        lk_params = dict(
+            winSize=(24, 24),
+            maxLevel=3,
+            criteria=(
+                cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT,
+                30,
+                0.01,
+            ),
+        )
+
+        max_corners = max(32, int(self.homo_max_corners))
+        mask = np.full_like(prev_gray_scaled, 255, dtype=np.uint8)
+        ref_box = self.held_box if self.held_box is not None else self.current_bbox
+        if ref_box is not None:
+            x, y, w, h = (v * scale for v in map(int, ref_box))
+            pad = max(6, int(max(w, h) * 0.20))
+            x1 = max(0, int(x - pad))
+            y1 = max(0, int(y - pad))
+            x2 = min(mask.shape[1], int(x + w + pad))
+            y2 = min(mask.shape[0], int(y + h + pad))
+            if x2 > x1 and y2 > y1:
+                mask[y1:y2, x1:x2] = 0
+
+        pts0 = cv2.goodFeaturesToTrack(
+            prev_gray_scaled,
+            maxCorners=max_corners,
+            qualityLevel=0.01,
+            minDistance=7,
+            blockSize=7,
+            useHarrisDetector=False,
+            mask=mask,
+        )
+        if pts0 is None or len(pts0) < 8:
+            return None, False
+
+        pts1, st01, _ = cv2.calcOpticalFlowPyrLK(
+            prev_gray_scaled, gray, pts0, None, **lk_params
+        )
+        if pts1 is None or st01 is None:
+            return None, False
+
+        pts0_back, st10, _ = cv2.calcOpticalFlowPyrLK(
+            gray, prev_gray_scaled, pts1, None, **lk_params
+        )
+        if pts0_back is None or st10 is None:
+            return None, False
+
+        ok01 = st01.ravel() == 1
+        ok10 = st10.ravel() == 1
+        fb_err = np.linalg.norm(pts0_back - pts0, axis=2).ravel()
+        fb_ok = fb_err <= 1.5
+        keep = ok01 & ok10 & fb_ok
+        if int(np.count_nonzero(keep)) < 8:
+            return None, False
+
+        good_old = pts0[keep].reshape(-1, 2)
+        good_new = pts1[keep].reshape(-1, 2)
+
+        method = getattr(cv2, "USAC_MAGSAC", cv2.RANSAC)
+        H_small, inliers = cv2.findHomography(
+            good_old,
+            good_new,
+            method=method,
+            ransacReprojThreshold=2.5,
+            maxIters=2000,
+            confidence=0.995,
+        )
+        if H_small is None or inliers is None:
+            return None, False
+
+        inlier_ratio = float(inliers.sum()) / max(1, len(good_old))
+        reliable = inlier_ratio >= self.homo_inlier_threshold
+        H = self._rescale_homography_from_scaled(
+            np.asarray(H_small, dtype=np.float64), scale
+        )
+        return H, reliable
+
+    def _estimate_homography(
+        self,
+        frame: np.ndarray,
+    ) -> Tuple[Optional[np.ndarray], bool, np.ndarray]:
+        """
+        Estimate background motion homography between consecutive frames.
+
+        Mode selection:
+        - classic: original grid+affine RANSAC path (fast).
+        - accurate: feature+full-homography path with fallback to classic.
+        """
+        scale = self._flow_scale
+        small = cv2.resize(
+            frame, None, fx=scale, fy=scale, interpolation=cv2.INTER_LINEAR
+        )
+        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+
+        if self.disable_camera_motion:
+            return None, False, gray
+        if self.prev_gray is None:
+            return None, False, gray
+
+        if self.prev_gray.shape != gray.shape:
+            prev_gray_scaled = cv2.resize(
+                self.prev_gray,
+                (gray.shape[1], gray.shape[0]),
+                interpolation=cv2.INTER_LINEAR,
+            )
+        else:
+            prev_gray_scaled = self.prev_gray
+
+        if self._homography_mode == "accurate":
+            H, reliable = self._estimate_homography_accurate(
+                prev_gray_scaled=prev_gray_scaled,
+                gray=gray,
+                scale=scale,
+            )
+            if H is None:
+                H, reliable = self._estimate_homography_classic(
+                    prev_gray_scaled=prev_gray_scaled,
+                    gray=gray,
+                    scale=scale,
+                )
+            return H, reliable, gray
+
+        H, reliable = self._estimate_homography_classic(
+            prev_gray_scaled=prev_gray_scaled,
+            gray=gray,
+            scale=scale,
+        )
         return H, reliable, gray
+
+    def _limit_osnet_candidates(
+        self,
+        detections: List[np.ndarray],
+    ) -> List[np.ndarray]:
+        """
+        Cap detections routed to OSNet descriptor extraction.
+
+        A non-positive cap means "no limit".
+        """
+        cap = self._osnet_max_candidate_batch
+        if cap <= 0 or len(detections) <= cap:
+            return detections
+        return detections[:cap]
+
+    @staticmethod
+    def _iou_many_to_one(
+        boxes: np.ndarray,
+        box: np.ndarray,
+    ) -> np.ndarray:
+        """
+        Vectorized IoU between N boxes and one reference box.
+        """
+        if boxes.size == 0:
+            return np.empty((0,), dtype=np.float64)
+
+        a = np.asarray(boxes, dtype=np.float64)
+        b = np.asarray(box, dtype=np.float64)
+
+        ax2 = a[:, 0] + a[:, 2]
+        ay2 = a[:, 1] + a[:, 3]
+        bx2 = b[0] + b[2]
+        by2 = b[1] + b[3]
+
+        ix1 = np.maximum(a[:, 0], b[0])
+        iy1 = np.maximum(a[:, 1], b[1])
+        ix2 = np.minimum(ax2, bx2)
+        iy2 = np.minimum(ay2, by2)
+
+        inter_w = np.maximum(0.0, ix2 - ix1)
+        inter_h = np.maximum(0.0, iy2 - iy1)
+        inter = inter_w * inter_h
+        union = a[:, 2] * a[:, 3] + b[2] * b[3] - inter
+        return inter / (union + 1e-8)
 
     def _nudge_toward_nearest(
         self,
@@ -1769,32 +1982,41 @@ class SiamRAMTracker:
         ref = self.memory.best_descriptor()
         held_box = self.held_box
         assert held_box is not None
+        if not detections:
+            return held_box.copy()
+
         hcx = held_box[0] + held_box[2] / 2.0
         hcy = held_box[1] + held_box[3] / 2.0
 
-        det_descs = (
-            _extract_descriptor(frame, detections) if ref is not None and detections else []
+        det_descs = []
+        if ref is not None and detections:
+            dets_for_desc = self._limit_osnet_candidates(detections)
+            det_descs = _extract_descriptor(frame, dets_for_desc) if dets_for_desc else []
+
+        det_arr = np.asarray(detections, dtype=np.float64)
+        centers = np.column_stack(
+            (det_arr[:, 0] + det_arr[:, 2] / 2.0, det_arr[:, 1] + det_arr[:, 3] / 2.0)
         )
+        dists = np.hypot(centers[:, 0] - hcx, centers[:, 1] - hcy)
 
-        best_det, best_rank = None, float("inf")
-        for idx, det in enumerate(detections):
-            dcx = det[0] + det[2] / 2.0
-            dcy = det[1] + det[3] / 2.0
-            dist = np.hypot(dcx - hcx, dcy - hcy)
-            if ref is not None:
-                desc = det_descs[idx]
-                sim = _cos_sim(ref, desc) if desc is not None else 0.0
-                rank = dist * (1.0 - 0.5 * sim)
-            else:
-                rank = dist
-            if rank < best_rank:
-                best_rank, best_det = rank, det
+        if ref is not None:
+            sims = np.zeros((len(detections),), dtype=np.float64)
+            n_desc = min(len(det_descs), len(detections))
+            if n_desc > 0:
+                sims[:n_desc] = np.asarray(
+                    [
+                        _cos_sim(ref, det_descs[i]) if det_descs[i] is not None else 0.0
+                        for i in range(n_desc)
+                    ],
+                    dtype=np.float64,
+                )
+            ranks = dists * (1.0 - 0.5 * sims)
+        else:
+            ranks = dists
 
-        if best_det is None:
-            return held_box.copy()
-
-        dcx = best_det[0] + best_det[2] / 2.0
-        dcy = best_det[1] + best_det[3] / 2.0
+        best_det = det_arr[int(np.argmin(ranks))]
+        dcx = float(best_det[0] + best_det[2] / 2.0)
+        dcy = float(best_det[1] + best_det[3] / 2.0)
         new_cx = hcx + self.nudge_alpha * (dcx - hcx)
         new_cy = hcy + self.nudge_alpha * (dcy - hcy)
 
@@ -1818,9 +2040,9 @@ class SiamRAMTracker:
                         normal objects   → roi_start_expand, yolo_search_expand, etc.
                         tiny/far objects → tiny_roi_start_expand, tiny_yolo_search_expand, etc.
 
-                    During the first 30 frames or after a failed recovery (recovered_early_occlusion=False),
-                    a wide centred region (40% of frame each axis) is used to give the
-                    tracker time to stabilise.
+                    During the configured warm-up window or after a failed recovery
+                    (recovered_early_occlusion=False), a centred region is used to
+                    give the tracker time to stabilise.
 
                     For out-of-frame targets, the ROI is a strip pinned to the relevant edge.
                     For in-frame targets, the ROI is a square centred on the EKF search centre,
@@ -1840,9 +2062,9 @@ class SiamRAMTracker:
         h_fr, w_fr = frame.shape[:2]
         max_side = min(w_fr, h_fr)
 
-        if self.frame_idx <= 60 or not self.recovered_early_occlusion:
+        if self.frame_idx <= self._yolo_warmup_frames or not self.recovered_early_occlusion:
             self.recovered_early_occlusion = False
-            scale = 0.4
+            scale = self._yolo_warmup_center_scale
             bw = int(w_fr * scale)
             bh = int(h_fr * scale)
             x = (w_fr - bw) // 2
@@ -1943,23 +2165,24 @@ class SiamRAMTracker:
             crop, conf=self.yolo_conf, iou=self.yolo_iou_thr, verbose=False, imgsz=320
         )
         boxes = []
-        if results and results[0].boxes is not None:
-            for box in results[0].boxes:
-                xyxy = box.xyxy[0].cpu().numpy()
-                cls_id = int(box.cls[0].cpu().numpy())
-                if (
-                    self._yolo_filter_class
-                    and self._target_class_id is not None
-                    and cls_id != self._target_class_id
-                ):
-                    continue
-                x1, y1, x2, y2 = xyxy
-                boxes.append(
-                    np.array(
-                        [int(x1) + rx, int(y1) + ry, int(x2 - x1), int(y2 - y1)],
-                        dtype=int,
-                    )
+        if results and results[0].boxes is not None and len(results[0].boxes) > 0:
+            result_boxes = results[0].boxes
+            xyxy_all = result_boxes.xyxy.detach().cpu().numpy()
+            cls_all = result_boxes.cls.detach().cpu().numpy().astype(np.int32, copy=False)
+            if self._yolo_filter_class and self._target_class_id is not None:
+                keep = cls_all == int(self._target_class_id)
+                xyxy_all = xyxy_all[keep]
+            if xyxy_all.size > 0:
+                xywh = np.empty((xyxy_all.shape[0], 4), dtype=np.int32)
+                xywh[:, 0] = xyxy_all[:, 0].astype(np.int32, copy=False) + rx
+                xywh[:, 1] = xyxy_all[:, 1].astype(np.int32, copy=False) + ry
+                xywh[:, 2] = (xyxy_all[:, 2] - xyxy_all[:, 0]).astype(
+                    np.int32, copy=False
                 )
+                xywh[:, 3] = (xyxy_all[:, 3] - xyxy_all[:, 1]).astype(
+                    np.int32, copy=False
+                )
+                boxes = [xywh[i].copy() for i in range(xywh.shape[0])]
         self._yolo_cache = boxes
         return boxes
 
@@ -2105,8 +2328,10 @@ class SiamRAMTracker:
             return False
         h_fr, w_fr = frame.shape[:2]
         frame_area = float(h_fr * w_fr)
-        obj_w = float(np.median([s[0] for s in self._size_history]))
-        obj_h = float(np.median([s[1] for s in self._size_history]))
+        size_arr = np.asarray(self._size_history, dtype=np.float32)
+        med_wh = np.median(size_arr, axis=0)
+        obj_w = float(med_wh[0])
+        obj_h = float(med_wh[1])
         obj_area = obj_w * obj_h
         return (obj_area / (frame_area + 1e-8)) < self.long_distance_area_fraction
 
@@ -2446,7 +2671,7 @@ class SiamRAMTracker:
         frame_vels = np.diff(centers, axis=0)
         n = len(frame_vels)
 
-        weights = np.array([decay ** (n - 1 - i) for i in range(n)], dtype=float)
+        weights = decay ** np.arange(n - 1, -1, -1, dtype=np.float64)
         weights /= weights.sum()
 
         avg = (weights[:, None] * frame_vels).sum(axis=0)
@@ -2506,20 +2731,27 @@ class SiamRAMTracker:
         results = self.yolo.predict(
             crop, conf=self.yolo_conf, iou=self.yolo_iou_thr, verbose=False, imgsz=320
         )
-        if not results or results[0].boxes is None:
+        if not results or results[0].boxes is None or len(results[0].boxes) == 0:
             return
 
-        best_iou, best_cls = 0.0, None
-        for box in results[0].boxes:
-            bx1, by1, bx2, by2 = box.xyxy[0].cpu().numpy()
-            cls_id = int(box.cls[0].cpu().numpy())
-            det = np.array(
-                [int(bx1) + x1, int(by1) + y1, int(bx2 - bx1), int(by2 - by1)],
-                dtype=int,
+        result_boxes = results[0].boxes
+        xyxy_all = result_boxes.xyxy.detach().cpu().numpy()
+        cls_all = result_boxes.cls.detach().cpu().numpy().astype(np.int32, copy=False)
+
+        det_xywh = np.column_stack(
+            (
+                xyxy_all[:, 0] + x1,
+                xyxy_all[:, 1] + y1,
+                xyxy_all[:, 2] - xyxy_all[:, 0],
+                xyxy_all[:, 3] - xyxy_all[:, 1],
             )
-            iou = _iou(det, self.current_bbox)
-            if iou > best_iou:
-                best_iou, best_cls = iou, cls_id
+        ).astype(np.int32, copy=False)
+        ious = self._iou_many_to_one(
+            det_xywh.astype(np.float64, copy=False), self.current_bbox
+        )
+        best_idx = int(np.argmax(ious))
+        best_iou = float(ious[best_idx])
+        best_cls = int(cls_all[best_idx])
 
         if best_iou >= 0.3 and best_cls is not None:
             self._class_votes[best_cls] = self._class_votes.get(best_cls, 0) + 1
@@ -2621,7 +2853,7 @@ class SiamRAMTracker:
         frame: np.ndarray,
     ) -> np.ndarray:
         """
-        Downscale frame to at most _MAX_PROC_LONG_EDGE on the long axis.
+        Downscale frame to at most the configured long-edge cap.
         Uses self._frame_scale set once during initialize().
 
         Returns the original frame unchanged if _frame_scale == 1.0 (no copy,

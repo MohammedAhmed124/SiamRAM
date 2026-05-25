@@ -32,6 +32,7 @@ class AppearanceMemory:
         tau_sim: float = 0.85,
         window_W: int = 5,
         mmin: int = 3,
+        distractor_bank_maxlen: int = 50,
     ):
         """
         Initialise the AppearanceMemory.
@@ -54,6 +55,7 @@ class AppearanceMemory:
         self.window_W = window_W
         self.mmin = mmin
         self._drm: deque = deque(maxlen=drm_capacity)
+        self._distractor_bank: deque = deque(maxlen=max(0, distractor_bank_maxlen))
         self._t: int = 0
 
     def reset(
@@ -64,7 +66,58 @@ class AppearanceMemory:
         """
         self._buf.clear()
         self._drm.clear()
+        self._distractor_bank.clear()
         self._t = 0
+
+    def add_distractor(
+        self,
+        desc: np.ndarray,
+    ) -> None:
+        """
+        Add one distractor descriptor to the negative bank.
+        """
+        if desc is None or self._distractor_bank.maxlen == 0:
+            return
+        self._distractor_bank.append(np.asarray(desc, dtype=float).copy())
+
+    def extend_distractor_bank(
+        self,
+        descs: List[np.ndarray],
+    ) -> None:
+        """
+        Add multiple distractor descriptors to the negative bank.
+        """
+        if self._distractor_bank.maxlen == 0 or not descs:
+            return
+        for desc in descs:
+            if desc is None:
+                continue
+            self._distractor_bank.append(np.asarray(desc, dtype=float).copy())
+
+    def get_distractor_bank(
+        self,
+    ) -> List[np.ndarray]:
+        """
+        Return a copy-friendly list view of distractor descriptors.
+        """
+        return list(self._distractor_bank)
+
+    @staticmethod
+    def _cos_sim_many_to_one(
+        lhs: np.ndarray,
+        rhs: np.ndarray,
+    ) -> np.ndarray:
+        """
+        Vectorized cosine similarity between N descriptors and one descriptor.
+        """
+        a = np.asarray(lhs, dtype=np.float64)
+        if a.size == 0:
+            return np.empty((0,), dtype=np.float64)
+        b = np.asarray(rhs, dtype=np.float64)
+        dots = a @ b
+        a_norm = np.linalg.norm(a, axis=1)
+        b_norm = float(np.linalg.norm(b))
+        return dots / (a_norm * b_norm + 1e-8)
 
     def try_admit(
         self,
@@ -85,7 +138,12 @@ class AppearanceMemory:
         """
         iou_ok = _iou(bbox, prev_bbox) >= self.tau_iou
         if self._buf:
-            med = float(np.median([e[0][2] * e[0][3] for e in self._buf]))
+            areas = np.fromiter(
+                (float(e[0][2] * e[0][3]) for e in self._buf),
+                dtype=np.float64,
+                count=len(self._buf),
+            )
+            med = float(np.median(areas))
             area_ok = abs(bbox[2] * bbox[3] - med) / (med + 1e-6) <= self.tau_area
         else:
             area_ok = True
@@ -147,14 +205,19 @@ class AppearanceMemory:
         ref = self.best_descriptor()
         if ref is None or not candidates:
             return None, -1.0
-        best_box, best_score = None, -1.0
         cand_descs = _extract_descriptor(frame, candidates)
-        for bbox, desc in zip(candidates, cand_descs):
-            if desc is None:
-                continue
-            s = _cos_sim(ref, desc)
-            if s > best_score:
-                best_score, best_box = s, bbox
+        valid_idx = [i for i, desc in enumerate(cand_descs) if desc is not None]
+        if not valid_idx:
+            return None, -1.0
+
+        valid_descs = np.asarray(
+            [cand_descs[i] for i in valid_idx],
+            dtype=np.float64,
+        )
+        sims = self._cos_sim_many_to_one(valid_descs, np.asarray(ref, dtype=np.float64))
+        best_local_idx = int(np.argmax(sims))
+        best_score = float(sims[best_local_idx])
+        best_box = candidates[valid_idx[best_local_idx]]
         if best_score >= threshold:
             return np.array(best_box, dtype=int), best_score
         return None, best_score
@@ -222,33 +285,40 @@ class AppearanceMemory:
 
         scored: List[Tuple[np.ndarray, float]] = []
         cand_descs = _extract_descriptor(frame, candidates)
+        drm_entries = list(self._drm)
 
-        for cand_bbox, cand_desc in zip(candidates, cand_descs):
+        precomp = []
+        for dk_bbox, dk_desc, rho_k in drm_entries:
+            dk_cx = dk_bbox[0] + dk_bbox[2] / 2.0
+            dk_cy = dk_bbox[1] + dk_bbox[3] / 2.0
+            motion_vec = np.array([dk_cx - ref_cx, dk_cy - ref_cy])
+            mot_norm = float(np.linalg.norm(motion_vec)) + 1e-8
+            pi_t = float(np.dot(velocity, motion_vec) / (vel_norm * mot_norm))
+            pi_t = max(0.0, pi_t)
+            age = max(0, self._t - rho_k)
+            s_mot_time = lam_mot * pi_t + lam_time * float(np.exp(-alpha * age))
+            if gamma > 0.0 and distractor_bank:
+                pen = max(_cos_sim(dk_desc, nu) for nu in distractor_bank)
+                s_mot_time -= gamma * pen
+            precomp.append((dk_bbox, dk_desc, s_mot_time))
+
+        cand_arr = np.asarray(candidates, dtype=np.float64)
+        cand_centers = np.column_stack(
+            (
+                cand_arr[:, 0] + cand_arr[:, 2] / 2.0,
+                cand_arr[:, 1] + cand_arr[:, 3] / 2.0,
+            )
+        )
+
+        for cand_idx, (cand_bbox, cand_desc) in enumerate(zip(candidates, cand_descs)):
             if cand_desc is None:
                 continue
 
             anchor_scores = []
-            for dk_bbox, dk_desc, rho_k in self._drm:
+            for dk_bbox, dk_desc, s_mot_time in precomp:
                 s_iou = lam_iou * _iou(dk_bbox, cand_bbox)
                 s_app = lam_app * _cos_sim(dk_desc, cand_desc)
-
-                dk_cx = dk_bbox[0] + dk_bbox[2] / 2.0
-                dk_cy = dk_bbox[1] + dk_bbox[3] / 2.0
-                motion_vec = np.array([dk_cx - ref_cx, dk_cy - ref_cy])
-                mot_norm = float(np.linalg.norm(motion_vec)) + 1e-8
-                pi_t = float(np.dot(velocity, motion_vec) / (vel_norm * mot_norm))
-                pi_t = max(0.0, pi_t)
-                s_mot = lam_mot * pi_t
-
-                age = max(0, self._t - rho_k)
-                s_time = lam_time * float(np.exp(-alpha * age))
-
-                raw = s_iou + s_app + s_mot + s_time
-
-                if gamma > 0.0 and distractor_bank:
-                    pen = max(_cos_sim(dk_desc, nu) for nu in distractor_bank)
-                    raw -= gamma * pen
-
+                raw = s_iou + s_app + s_mot_time
                 anchor_scores.append(raw)
 
             cand_score = max(anchor_scores) if anchor_scores else -np.inf
@@ -259,14 +329,14 @@ class AppearanceMemory:
                 and dist_sigma is not None
                 and dist_sigma > 0
             ):
-                cand_cx = cand_bbox[0] + cand_bbox[2] / 2.0
-                cand_cy = cand_bbox[1] + cand_bbox[3] / 2.0
+                cand_cx = float(cand_centers[cand_idx, 0])
+                cand_cy = float(cand_centers[cand_idx, 1])
                 d = np.hypot(cand_cx - search_cx, cand_cy - search_cy)
                 cand_score -= lam_dist * (1.0 - np.exp(-0.5 * (d / dist_sigma) ** 2))
 
             if lam_cand_dir > 0 and vel_norm > 1e-3:
-                cand_cx = cand_bbox[0] + cand_bbox[2] / 2.0
-                cand_cy = cand_bbox[1] + cand_bbox[3] / 2.0
+                cand_cx = float(cand_centers[cand_idx, 0])
+                cand_cy = float(cand_centers[cand_idx, 1])
                 cand_vec = np.array([cand_cx - ref_cx, cand_cy - ref_cy])
                 cand_d = float(np.linalg.norm(cand_vec)) + 1e-8
                 cos_dir = float(np.dot(velocity, cand_vec) / (vel_norm * cand_d))

@@ -14,22 +14,31 @@ tracking:
   search_image_scale: 0.3
   template_image_shift: 0.01
   template_image_scale: 0.01
+  occlusion_aug_prob: 0.0
+  occlusion_min_area: 0.04
+  occlusion_max_area: 0.11
+  occlusion_max_patches: 2
+  search_blur_prob: 0.15
+  search_jpeg_prob: 0.15
+  neg_cross_seq_prob: 0.45
+  neg_same_class_prob: 0.70
+  neg_shifted_prob: 0.40
 
 dataset:
   train_num_samples: 5000
   train_neg_ratio: 0.5
   val_num_samples: 500
-  val_neg_ratio: -0.001
+  val_neg_ratio: 0.5
   val_split_ratio: 0.1
 
 dataloader:
   train_batch_size: 32
   val_batch_size: 32
-  num_workers: 4
+  num_workers: 0
 
 model:
   _target_: models.SiamABC.model.SiamABC.SiamABCNet
-  weights_path: "checkpoints/SiamABC_init_checkpoint.pth"
+  weights_path: "checkpoints/inference_checkpoint.pth"
   backbone: custom_fbnet
   growth_factor: 1.2
   upsample: pixel_shuffle
@@ -46,20 +55,28 @@ model:
   max_layer: 4
   crop_template_features: false
   build_simsiam_heads: false
+  build_iou_head: true
 
 training:
-  num_epochs: 7
+  num_epochs: 40
   start_epoch: 1
+  train_mode: heads_only
+  stage1_epochs: 0
+  stage1_mode: heads_only
+  stage2_mode: heads_only
+  stage2_warmup_epochs: 0
   backbone_lr: 1.0e-5
   head_lr: 2.0e-4
   weight_decay: 1.0e-4
   warmup_epochs: 3
   eta_min: 1.0e-6
-  log_every: 10
+  batch_level_logs: true
+  log_every: 1
 
 loss:
   cls_weight: 1
   bbox_weight: 1
+  iou_weight: 1
   focal_alpha: 0.25
   focal_gamma: 1.5
 

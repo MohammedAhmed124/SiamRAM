@@ -27,7 +27,7 @@ tracker:
   windowing: cosine
   total_stride: 16
   score_size: 16
-  N: 10
+  N: 40 #10
   dynamic_update: true
   similarity_score: false
   stride: 2
@@ -37,7 +37,7 @@ tracker:
   search_context: 2
   instance_size: 256
   template_size: 128
-  memory_window_size: 20
+  memory_window_size: 60  #20
   dynamic_update_threshold: 0.85
   running_confidence_floor_value: 0.50
   iou_threshold: 0.6
@@ -64,18 +64,18 @@ ram_tracker_impl: "experiment"
 
 # Extra params used only when ram_tracker_impl == "experiment".
 ram_tracker_experiment:
-  spike_reject_enabled: true
+  spike_reject_enabled: True
   spike_reject_min_frames: 3
   spike_reject_min_score: 0.0
   spike_reject_history_window: 40
   spike_reject_min_history: 5
 
   # speed trigger
-  spike_reject_ratio: 1.5
+  spike_reject_ratio: 2.5
   spike_reject_abs_norm_min: 0.0
 
   # settle/commit
-  spike_reject_settle_ratio: 1.3
+  spike_reject_settle_ratio: 0.7
   spike_reject_settle_abs_norm_max: 0.30
   spike_reject_settle_frames: 1
   spike_reject_watch_max_frames: 8
@@ -100,15 +100,32 @@ ram_tracker_experiment:
   distractor_mode_roi_min_side: 32 # Minimum ROI side length in pixels to avoid tiny crops.
   distractor_drm_lam_app: 1.00 # Distractor-mode DRM appearance weight (separate from occlusion DRM weights).
   distractor_drm_lam_iou: 0.25 # Distractor-mode DRM IoU weight to keep candidates near the expected focus box.
-  distractor_drm_lam_dist: 0.4 # Distractor-mode DRM center-distance penalty weight (penalizes far candidates).
+  distractor_drm_lam_dist: 1 # Distractor-mode DRM center-distance penalty weight (penalizes far candidates).
   distractor_drm_gamma: 2 # Distractor-mode DRM negative-bank penalty weight (EdgeDAM-style suppressor).
   distractor_drm_dist_sigma_factor: 2.5 # Controls how quickly distance penalty grows with center offset.
   distractor_drm_bank_topk: 5 # Use most recent K distractors for similarity penalty during distractor-mode scoring.
-  distractor_compare_mode: "drm" # Candidate ranking mode in distractor mode: "drm" (appearance+distance+negative-bank) or "ram" (appearance-only ranking).
+  distractor_compare_mode: "ram" # Candidate ranking mode in distractor mode: "drm" (appearance+distance+negative-bank) or "ram" (appearance-only ranking).
   distractor_mode_update_memory: false # Keep RAM/DRM admission disabled while in distractor mode (recommended to avoid memory contamination).
   distractor_mode_exit_reinit_enabled: true # If true, exit distractor mode by re-initializing ONLY dynamic template/search state on the stabilized real object (static template stays unchanged).
-  distractor_mode_exit_stable_frames: 4 # Need this many consecutive frames on the same object before re-init + exit.
+  distractor_mode_exit_stable_frames: 6 # Need this many consecutive frames on the same object before re-init + exit.
   distractor_mode_exit_same_iou: 0.60 # "Same object" continuity gate: IoU(current real, previous real) must be >= this value.
+  distractor_mode_anchor_ekf_enabled: true # Propagate distractor-mode focus with a dedicated EKF from the last trusted anchor.
+  distractor_mode_anchor_uncertainty_roi_scale: 0.0 # Extra ROI padding (pixels) = EKF uncertainty * this factor.
+  distractor_mode_anchor_uncertainty_roi_cap: 96.0 # Cap extra ROI padding from uncertainty growth.
+  distractor_mode_mahalanobis_gate_enabled: true # Reject ROI candidates that are motion-inconsistent with EKF-predicted anchor state.
+  distractor_mode_mahalanobis_threshold: 9.21 # 2D chi-square gate (~99% confidence).
+  distractor_mode_mahalanobis_meas_var: 25.0 # Added measurement variance (px^2) in Mahalanobis gating.
+  distractor_mode_switch_margin: 0.08 # Minimum top1-top2 score margin required to switch identity in distractor mode.
+  distractor_mode_ambiguity_hold_frames: 2 # Hold current anchor focus for this many ambiguous frames before allowing a switch.
+  distractor_mode_reentry_cooldown_frames: 12 # After resolved exit, block immediate re-entry to reduce ping-pong.
+  distractor_mode_post_exit_memory_freeze_frames: 8 # Frames to skip RAM/DRM admissions after resolved exit.
+  distractor_mode_post_exit_template_freeze_frames: 8 # Frames to keep dynamic template update disabled after resolved exit.
+  distractor_mode_behavior_mode: "standard" # "standard" = normal distractor-mode logic, "overlap_motion_lock" = hold motion-model bbox during heavy target-distractor overlap.
+  distractor_mode_overlap_motion_lock_enabled: true # If true, when top candidate overlaps distractors heavily, hold motion-model bbox instead of switching identity.
+  distractor_mode_overlap_iou_enter: 0.35 # Enter overlap-motion lock when max IoU(best candidate, distractors) reaches this value.
+  distractor_mode_overlap_iou_exit: 0.15 # Consider overlap cleared when max IoU falls to/below this value.
+  distractor_mode_overlap_clear_frames: 3 # Need this many consecutive clear-overlap frames to release lock.
+  distractor_mode_overlap_lock_max_frames: 24 # Safety cap: force release if lock lasts this many frames.
   distractor_focus_dist_penalty_enabled: true # Add extra penalty when prediction drifts far from snapped target focus area.
   distractor_focus_dist_penalty_weight: 0.35 # Max extra score drop from distance penalty.
   distractor_focus_dist_soft_radius: 0.60 # No distance penalty inside this normalized radius around focus bbox center.
@@ -154,9 +171,16 @@ ram_tracker:
   occ_siam_margin: 0.8
   nudge_alpha: 0.0
   entry_patience: 1
-  enter_occlusion_on_loss: true
+  enter_occlusion_on_loss: True
+  block_distractor_mode_on_camera_motion: True
+  block_occlusion_on_camera_motion: True
+  camera_motion_heavy_disp_threshold: 15.0
+  camera_motion_heavy_norm_threshold: 0.35
+  early_occlusion_entry_n_frames: -1 # If >=0: entering occlusion at frame_idx <= this value uses early-occlusion mode for that episode.
+  early_occlusion_max_frames: -1 # Legacy duration-based early flag after successful reacquisition (used only when early_occlusion_entry_n_frames < 0).
+  occlusion_use_ram_until_drm_full: False # During occlusion recovery, use RAM matching until DRM bank reaches its configured capacity.
   # Warm-up ROI behavior (center crop) used in early frames or after failed recovery.
-  yolo_warmup_frames: 60
+  yolo_warmup_frames: 0
   yolo_warmup_center_scale: 0.4
   # Processing resolution cap for long edge. 1280 preserves current behavior.
   max_proc_long_edge: 1280
@@ -165,8 +189,8 @@ ram_tracker:
   cand_collection_frames: 1
   drm_tau_sim: 0.6
   drm_mmin: 3
-  drm_capacity: 20
-  drm_margin: 0.6
+  drm_capacity: 50
+  drm_margin: 0.8
   drm_skip_threshold: 23
   drm_top_k: 3
   drm_gamma: 0
@@ -176,7 +200,7 @@ ram_tracker:
   drm_lam_cand_vel: 0.0
   drm_lam_dist: 0.0
   drm_lam_cand_dir: 0.0
-  drm_lam_time: 0.0
+  drm_lam_time: 0.3
   drm_lam_iou: 0.0
   drm_lam_mot: 0.0
   
@@ -208,9 +232,56 @@ ram_tracker:
   tiny_search_expand_growth_every: 50
   tiny_search_expand_max: 40.0
 
-  # Homography estimator mode: "classic" (existing fast grid+affine) or
-  # "accurate" (feature-tracked full homography, more robust but slower).
-  homography_mode: "accurate"
+  # Camera-motion engine:
+  # - "classic": existing fast grid+affine path
+  # - "accurate": feature-tracked full homography
+  # - "botsort": BoT-SORT-inspired GMC estimator from Distractors-experimental
+  homography_mode: "classic"
+  # BoT-SORT-inspired engine config (used only when homography_mode == "botsort").
+  botsort_motion_model: "partial_affine" # partial_affine | full_affine | homography
+  botsort_motion_work_scale: 0.65
+  botsort_motion_bbox_pad: 0.50
+  botsort_motion_grid_rows: 5
+  botsort_motion_grid_cols: 7
+  botsort_motion_max_corners_per_cell: 16
+  botsort_motion_quality_level: 0.01
+  botsort_motion_min_distance: 7
+  botsort_motion_block_size: 7
+  botsort_motion_lk_win_size: 17
+  botsort_motion_lk_max_level: 2
+  botsort_motion_fb_max_error: 1.5
+  botsort_motion_ransac_reproj_threshold: 3.0
+  botsort_motion_ransac_confidence: 0.99
+  botsort_motion_ransac_max_iters: 1500
+  botsort_motion_min_inliers: 24
+  botsort_motion_min_inlier_ratio: 0.35
+  botsort_motion_max_median_residual: 4.0
+  botsort_motion_min_coverage_cells: 5
+  botsort_motion_max_translation_frac: 0.25
+  botsort_motion_min_scale: 0.70
+  botsort_motion_max_scale: 1.40
+  botsort_motion_max_rotation_deg: 25.0
+  botsort_motion_residual_mad_multiplier: 4.0
+  botsort_motion_residual_min_threshold: 18
+  botsort_motion_residual_max_fraction: 0.22
+  botsort_motion_residual_min_area: 12
+  botsort_motion_dynamic_dilate: 7
+  botsort_motion_feature_detect_interval: 2
+  botsort_motion_min_points_to_redetect: 96
+  botsort_motion_max_track_points: 260
+  botsort_motion_enable_dynamic_mask: true
+  botsort_motion_residual_update_interval: 2
+  botsort_motion_use_fallback_transform: true
+  # Valid-only GMC prior injection (BoT-SORT style): warp last trusted box using
+  # camera motion, then use it as the tracker search prior in normal tracking.
+  gmc_prior_enabled: true
+  gmc_prior_require_reliable_h: true
+  gmc_prior_skip_in_distractor_mode: true
+  gmc_prior_max_translation_frac: 0.25
+  gmc_prior_min_scale: 0.70
+  gmc_prior_max_scale: 1.40
+  gmc_prior_max_rotation_deg: 25.0
+  gmc_prior_max_corner_displacement_frac: 0.25
 
   disable_camera_motion: False
   

@@ -80,10 +80,12 @@ class SiamRAMTracker:
         descriptor_backend: str = "osnet",
         osnet_model_name: str = "osnet_x1_0",
         osnet_model_path: str = "",
+        osnet_pretrained_checkpoint: str = "imagenet",
         osnet_device: str = "auto",
         conf_threshold: float = 0.60,
         occ_siam_reacq_threshold=0.8,
         reacq_threshold: float = 0.55,
+        reacq_confirm_frames: int = 1,
         yolo_conf: float = 0.30,
         yolo_iou: float = 0.45,
         app_match_threshold: float = 0.72,
@@ -174,6 +176,7 @@ class SiamRAMTracker:
             yolo_weights (any): path to YOLO weights file used for re-detection
             conf_threshold (any): tracker score below this triggers the entry streak counter
             reacq_threshold (any): minimum tracker score to accept a candidate as the target during phase 0
+            reacq_confirm_frames (any): consecutive frames required after Stage-3 verify before leaving occlusion
             yolo_conf (any): minimum YOLO detection confidence
             yolo_iou (any): NMS IoU threshold passed to YOLO
             app_match_threshold (any): minimum DRM score required to accept a reacquisition
@@ -239,6 +242,7 @@ class SiamRAMTracker:
             descriptor_backend=descriptor_backend,
             osnet_model_name=osnet_model_name,
             osnet_model_path=osnet_model_path,
+            osnet_pretrained_checkpoint=osnet_pretrained_checkpoint,
             osnet_device=osnet_device,
         )
 
@@ -324,6 +328,7 @@ class SiamRAMTracker:
         self._vel_score_min_speed = vel_score_min_speed
         self._entry_patience = max(1, entry_patience)
         self._cand_collection_frames = max(1, cand_collection_frames)
+        self._reacq_confirm_frames = max(1, int(reacq_confirm_frames))
 
         self.tiny_roi_start_expand = tiny_roi_start_expand
         self.tiny_yolo_search_expand = tiny_yolo_search_expand
@@ -377,6 +382,8 @@ class SiamRAMTracker:
 
         self._occ_phase: int = 0
         self._pending_candidates: List = []
+        self._reacq_confirm_active: bool = False
+        self._reacq_confirm_streak: int = 0
 
         self._cand_frames: List = []
         self._occ_cam_vels: List = []
@@ -463,6 +470,8 @@ class SiamRAMTracker:
         self._occ_frames = 0
         self._occ_phase = 0
         self._pending_candidates = []
+        self._reacq_confirm_active = False
+        self._reacq_confirm_streak = 0
         self.recovered_early_occlusion = True
         self._last_H = None
         self._last_H_reliable = False
@@ -901,12 +910,89 @@ class SiamRAMTracker:
                     self._exit_edge = "top"
                 self._out_of_frame = True
 
+        if self._reacq_confirm_active:
+            return self._occ_phase_reacq_confirm(frame)
         if self._occ_phase == 0:
             return self._occ_phase_siam(frame)
         elif 1 <= self._occ_phase <= self._cand_collection_frames:
             return self._occ_phase_collect(frame)
         else:
             return self._occ_phase_final_drm(frame)
+
+    def _begin_reacq_confirmation(
+        self,
+        frame: np.ndarray,
+        bbox: np.ndarray,
+        score: float,
+    ) -> Tuple[np.ndarray, float]:
+        """
+        Start tentative lock-on after a successful Stage-3 verification.
+
+        The tracker must stay above reacq_threshold for
+        `_reacq_confirm_frames` consecutive frames before exiting occlusion.
+        """
+        seed_bbox = self._clamp_bbox_to_frame(np.array(bbox, dtype=int), frame)
+        self.tracker.tracking_state.bbox = seed_bbox.copy()
+        self._cand_frames = []
+        self._occ_cam_vels = []
+        self._occ_phase = 0
+        self._reacq_confirm_active = True
+        self._reacq_confirm_streak = 1 if score >= self.reacq_threshold else 0
+        if self.debug:
+            print(
+                f"[occ frame {self._occ_frames}] phase=reacq_confirm_start  "
+                f"score={score:.3f}  streak={self._reacq_confirm_streak}/"
+                f"{self._reacq_confirm_frames}"
+            )
+        return self.held_box, score
+
+    def _reset_reacq_confirmation(
+        self,
+    ) -> None:
+        self._reacq_confirm_active = False
+        self._reacq_confirm_streak = 0
+
+    def _occ_phase_reacq_confirm(
+        self,
+        frame: np.ndarray,
+    ) -> Tuple[np.ndarray, float]:
+        """
+        Confirmation sub-stage after Stage-3 candidate verification.
+
+        Success: require N consecutive frames with score >= reacq_threshold.
+        Failure: fall back to EKF-propagated held_box and restart occlusion phases.
+        """
+        held_box = self.held_box
+        assert held_box is not None
+        pred_bbox, score, _ = self.tracker.update(frame)
+        pred_bbox = np.array(pred_bbox, dtype=int)
+        conf_ok = score >= self.reacq_threshold
+        if conf_ok:
+            self._reacq_confirm_streak += 1
+            if self.debug:
+                print(
+                    f"[occ frame {self._occ_frames}] phase=reacq_confirm  "
+                    f"score={score:.3f}  streak={self._reacq_confirm_streak}/"
+                    f"{self._reacq_confirm_frames}"
+                )
+            if self._reacq_confirm_streak >= self._reacq_confirm_frames:
+                self._reset_reacq_confirmation()
+                self.recovered_early_occlusion = True
+                desc = _extract_descriptor(frame, pred_bbox)
+                return self._commit_reacquisition(frame, pred_bbox, desc, score)
+            return self.held_box, score
+
+        if self.debug:
+            print(
+                f"[occ frame {self._occ_frames}] phase=reacq_confirm  "
+                f"score={score:.3f}  streak_broken -> restart"
+            )
+        self._reset_reacq_confirmation()
+        self._cand_frames = []
+        self._occ_cam_vels = []
+        self._occ_phase = 0
+        self.tracker.tracking_state.bbox = held_box.copy()
+        return self.held_box, 0.0
 
     def _occ_phase_siam(
         self,
@@ -1297,13 +1383,15 @@ class SiamRAMTracker:
                 )
 
             if verify_score >= self.reacq_threshold:
-                self.recovered_early_occlusion = True
-                desc = _extract_descriptor(frame, verify_bbox)
-                self._cand_frames = []
-                self._occ_cam_vels = []
-                return self._commit_reacquisition(
-                    frame, verify_bbox, desc, verify_score
-                )
+                if self._reacq_confirm_frames <= 1:
+                    self.recovered_early_occlusion = True
+                    desc = _extract_descriptor(frame, verify_bbox)
+                    self._cand_frames = []
+                    self._occ_cam_vels = []
+                    return self._commit_reacquisition(
+                        frame, verify_bbox, desc, verify_score
+                    )
+                return self._begin_reacq_confirmation(frame, verify_bbox, verify_score)
 
         _reset()
         return self.held_box, 0.0
@@ -1353,6 +1441,7 @@ class SiamRAMTracker:
         self._pending_candidates = []
         self._cand_frames = []
         self._occ_cam_vels = []
+        self._reset_reacq_confirmation()
         self._entry_streak = 0
         self.tracker.enable_tta()
         self.tracker.dynamic_update = self.tracker.tracking_config["dynamic_update"]

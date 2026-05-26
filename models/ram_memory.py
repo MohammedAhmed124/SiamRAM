@@ -287,6 +287,12 @@ class AppearanceMemory:
         cand_descs = _extract_descriptor(frame, candidates)
         drm_entries = list(self._drm)
 
+        distractor_arr = (
+            np.asarray(list(distractor_bank), dtype=np.float64)
+            if gamma > 0.0 and distractor_bank
+            else None
+        )
+
         precomp = []
         for dk_bbox, dk_desc, rho_k in drm_entries:
             dk_cx = dk_bbox[0] + dk_bbox[2] / 2.0
@@ -297,8 +303,8 @@ class AppearanceMemory:
             pi_t = max(0.0, pi_t)
             age = max(0, self._t - rho_k)
             s_mot_time = lam_mot * pi_t + lam_time * float(np.exp(-alpha * age))
-            if gamma > 0.0 and distractor_bank:
-                pen = max(_cos_sim(dk_desc, nu) for nu in distractor_bank)
+            if distractor_arr is not None:
+                pen = float(np.max(self._cos_sim_many_to_one(distractor_arr, dk_desc)))
                 s_mot_time -= gamma * pen
             precomp.append((dk_bbox, dk_desc, s_mot_time))
 

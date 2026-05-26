@@ -36,6 +36,7 @@ Concretely, it provides six categories of helpers:
    needed arithmetic and device-management helpers.
 """
 
+from pathlib import Path
 from typing import Any, Optional, Sequence, Tuple, Union
 
 import cv2
@@ -84,13 +85,115 @@ _OSNET_EXTRACTOR: Optional[_OSNetDescriptorExtractor] = None
 _DESCRIPTOR_BACKEND: str = "osnet"
 _OSNET_MODEL_NAME: str = "osnet_x1_0"
 _OSNET_MODEL_PATH: str = ""
+_OSNET_PRETRAINED_CHECKPOINT: str = "imagenet"
 _OSNET_DEVICE: str = "auto"
+_OSNET_PRETRAINED_DEFAULTS: set[str] = {"", "default", "imagenet", "torchreid_imagenet"}
+_OSNET_REID_PRESET_TO_DRIVE: dict[str, dict[str, str]] = {
+    "reid_market1501": {
+        "model_name": "osnet_x1_0",
+        "filename": "osnet_x1_0_market_256x128_amsgrad_ep150_stp60_lr0.0015_b64_fb10_softmax_labelsmooth_flip.pth",
+        "file_id": "1vduhq5DpN2q1g4fYEZfPI17MJeh9qyrA",
+    },
+    "reid_dukemtmcreid": {
+        "model_name": "osnet_x1_0",
+        "filename": "osnet_x1_0_duke_256x128_amsgrad_ep150_stp60_lr0.0015_b64_fb10_softmax_labelsmooth_flip.pth",
+        "file_id": "1QZO_4sNf4hdOKKKzKc-TZU9WW1v6zQbq",
+    },
+    "reid_msmt17": {
+        "model_name": "osnet_x1_0",
+        "filename": "osnet_x1_0_msmt17_256x128_amsgrad_ep150_stp60_lr0.0015_b64_fb10_softmax_labelsmooth_flip.pth",
+        "file_id": "112EMUfBPYeYg70w-syK6V6Mx8-Qb9Q1M",
+    },
+    "reid_msmt17_combineall": {
+        "model_name": "osnet_x1_0",
+        "filename": "osnet_x1_0_msmt17_combineall_256x128_amsgrad_ep150_stp60_lr0.0015_b64_fb10_softmax_labelsmooth_flip_jitter.pth",
+        "file_id": "1IosIFlLiulGIjwW3H8uMRmx3MzPwf86x",
+    },
+}
+_OSNET_REID_MIN_BYTES = 1_000_000
+
+
+def _ensure_osnet_reid_checkpoint(preset_key: str, preset_cfg: dict[str, str]) -> str:
+    root_dir = Path(__file__).resolve().parents[1]
+    reid_dir = root_dir / "checkpoints" / "reid"
+    reid_dir.mkdir(parents=True, exist_ok=True)
+
+    out_file = reid_dir / preset_cfg["filename"]
+    if out_file.exists() and out_file.stat().st_size >= _OSNET_REID_MIN_BYTES:
+        return str(out_file)
+
+    try:
+        import gdown
+    except Exception as exc:
+        raise RuntimeError(
+            "gdown is required to fetch OSNet ReID presets. "
+            "Install dependencies or set osnet_model_path manually."
+        ) from exc
+
+    if out_file.exists():
+        out_file.unlink()
+
+    url = f"https://drive.google.com/uc?id={preset_cfg['file_id']}"
+    print(f"[osnet] downloading preset '{preset_key}' -> {out_file}")
+    output_path = gdown.download(url=url, output=str(out_file), quiet=False)
+    if not output_path or not out_file.exists() or out_file.stat().st_size < _OSNET_REID_MIN_BYTES:
+        raise RuntimeError(
+            f"Failed to download OSNet ReID preset '{preset_key}' from {url}. "
+            "Try again later or set osnet_model_path to a local checkpoint."
+        )
+
+    return str(out_file)
+
+
+def _resolve_osnet_model_path(
+    osnet_model_name: str,
+    osnet_model_path: str,
+    osnet_pretrained_checkpoint: str,
+) -> str:
+    explicit_path = osnet_model_path.strip()
+    if explicit_path:
+        explicit_file = Path(explicit_path).expanduser()
+        if not explicit_file.is_file():
+            raise FileNotFoundError(
+                f"osnet_model_path='{osnet_model_path}' does not exist or is not a file."
+            )
+        return str(explicit_file.resolve())
+
+    preset_key = osnet_pretrained_checkpoint.strip().lower()
+    if preset_key in _OSNET_PRETRAINED_DEFAULTS:
+        return ""
+
+    if preset_key in {"custom", "local"}:
+        raise ValueError(
+            "osnet_pretrained_checkpoint is set to 'custom' but osnet_model_path is empty. "
+            "Set osnet_model_path to a local ReID checkpoint file."
+        )
+
+    if preset_key not in _OSNET_REID_PRESET_TO_DRIVE:
+        options = sorted(_OSNET_REID_PRESET_TO_DRIVE.keys())
+        options.extend(["custom", "imagenet"])
+        raise ValueError(
+            f"Unsupported osnet_pretrained_checkpoint='{osnet_pretrained_checkpoint}'. "
+            f"Supported values: {', '.join(options)}."
+        )
+
+    preset_cfg = _OSNET_REID_PRESET_TO_DRIVE[preset_key]
+    expected_name = preset_cfg["model_name"].lower()
+    current_name = osnet_model_name.strip().lower()
+    if current_name != expected_name:
+        raise ValueError(
+            f"osnet_pretrained_checkpoint='{preset_key}' requires "
+            f"osnet_model_name='{preset_cfg['model_name']}', but got '{osnet_model_name}'."
+        )
+
+    return _ensure_osnet_reid_checkpoint(preset_key, preset_cfg)
 
 
 def configure_descriptor_backend(
     descriptor_backend: str = "osnet",
     osnet_model_name: str = "osnet_x1_0",
     osnet_model_path: str = "",
+    osnet_pretrained_checkpoint: str = "imagenet",
     osnet_device: str = "auto",
 ) -> None:
     """
@@ -100,11 +203,18 @@ def configure_descriptor_backend(
     uses the newly configured settings.
     """
     global _OSNET_EXTRACTOR
-    global _DESCRIPTOR_BACKEND, _OSNET_MODEL_NAME, _OSNET_MODEL_PATH, _OSNET_DEVICE
+    global _DESCRIPTOR_BACKEND
+    global _OSNET_MODEL_NAME, _OSNET_MODEL_PATH, _OSNET_PRETRAINED_CHECKPOINT
+    global _OSNET_DEVICE
 
     _DESCRIPTOR_BACKEND = descriptor_backend.strip().lower()
     _OSNET_MODEL_NAME = osnet_model_name.strip()
-    _OSNET_MODEL_PATH = osnet_model_path.strip()
+    _OSNET_PRETRAINED_CHECKPOINT = osnet_pretrained_checkpoint.strip().lower()
+    _OSNET_MODEL_PATH = _resolve_osnet_model_path(
+        osnet_model_name=_OSNET_MODEL_NAME,
+        osnet_model_path=osnet_model_path,
+        osnet_pretrained_checkpoint=_OSNET_PRETRAINED_CHECKPOINT,
+    )
     _OSNET_DEVICE = osnet_device.strip().lower()
     _OSNET_EXTRACTOR = None
 

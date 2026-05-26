@@ -183,6 +183,7 @@ yolo11n.pt
 checkpoints/**.pth
 checkpoints/**.onnx
 checkpoints/**.engine
+checkpoints/reid/
 yolo11n.pt
 debug_frames/
 
@@ -190,3 +191,4 @@ yolo11n.onnx
 
 data_imgs/
 training/checkpoints
+

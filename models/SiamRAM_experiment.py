@@ -84,10 +84,12 @@ class SiamRAMExperimentTracker:
         descriptor_backend: str = "osnet",
         osnet_model_name: str = "osnet_x1_0",
         osnet_model_path: str = "",
+        osnet_pretrained_checkpoint: str = "imagenet",
         osnet_device: str = "auto",
         conf_threshold: float = 0.60,
         occ_siam_reacq_threshold=0.8,
         reacq_threshold: float = 0.55,
+        reacq_confirm_frames: int = 1,
         yolo_conf: float = 0.30,
         yolo_iou: float = 0.45,
         app_match_threshold: float = 0.72,
@@ -301,6 +303,7 @@ class SiamRAMExperimentTracker:
             yolo_weights (any): path to YOLO weights file used for re-detection
             conf_threshold (any): tracker score below this triggers the entry streak counter
             reacq_threshold (any): minimum tracker score to accept a candidate as the target during phase 0
+            reacq_confirm_frames (any): consecutive frames required after Stage-3 verify before leaving occlusion
             yolo_conf (any): minimum YOLO detection confidence
             yolo_iou (any): NMS IoU threshold passed to YOLO
             app_match_threshold (any): minimum DRM score required to accept a reacquisition
@@ -373,6 +376,7 @@ class SiamRAMExperimentTracker:
             descriptor_backend=descriptor_backend,
             osnet_model_name=osnet_model_name,
             osnet_model_path=osnet_model_path,
+            osnet_pretrained_checkpoint=osnet_pretrained_checkpoint,
             osnet_device=osnet_device,
         )
 
@@ -535,6 +539,7 @@ class SiamRAMExperimentTracker:
         self._vel_score_min_speed = vel_score_min_speed
         self._entry_patience = max(1, entry_patience)
         self._cand_collection_frames = max(1, cand_collection_frames)
+        self._reacq_confirm_frames = max(1, int(reacq_confirm_frames))
 
         self.tiny_roi_start_expand = tiny_roi_start_expand
         self.tiny_yolo_search_expand = tiny_yolo_search_expand
@@ -595,6 +600,14 @@ class SiamRAMExperimentTracker:
         self._conf_history: deque = deque(maxlen=conf_history_len)
         self._center_history: deque = deque(maxlen=200)
         self._cam_vel_history: deque = deque(maxlen=200)
+
+        self._heavy_motion_cache_frame_idx: int = -1
+        self._heavy_motion_cache_weighted_disp: float = 0.0
+        self._heavy_motion_cache_inst_disp: float = 0.0
+
+        self._spike_step_norms: deque = deque(
+            maxlen=max(2, int(spike_reject_history_window))
+        )
 
         self._vel_dir_hard_gate = vel_dir_hard_gate
         self._yolo_filter_class = yolo_filter_class
@@ -798,6 +811,8 @@ class SiamRAMExperimentTracker:
 
         self._occ_phase: int = 0
         self._pending_candidates: List = []
+        self._reacq_confirm_active: bool = False
+        self._reacq_confirm_streak: int = 0
 
         self._cand_frames: List = []
         self._occ_cam_vels: List = []
@@ -891,11 +906,14 @@ class SiamRAMExperimentTracker:
         self._size_history.clear()
         self.memory.reset()
         self._conf_history.clear()
+        self._spike_step_norms.clear()
         self._cam_disp_history.clear()
         self._yolo_cache = []
         self._occ_frames = 0
         self._occ_phase = 0
         self._pending_candidates = []
+        self._reacq_confirm_active = False
+        self._reacq_confirm_streak = 0
         self.recovered_early_occlusion = True
         self._last_H = None
         self._last_H_reliable = False
@@ -1067,33 +1085,10 @@ class SiamRAMExperimentTracker:
         )
         self._spike_debug_speed_norm = float(speed_norm)
 
-        hist = list(self._conf_history)
-        if len(hist) < self._spike_reject_min_history + 1:
+        if len(self._spike_step_norms) < self._spike_reject_min_history:
             return False, None, speed_norm, 0.0, 1.0, None
 
-        lookback = min(len(hist), self._spike_reject_history_window + 1)
-        hist = hist[-lookback:]
-        speed_norms = []
-        for i in range(1, len(hist)):
-            prev_entry = hist[i - 1]
-            curr_entry = hist[i]
-            b0 = np.asarray(prev_entry[0], dtype=float)
-            b1 = np.asarray(curr_entry[0], dtype=float)
-            h_step = curr_entry[2] if len(curr_entry) > 2 else None
-            h_rel = bool(curr_entry[3]) if len(curr_entry) > 3 else False
-            if not h_rel:
-                h_step = None
-            step_speed_norm = self._camera_compensated_step_norm(
-                prev_bbox=b0,
-                curr_bbox=b1,
-                H=h_step,
-            )
-            speed_norms.append(step_speed_norm)
-
-        if len(speed_norms) < self._spike_reject_min_history:
-            return False, None, speed_norm, 0.0, 1.0, None
-
-        baseline_norm = float(np.median(np.asarray(speed_norms, dtype=float)))
+        baseline_norm = float(np.median(np.asarray(self._spike_step_norms, dtype=float)))
         ratio = speed_norm / (baseline_norm + 1e-6)
         self._spike_debug_baseline_norm = float(baseline_norm)
         self._spike_debug_ratio = float(ratio)
@@ -1137,6 +1132,28 @@ class SiamRAMExperimentTracker:
         if not np.isfinite(npx) or not np.isfinite(npy):
             return None
         return np.array([float(npx - px), float(npy - py)], dtype=float)
+
+    def _record_spike_step_norm(
+        self,
+        new_bbox: np.ndarray,
+        H: Optional[np.ndarray],
+        H_reliable: bool,
+    ) -> None:
+        """
+        Appends an incremental camera-compensated step norm so that
+        _evaluate_hard_jump_candidate does not have to recompute the entire
+        baseline window from _conf_history each frame.
+        """
+        if not self._conf_history:
+            return
+        prev_bbox = self._conf_history[-1][0]
+        h_step = H if bool(H_reliable) else None
+        step = self._camera_compensated_step_norm(
+            prev_bbox=np.asarray(prev_bbox, dtype=float),
+            curr_bbox=np.asarray(new_bbox, dtype=float),
+            H=h_step,
+        )
+        self._spike_step_norms.append(float(step))
 
     def _camera_compensated_step_norm(
         self,
@@ -1984,9 +2001,15 @@ class SiamRAMExperimentTracker:
             desc = _extract_descriptor(frame, pred_bbox)
             if desc is not None:
                 recent = bank[-self._jump_reject_distractor_penalty_bank_topk:]
-                sims = [float(_cos_sim(desc, d)) for d in recent if d is not None]
-                if sims:
-                    top_sim = max(sims)
+                recent_valid = [d for d in recent if d is not None]
+                if recent_valid:
+                    bank_arr = np.asarray(recent_valid, dtype=np.float64)
+                    desc_arr = np.asarray(desc, dtype=np.float64)
+                    dots = bank_arr @ desc_arr
+                    bank_norms = np.linalg.norm(bank_arr, axis=1)
+                    desc_norm = float(np.linalg.norm(desc_arr))
+                    sims = dots / (bank_norms * desc_norm + 1e-8)
+                    top_sim = float(np.max(sims))
                     sim_floor = self._jump_reject_distractor_penalty_sim_floor
                     frac = max(0.0, (top_sim - sim_floor) / (1.0 - sim_floor + 1e-8))
                     app_penalty = self._jump_reject_distractor_penalty_weight * frac
@@ -2483,6 +2506,11 @@ class SiamRAMExperimentTracker:
         self.current_bbox = pred_bbox.copy()
         self.held_box = pred_bbox.copy()
         self._size_history.append((int(pred_bbox[2]), int(pred_bbox[3])))
+        self._record_spike_step_norm(
+            new_bbox=pred_bbox,
+            H=self._last_H,
+            H_reliable=self._last_H_reliable,
+        )
         self._conf_history.append(
             (
                 pred_bbox.copy(),
@@ -2664,12 +2692,89 @@ class SiamRAMExperimentTracker:
                     self._exit_edge = "top"
                 self._out_of_frame = True
 
+        if self._reacq_confirm_active:
+            return self._occ_phase_reacq_confirm(frame)
         if self._occ_phase == 0:
             return self._occ_phase_siam(frame)
         elif 1 <= self._occ_phase <= self._cand_collection_frames:
             return self._occ_phase_collect(frame)
         else:
             return self._occ_phase_final_drm(frame)
+
+    def _begin_reacq_confirmation(
+        self,
+        frame: np.ndarray,
+        bbox: np.ndarray,
+        score: float,
+    ) -> Tuple[np.ndarray, float]:
+        """
+        Start tentative lock-on after a successful Stage-3 verification.
+
+        The tracker must stay above reacq_threshold for
+        `_reacq_confirm_frames` consecutive frames before exiting occlusion.
+        """
+        seed_bbox = self._clamp_bbox_to_frame(np.array(bbox, dtype=int), frame)
+        self.tracker.tracking_state.bbox = seed_bbox.copy()
+        self._cand_frames = []
+        self._occ_cam_vels = []
+        self._occ_phase = 0
+        self._reacq_confirm_active = True
+        self._reacq_confirm_streak = 1 if score >= self.reacq_threshold else 0
+        if self.debug:
+            print(
+                f"[occ frame {self._occ_frames}] phase=reacq_confirm_start  "
+                f"score={score:.3f}  streak={self._reacq_confirm_streak}/"
+                f"{self._reacq_confirm_frames}"
+            )
+        return self.held_box, score
+
+    def _reset_reacq_confirmation(
+        self,
+    ) -> None:
+        self._reacq_confirm_active = False
+        self._reacq_confirm_streak = 0
+
+    def _occ_phase_reacq_confirm(
+        self,
+        frame: np.ndarray,
+    ) -> Tuple[np.ndarray, float]:
+        """
+        Confirmation sub-stage after Stage-3 candidate verification.
+
+        Success: require N consecutive frames with score >= reacq_threshold.
+        Failure: fall back to EKF-propagated held_box and restart occlusion phases.
+        """
+        held_box = self.held_box
+        assert held_box is not None
+        pred_bbox, score, _ = self.tracker.update(frame)
+        pred_bbox = np.array(pred_bbox, dtype=int)
+        conf_ok = score >= self.reacq_threshold
+        if conf_ok:
+            self._reacq_confirm_streak += 1
+            if self.debug:
+                print(
+                    f"[occ frame {self._occ_frames}] phase=reacq_confirm  "
+                    f"score={score:.3f}  streak={self._reacq_confirm_streak}/"
+                    f"{self._reacq_confirm_frames}"
+                )
+            if self._reacq_confirm_streak >= self._reacq_confirm_frames:
+                self._reset_reacq_confirmation()
+                self._set_recovered_early_occlusion_flag()
+                desc = _extract_descriptor(frame, pred_bbox)
+                return self._commit_reacquisition(frame, pred_bbox, desc, score)
+            return self.held_box, score
+
+        if self.debug:
+            print(
+                f"[occ frame {self._occ_frames}] phase=reacq_confirm  "
+                f"score={score:.3f}  streak_broken -> restart"
+            )
+        self._reset_reacq_confirmation()
+        self._cand_frames = []
+        self._occ_cam_vels = []
+        self._occ_phase = 0
+        self.tracker.tracking_state.bbox = held_box.copy()
+        return self.held_box, 0.0
 
     def _occ_phase_siam(
         self,
@@ -3170,13 +3275,15 @@ class SiamRAMExperimentTracker:
                 )
 
             if verify_score >= self.reacq_threshold:
-                self._set_recovered_early_occlusion_flag()
-                desc = _extract_descriptor(frame, verify_bbox)
-                self._cand_frames = []
-                self._occ_cam_vels = []
-                return self._commit_reacquisition(
-                    frame, verify_bbox, desc, verify_score
-                )
+                if self._reacq_confirm_frames <= 1:
+                    self._set_recovered_early_occlusion_flag()
+                    desc = _extract_descriptor(frame, verify_bbox)
+                    self._cand_frames = []
+                    self._occ_cam_vels = []
+                    return self._commit_reacquisition(
+                        frame, verify_bbox, desc, verify_score
+                    )
+                return self._begin_reacq_confirmation(frame, verify_bbox, verify_score)
 
         _reset()
         return self.held_box, 0.0
@@ -3226,6 +3333,7 @@ class SiamRAMExperimentTracker:
         self._pending_candidates = []
         self._cand_frames = []
         self._occ_cam_vels = []
+        self._reset_reacq_confirmation()
         self._entry_streak = 0
         self._distractor_mode_active = False
         self._distractor_mode_visual_reals = []
@@ -3281,6 +3389,11 @@ class SiamRAMExperimentTracker:
             cam_disp = np.array([ncx - cx, ncy - cy])
         self._cam_vel_history.append(cam_disp)
 
+        self._record_spike_step_norm(
+            new_bbox=ekf_bbox,
+            H=self._last_H,
+            H_reliable=self._last_H_reliable,
+        )
         self._conf_history.append(
             (
                 ekf_bbox.copy(),
@@ -4337,6 +4450,10 @@ class SiamRAMExperimentTracker:
             return
         if self.current_bbox is None:
             return
+        if self._last_H is None:
+            return
+        if self._gmc_prior_require_reliable_h and not self._last_H_reliable:
+            return
 
         valid, reason = self._gmc_motion_is_valid(self._last_H, frame)
         if not valid:
@@ -4447,8 +4564,15 @@ class SiamRAMExperimentTracker:
         """
         Returns (is_heavy, max_disp_px) used by camera-motion guards.
         """
-        weighted_disp = self._camera_motion_weighted_disp(frame=None)
-        inst_disp = self._h_translation_magnitude(self._last_H, frame)
+        if self._heavy_motion_cache_frame_idx == self.frame_idx:
+            weighted_disp = self._heavy_motion_cache_weighted_disp
+            inst_disp = self._heavy_motion_cache_inst_disp
+        else:
+            weighted_disp = self._camera_motion_weighted_disp(frame=None)
+            inst_disp = self._h_translation_magnitude(self._last_H, frame)
+            self._heavy_motion_cache_frame_idx = self.frame_idx
+            self._heavy_motion_cache_weighted_disp = float(weighted_disp)
+            self._heavy_motion_cache_inst_disp = float(inst_disp)
         max_disp = max(weighted_disp, inst_disp)
 
         ref_diag = self._motion_gate_reference_diag(frame, bbox_hint=bbox_hint)

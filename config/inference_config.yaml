@@ -81,7 +81,9 @@ ram_tracker:
   descriptor_backend: "osnet"
   # OSNet model name from torchreid (examples: osnet_x1_0, osnet_x0_75, osnet_ain_x1_0).
   osnet_model_name: "osnet_x1_0"
-  # Optional local OSNet weights path; empty means torchreid pretrained/cached weights.
+  # Pretrained weights source options: "imagenet", "reid_market1501", "reid_dukemtmcreid", "reid_msmt17", "reid_msmt17_combineall", "custom".
+  osnet_pretrained_checkpoint: "imagenet"
+  # Optional local OSNet weights path; if set, it overrides the preset above.
   osnet_model_path: ""
   # Device for descriptor extraction: "auto", "cuda", or "cpu".
   osnet_device: "auto"
@@ -91,6 +93,9 @@ ram_tracker:
   # Core Thresholds & Hysteresis
   conf_threshold: 0.50
   reacq_threshold: 0.7
+  # Require this many consecutive confident frames before leaving occlusion mode.
+  # Stage-3 verification must stay >= reacq_threshold for the whole window.
+  reacq_confirm_frames: 1
   occ_siam_reacq_threshold: 0.5
   app_match_threshold: 0.6
   occ_siam_margin: 0.5

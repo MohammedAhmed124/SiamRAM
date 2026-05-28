@@ -22,7 +22,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_CFG = BASE_DIR / "config" / "inference_config_experimental.yaml"
 DEFAULT_MANIFEST = BASE_DIR / "data" / "metadata" / "contestant_manifest.json"

@@ -19,9 +19,9 @@ python data_prep/build_yolo_target_classes.py \
 from __future__ import annotations
 
 import argparse
+import sys
 from collections import Counter
 from pathlib import Path
-import sys
 from typing import List, Optional
 
 import cv2

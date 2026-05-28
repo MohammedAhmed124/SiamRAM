@@ -2,8 +2,8 @@
 Generic dataset index builder for SiamRAM training.
 
 This script discovers tracking sequences automatically from a data root,
-extracts video frames into a SEPARATE parallel imgs root (data_imgs/ by default)
-when needed, then writes CSV indexes compatible with utils/dataset.py.
+extracts video frames alongside each sequence's video (under the data root by
+default) when needed, then writes CSV indexes compatible with utils/dataset.py.
 
 Frame extraction is skipped automatically for any sequence whose output
 img/ folder already exists and contains JPEG frames.
@@ -12,11 +12,8 @@ Folder layout after extraction:
     data/
         dataset1/
             basketball/
-                groundtruth_rect.txt   ← annotation stays here
+                annotation.txt
                 video.mp4
-    data_imgs/                         ← frames go here (separate from data/)
-        dataset1/
-            basketball/
                 img/
                     00000001.jpg
                     ...
@@ -33,10 +30,13 @@ frame_pattern column so pattern auto-detection in TrackingSequence is skipped.
 
 Typical usage:
     python data_prep/build_dataset_index.py
-    python data_prep/build_dataset_index.py --data /path/to/data --imgs-root /path/to/data_imgs
+    python data_prep/build_dataset_index.py --data /path/to/data --imgs-root /path/to/data
 
 Extra flags:
-    --imgs-root /path   Where extracted frames are stored (default: <base>/data_imgs)
+    --imgs-root /path   Where extracted frames are stored (default: --data root).
+                        Pass an explicit path here to keep frames separate from
+                        the source videos; otherwise frames land at
+                        data/<dataset>/<seq>/img/.
     --skip-extraction   Skip video-to-frames step entirely
     --jpg-quality 95    JPEG quality for extracted frames (default: 95)
     --workers 4         Parallel workers for frame extraction (default: 4)
@@ -46,15 +46,14 @@ from __future__ import annotations
 
 import argparse
 import re
-import subprocess
 import shutil
+import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
-from PIL import Image
-from PIL import UnidentifiedImageError
+from PIL import Image, UnidentifiedImageError
 from tqdm import tqdm
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -177,13 +176,14 @@ def _resolve_data_dir(path_value: Optional[str]) -> Path:
 def _resolve_imgs_root(path_value: Optional[str], data_root: Path) -> Path:
     """
     Resolve the imgs root directory.
-    Defaults to a sibling of data_root named 'data_imgs'.
-    E.g. if data_root is /project/data  → imgs_root is /project/data_imgs
+    Defaults to data_root itself so frames are extracted alongside their videos
+    under data/<dataset>/<seq>/img/. Pass an explicit --imgs-root to redirect
+    frames to a separate tree (legacy data_imgs/ layout).
     """
     if path_value:
         p = Path(path_value).expanduser()
         return p.resolve() if p.is_absolute() else (BASE_DIR / p).resolve()
-    return data_root.parent / "data_imgs"
+    return data_root
 
 
 def _seq_img_dir(seq_dir: Path, dataset_root: Path, imgs_root: Path, dataset_name: str) -> Path:
@@ -191,7 +191,7 @@ def _seq_img_dir(seq_dir: Path, dataset_root: Path, imgs_root: Path, dataset_nam
     Return the path where extracted frames for seq_dir should live inside imgs_root.
 
     Layout:  imgs_root / dataset_name / <relative path from dataset_root> / img
-    Example: data_imgs / dataset1     / basketball                        / img
+    Example: data / dataset1 / basketball / img
     """
     try:
         rel = seq_dir.relative_to(dataset_root)
@@ -644,7 +644,7 @@ def _resolve_frame_dir(
     Return the directory that actually contains the frame images for seq_dir.
 
     Priority:
-      1. Extracted frames in imgs_root (data_imgs/…/img/)
+      1. Extracted frames in imgs_root (data/<ds>/<seq>/img/ by default)
       2. Legacy img/ subfolder inside seq_dir
       3. seq_dir itself (frames at the sequence root)
     """
@@ -822,7 +822,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=(
             "Build a generic training dataset index CSV. "
-            "Extracts video frames into a separate imgs root (data_imgs/) "
+            "Extracts video frames alongside each sequence (under --data by default) "
             "and skips sequences whose frames are already present."
         )
     )
@@ -830,7 +830,8 @@ def parse_args() -> argparse.Namespace:
                    help="Data root containing dataset subfolders (auto-resolves data/dataset).")
     p.add_argument("--imgs-root", type=str, default=None,
                    help="Root where extracted frames are stored. "
-                        "Default: sibling of --data named 'data_imgs'.")
+                        "Default: same as --data, producing data/<ds>/<seq>/img/. "
+                        "Set this explicitly to keep frames in a separate tree.")
     p.add_argument("--output", type=Path, default=None,
                    help="Directory for CSV outputs (default: same as --data).")
     p.add_argument("--combined-name", type=str, default="train_dataframe.csv",

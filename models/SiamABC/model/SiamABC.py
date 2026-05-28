@@ -34,7 +34,7 @@ Modified from the FEAR tracker by PinataFarms:
 """
 
 import collections.abc
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, cast
 
 import torch
 import torch.nn as nn
@@ -48,21 +48,33 @@ from .blocks import (
     FastParallelPolarizedSelfAttention,
 )
 
-collections.Mapping = collections.abc.Mapping
-collections.MutableMapping = collections.abc.MutableMapping
-collections.Iterable = collections.abc.Iterable
-collections.Iterator = collections.abc.Iterator
-collections.Sequence = collections.abc.Sequence
-collections.MutableSequence = collections.abc.MutableSequence
-collections.Set = collections.abc.Set
-collections.MutableSet = collections.abc.MutableSet
-collections.Callable = collections.abc.Callable
-collections.Hashable = collections.abc.Hashable
-collections.Sized = collections.abc.Sized
-collections.Container = collections.abc.Container
-collections.ValuesView = collections.abc.ValuesView
-collections.KeysView = collections.abc.KeysView
-collections.ItemsView = collections.abc.ItemsView
+def _patch_collections_compat_aliases() -> None:
+    """
+    Restore deprecated `collections` aliases expected by legacy dependencies.
+    """
+    collections_any = cast(Any, collections)
+    alias_names = (
+        "Mapping",
+        "MutableMapping",
+        "Iterable",
+        "Iterator",
+        "Sequence",
+        "MutableSequence",
+        "Set",
+        "MutableSet",
+        "Callable",
+        "Hashable",
+        "Sized",
+        "Container",
+        "ValuesView",
+        "KeysView",
+        "ItemsView",
+    )
+    for alias in alias_names:
+        setattr(collections_any, alias, getattr(collections.abc, alias))
+
+
+_patch_collections_compat_aliases()
 
 
 class SiamABCNet(nn.Module):

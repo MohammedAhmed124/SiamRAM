@@ -7,7 +7,7 @@ frames and a long-term DRM bank for reliable re-acquisition.
 """
 
 from collections import deque
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, cast
 
 import numpy as np
 
@@ -221,7 +221,7 @@ class AppearanceMemory:
         ref = self.best_descriptor()
         if ref is None or not candidates:
             return None, -1.0
-        cand_descs = _extract_descriptor(frame, candidates)
+        cand_descs = cast(list[Optional[np.ndarray]], _extract_descriptor(frame, candidates))
         valid_idx = [i for i, desc in enumerate(cand_descs) if desc is not None]
         if not valid_idx:
             return None, -1.0
@@ -300,7 +300,7 @@ class AppearanceMemory:
         vel_norm = float(np.linalg.norm(velocity)) + 1e-8
 
         scored: List[Tuple[np.ndarray, float]] = []
-        cand_descs = _extract_descriptor(frame, candidates)
+        cand_descs = cast(list[Optional[np.ndarray]], _extract_descriptor(frame, candidates))
         drm_entries = list(self._drm)
 
         distractor_arr = (

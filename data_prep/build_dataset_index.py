@@ -280,7 +280,7 @@ def _extract_frames_cv2(video_path: Path, img_dir: Path, jpg_quality: int) -> in
     Returns the number of frames extracted, or 0 on failure.
     """
     try:
-        import cv2  # type: ignore
+        import cv2
     except ImportError:
         print("[error] Neither ffmpeg nor opencv-python is available.")
         return 0

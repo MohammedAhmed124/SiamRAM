@@ -195,6 +195,19 @@ line-ending = "auto"
 [tool.ruff.lint.isort]
 case-sensitive = true
 
+[tool.ruff.lint.per-file-ignores]
+"checkpoints/*.py" = ["D"]
+"containers/*.py" = ["D"]
+"data_prep/*.py" = ["D", "E402"]
+"models/SiamABC/**/*.py" = ["D", "E402"]
+"models/siamram/**/*.py" = ["D"]
+"notebooks/*.ipynb" = ["D", "E402"]
+"run_single_video.py" = ["D103"]
+"scripts/*.py" = ["D"]
+"tests/**/*.py" = ["D", "E402"]
+"utils/dataset.py" = ["D107"]
+"vis/test_model.py" = ["D103"]
+
 [tool.poe.executor]
 type = "simple"
 

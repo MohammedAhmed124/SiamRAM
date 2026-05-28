@@ -46,7 +46,6 @@ from numpy._typing import NDArray
 from torch import Tensor
 from torch.nn import Module
 
-
 BBoxLike = Union[np.ndarray, Sequence[float], Sequence[Sequence[float]]]
 DescriptorOutput = Union[Optional[np.ndarray], list[Optional[np.ndarray]]]
 
@@ -81,7 +80,144 @@ class _OSNetDescriptorExtractor:
         return features_t.cpu().numpy().astype(np.float32)
 
 
+class _SiameseDescriptorExtractor:
+    """
+    Descriptor backend that reuses the tracker's already-loaded SiamABC encoder
+    to produce appearance embeddings.
+
+    Compared to OSNet this:
+    - has no extra weights to download or extra GPU memory to allocate (the
+      encoder is already resident for the visual tracker);
+    - is "Siamese" in the same sense FEAR XS is: a small backbone trained to
+      produce a discriminative template embedding;
+    - emits whatever channel dim the underlying SiamABC neck/encoder projects
+      to. Cosine similarity works on any dim, so consumers don't need to know.
+
+    feature_source:
+        "neck"    — use model.get_features(crop). 256-d (with default config).
+                    Lower-dim, more semantic compression. Recommended default.
+        "encoder" — use model.feature_extractor(crop). 1024-d (with default
+                    config). More raw info but noisier and 4x heavier.
+
+    comparison_mode:
+        "xcorr"  — emit the full spatial (C, H, W) feature map, per-cell
+                   L2-normalized. Comparisons use 2D cross-correlation
+                   (`_cos_sim` dispatches automatically on shape). This is
+                   how SiamABC was trained — the right Siamese contract.
+        "pooled" — global average pool to a (C,) vector then L2-normalize.
+                   Comparisons fall back to vector cosine. Cheaper but
+                   discards the spatial info SiamABC actually uses.
+
+    Both feature_source options were trained for Siamese cross-correlation,
+    not pooled-vector ReID, so the "pooled" mode handicaps them. Default is
+    "xcorr".
+    """
+
+    _IMAGENET_MEAN: Tuple[float, float, float] = (0.485, 0.456, 0.406)
+    _IMAGENET_STD: Tuple[float, float, float] = (0.229, 0.224, 0.225)
+    _CROP_SIZE: int = 128
+    _ALLOWED_SOURCES: Tuple[str, ...] = ("neck", "encoder")
+    _ALLOWED_COMPARISONS: Tuple[str, ...] = ("xcorr", "pooled")
+
+    def __init__(
+        self,
+        siam_tracker: Any,
+        feature_source: str = "neck",
+        comparison_mode: str = "xcorr",
+    ) -> None:
+        if siam_tracker is None:
+            raise RuntimeError(
+                "Siamese descriptor backend requires a siam_tracker reference. "
+                "Ensure SiamRAMExperimentTracker is passing siam_tracker= to "
+                "configure_descriptor_backend()."
+            )
+        model = getattr(siam_tracker, "net", None)
+        if model is None or not hasattr(model, "feature_extractor"):
+            raise RuntimeError(
+                "Siamese descriptor backend: siam_tracker.net is missing or "
+                "does not expose a feature_extractor(crop) method."
+            )
+        source = feature_source.strip().lower() if feature_source else "neck"
+        if source not in self._ALLOWED_SOURCES:
+            raise ValueError(
+                f"Unsupported siamese_feature_source='{feature_source}'. "
+                f"Expected one of: {self._ALLOWED_SOURCES}."
+            )
+        if source == "neck" and not hasattr(model, "get_features"):
+            raise RuntimeError(
+                "siamese_feature_source='neck' requires siam_tracker.net to "
+                "expose get_features(crop); falling back to 'encoder' is "
+                "available via config."
+            )
+        mode = comparison_mode.strip().lower() if comparison_mode else "xcorr"
+        if mode not in self._ALLOWED_COMPARISONS:
+            raise ValueError(
+                f"Unsupported siamese_comparison_mode='{comparison_mode}'. "
+                f"Expected one of: {self._ALLOWED_COMPARISONS}."
+            )
+
+        self._model = model
+        self._feature_source = source
+        self._comparison_mode = mode
+        try:
+            self._device = next(model.parameters()).device
+        except StopIteration:
+            self._device = torch.device("cpu")
+        self._mean = torch.as_tensor(
+            self._IMAGENET_MEAN, dtype=torch.float32, device=self._device
+        ).view(1, 3, 1, 1)
+        self._std = torch.as_tensor(
+            self._IMAGENET_STD, dtype=torch.float32, device=self._device
+        ).view(1, 3, 1, 1)
+
+    @torch.no_grad()
+    def extract_batch(self, rgb_patches: list[np.ndarray]) -> np.ndarray:
+        if not rgb_patches:
+            return np.zeros((0, 0), dtype=np.float32)
+
+        resized = [
+            cv2.resize(
+                p, (self._CROP_SIZE, self._CROP_SIZE), interpolation=cv2.INTER_LINEAR
+            )
+            for p in rgb_patches
+        ]
+        arr = np.stack(resized, axis=0)  # (N, H, W, 3) uint8
+        tensor = torch.from_numpy(arr).to(self._device, dtype=torch.float32)
+        tensor = tensor.permute(0, 3, 1, 2).contiguous() / 255.0
+        tensor = (tensor - self._mean) / self._std
+
+        was_training = self._model.training
+        self._model.eval()
+        try:
+            if self._feature_source == "neck":
+                features = self._model.get_features(tensor)
+            else:
+                features = self._model.feature_extractor(tensor)
+        finally:
+            if was_training:
+                self._model.train()
+
+        if self._comparison_mode == "xcorr":
+            # Per-spatial-cell L2 normalization. Each (C,) channel vector at
+            # every spatial location ends up unit-length, so downstream
+            # cross-correlation produces a response map whose values are
+            # bounded in [-1, 1] per cell. The caller / _cos_sim dispatches
+            # on the 3D shape to do the conv2d-based comparison.
+            normalized = torch.nn.functional.normalize(features, p=2, dim=1)
+            return normalized.detach().cpu().numpy().astype(np.float32)
+
+        # comparison_mode == "pooled": global avg pool then L2-normalize the
+        # resulting vector so the standard cosine path applies.
+        pooled = features.mean(dim=(2, 3))
+        normalized = torch.nn.functional.normalize(pooled, p=2, dim=1)
+        return normalized.detach().cpu().numpy().astype(np.float32)
+
+
 _OSNET_EXTRACTOR: Optional[_OSNetDescriptorExtractor] = None
+_SIAMESE_EXTRACTOR: Optional[_SiameseDescriptorExtractor] = None
+_SIAM_TRACKER_REF: Any = None
+_SIAMESE_FEATURE_SOURCE: str = "neck"
+_SIAMESE_COMPARISON_MODE: str = "xcorr"
 _DESCRIPTOR_BACKEND: str = "osnet"
 _OSNET_MODEL_NAME: str = "osnet_x1_0"
 _OSNET_MODEL_PATH: str = ""
@@ -195,14 +331,36 @@ def configure_descriptor_backend(
     osnet_model_path: str = "",
     osnet_pretrained_checkpoint: str = "imagenet",
     osnet_device: str = "auto",
+    siam_tracker: Any = None,
+    siamese_feature_source: str = "neck",
+    siamese_comparison_mode: str = "xcorr",
 ) -> None:
     """
     Configure global descriptor extraction backend options.
 
-    This resets the lazy OSNet extractor instance so the next descriptor request
-    uses the newly configured settings.
+    Resets the lazy extractor instances so the next descriptor request uses the
+    newly configured settings. The `siam_tracker` and `siamese_feature_source`
+    arguments are only consulted by the `siamese` backend; they let the
+    descriptor reuse the visual tracker's encoder without re-loading weights.
+
+    Supported `descriptor_backend` values:
+        "osnet"   — torchreid OSNet (separate ReID network, OSNet-x1_0 = 512-d).
+        "siamese" — reuse siam_tracker.net's encoder + global avg pool. No
+                    extra weights. Dim depends on `siamese_feature_source`.
+
+    Supported `siamese_feature_source` values (ignored when backend != siamese):
+        "neck"    — model.get_features(crop), neck-projected (~256-d). Default.
+        "encoder" — model.feature_extractor(crop), raw encoder (~1024-d).
+
+    Supported `siamese_comparison_mode` values (ignored when backend != siamese):
+        "xcorr"  — keep the (C, H, W) feature map and compare via 2D
+                   cross-correlation peak. The Siamese-native comparison.
+                   Default.
+        "pooled" — global-avg-pool to (C,) and compare via cosine. Cheaper but
+                   throws away the spatial structure SiamABC was trained on.
     """
-    global _OSNET_EXTRACTOR
+    global _OSNET_EXTRACTOR, _SIAMESE_EXTRACTOR, _SIAM_TRACKER_REF
+    global _SIAMESE_FEATURE_SOURCE, _SIAMESE_COMPARISON_MODE
     global _DESCRIPTOR_BACKEND
     global _OSNET_MODEL_NAME, _OSNET_MODEL_PATH, _OSNET_PRETRAINED_CHECKPOINT
     global _OSNET_DEVICE
@@ -217,6 +375,14 @@ def configure_descriptor_backend(
     )
     _OSNET_DEVICE = osnet_device.strip().lower()
     _OSNET_EXTRACTOR = None
+    _SIAMESE_EXTRACTOR = None
+    _SIAM_TRACKER_REF = siam_tracker
+    _SIAMESE_FEATURE_SOURCE = (
+        siamese_feature_source.strip().lower() if siamese_feature_source else "neck"
+    )
+    _SIAMESE_COMPARISON_MODE = (
+        siamese_comparison_mode.strip().lower() if siamese_comparison_mode else "xcorr"
+    )
 
 
 def _get_osnet_extractor() -> _OSNetDescriptorExtractor:
@@ -232,6 +398,17 @@ def _get_osnet_extractor() -> _OSNetDescriptorExtractor:
             device=device,
         )
     return _OSNET_EXTRACTOR
+
+
+def _get_siamese_extractor() -> _SiameseDescriptorExtractor:
+    global _SIAMESE_EXTRACTOR
+    if _SIAMESE_EXTRACTOR is None:
+        _SIAMESE_EXTRACTOR = _SiameseDescriptorExtractor(
+            _SIAM_TRACKER_REF,
+            feature_source=_SIAMESE_FEATURE_SOURCE,
+            comparison_mode=_SIAMESE_COMPARISON_MODE,
+        )
+    return _SIAMESE_EXTRACTOR
 
 
 def _as_bbox_batch(bbox: BBoxLike) -> tuple[np.ndarray, bool]:
@@ -287,14 +464,17 @@ def _extract_descriptor(
         rgb_patches.append(cv2.cvtColor(patch_bgr, cv2.COLOR_BGR2RGB))
         valid_indices.append(idx)
 
-    if _DESCRIPTOR_BACKEND != "osnet":
+    if _DESCRIPTOR_BACKEND not in ("osnet", "siamese"):
         raise RuntimeError(
             f"Unsupported descriptor_backend='{_DESCRIPTOR_BACKEND}'. "
-            "Only 'osnet' is currently implemented."
+            "Supported values: 'osnet', 'siamese'."
         )
 
     if rgb_patches:
-        desc_batch = _get_osnet_extractor().extract_batch(rgb_patches)
+        if _DESCRIPTOR_BACKEND == "siamese":
+            desc_batch = _get_siamese_extractor().extract_batch(rgb_patches)
+        else:
+            desc_batch = _get_osnet_extractor().extract_batch(rgb_patches)
         for local_i, global_i in enumerate(valid_indices):
             output[global_i] = desc_batch[local_i]
 
@@ -352,6 +532,64 @@ def _iou(
     return inter / (union + 1e-8)
 
 
+_XCORR_MAX_SHIFT: int = 2
+
+
+def _xcorr_sim_2d(
+    a: np.ndarray,
+    b: np.ndarray,
+    max_shift: int = _XCORR_MAX_SHIFT,
+) -> float:
+    """
+    Spatial cross-correlation similarity between two (C, H, W) feature maps.
+
+    Both inputs are expected to be per-spatial-cell L2-normalized (each (C,)
+    channel vector at each (h, w) position is unit length). We treat one map
+    as a sliding kernel against a padded copy of the other and take the peak
+    response of conv2d. Dividing by H*W puts the result on roughly the same
+    scale as cosine similarity (typically in [-1, 1]).
+
+    This is the comparison the SiamABC encoder was actually trained for —
+    template-search cross-correlation — so it preserves the spatial structure
+    that global average pooling discards.
+    """
+    a_t = torch.as_tensor(a, dtype=torch.float32).unsqueeze(0)  # (1, C, H, W)
+    b_t = torch.as_tensor(b, dtype=torch.float32).unsqueeze(0)  # (1, C, H, W)
+    _, _, h, w = a_t.shape
+    pad = max(0, int(max_shift))
+    search = (
+        torch.nn.functional.pad(b_t, [pad, pad, pad, pad]) if pad > 0 else b_t
+    )
+    response = torch.nn.functional.conv2d(search, a_t)
+    denom = float(h * w) + 1e-8
+    return float(response.max()) / denom
+
+
+def _xcorr_sim_2d_many_to_one(
+    arr: np.ndarray,
+    ref: np.ndarray,
+    max_shift: int = _XCORR_MAX_SHIFT,
+) -> np.ndarray:
+    """
+    Batched cross-correlation: ref shape (C, H, W), arr shape (N, C, H, W).
+    Returns (N,) array of per-entry peak responses normalized by H*W.
+
+    Implementation reuses a single conv2d call with the kernel = ref and the
+    input = padded arr, so it scales linearly with N at one CUDA/CPU launch.
+    """
+    a_t = torch.as_tensor(arr, dtype=torch.float32)  # (N, C, H, W)
+    b_t = torch.as_tensor(ref, dtype=torch.float32).unsqueeze(0)  # (1, C, H, W)
+    _, _, h, w = a_t.shape
+    pad = max(0, int(max_shift))
+    inputs = (
+        torch.nn.functional.pad(a_t, [pad, pad, pad, pad]) if pad > 0 else a_t
+    )
+    response = torch.nn.functional.conv2d(inputs, b_t)  # (N, 1, 2p+1, 2p+1)
+    peaks = response.amax(dim=(1, 2, 3))  # (N,)
+    denom = float(h * w) + 1e-8
+    return (peaks / denom).cpu().numpy().astype(np.float64)
+
+
 def _cos_sim(
     a: np.ndarray,
     b: np.ndarray,
@@ -393,8 +631,28 @@ def _cos_sim(
             components are non-negative (grayscale intensities, histogram counts),
             values will typically lie in [0.0, 1.0]. A value near 1.0 means the two
             patches look nearly identical; near 0.0 means no visual similarity.
+
+    Shape-dispatch:
+        - 1D × 1D vectors  → standard cosine = dot product of L2-normalized vectors.
+                              Used by the OSNet backend and by the siamese "pooled" mode.
+        - 3D × 3D maps     → 2D cross-correlation peak (`_xcorr_sim_2d`). Used by
+                              the siamese "xcorr" mode where descriptors are spatial
+                              (C, H, W) feature maps with per-cell L2 normalization.
     """
-    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-8))
+    a_arr = np.asarray(a)
+    b_arr = np.asarray(b)
+    if a_arr.ndim == 1 and b_arr.ndim == 1:
+        return float(
+            np.dot(a_arr, b_arr)
+            / (np.linalg.norm(a_arr) * np.linalg.norm(b_arr) + 1e-8)
+        )
+    if a_arr.ndim == 3 and b_arr.ndim == 3:
+        return _xcorr_sim_2d(a_arr, b_arr)
+    raise ValueError(
+        "Unsupported descriptor shapes for _cos_sim: "
+        f"a.shape={a_arr.shape}, b.shape={b_arr.shape}. "
+        "Expected either two 1D vectors or two 3D (C, H, W) feature maps."
+    )
 
 
 def xyxy_to_xywh(

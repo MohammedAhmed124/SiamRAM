@@ -64,13 +64,15 @@ import warnings
 from collections import defaultdict
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 from omegaconf import OmegaConf
 
 from models.SiamABC.tracker.tracker_setup import get_tracker
-from models.SiamRAM import SiamRAMTracker
-from models.SiamRAM_experiment import SiamRAMExperimentTracker
+from models.siamram.config import (
+    OSNET_CHECKPOINT_CHOICES,
+    flatten_subsystem_overrides,
+)
+from models.siamram.tracker import SiamRAMExperimentTracker
 from vis.test_model import run_inference
 
 try:
@@ -766,11 +768,6 @@ def main():
     # Write the resolved paths back so the rest of the code uses them.
     args.weights_path = str(resolved_weights_path)
     config.ram_tracker.yolo_weights = str(resolved_yolo_path)
-    osnet_model_path_raw = str(getattr(config.ram_tracker, "osnet_model_path", "")).strip()
-    if osnet_model_path_raw:
-        config.ram_tracker.osnet_model_path = str(
-            _resolve_weights_path(osnet_model_path_raw)
-        )
     config.model.model_size = args.model_size
 
     # ------------------------------------------------------------------
@@ -800,20 +797,25 @@ def main():
             continuous=False,
         )
 
-    ram_impl = str(getattr(config, "ram_tracker_impl", "base")).strip().lower()
-    if ram_impl in {"base", "siamram"}:
-        tracker_cls = SiamRAMTracker
-    elif ram_impl in {"experiment", "exp", "siamram_experiment"}:
-        tracker_cls = SiamRAMExperimentTracker
-    else:
-        raise ValueError(
-            f"Unsupported ram_tracker_impl='{ram_impl}'. "
-            "Expected one of: base, experiment."
+    # ram_tracker_impl is kept in the config for backwards compatibility, but
+    # the base tracker has been retired — SiamRAMExperimentTracker is now the
+    # only supported implementation. We warn on legacy values rather than
+    # erroring so older config files keep loading.
+    ram_impl = str(getattr(config, "ram_tracker_impl", "experiment")).strip().lower()
+    if ram_impl not in {"experiment", "exp", "siamram_experiment"}:
+        print(
+            f"[run_inference] config sets ram_tracker_impl='{ram_impl}' but the "
+            "base tracker has been removed; falling back to the experimental tracker."
         )
+    tracker_cls = SiamRAMExperimentTracker
 
     ram_tracker_kwargs_obj = OmegaConf.to_container(config.ram_tracker, resolve=True)
     assert isinstance(ram_tracker_kwargs_obj, dict)
     ram_tracker_kwargs = dict(ram_tracker_kwargs_obj)
+    subsystem_ram_overrides, subsystem_exp_overrides = flatten_subsystem_overrides(
+        config
+    )
+    ram_tracker_kwargs.update(subsystem_ram_overrides)
 
     if tracker_cls is SiamRAMExperimentTracker:
         exp_cfg_obj = OmegaConf.to_container(
@@ -821,6 +823,24 @@ def main():
         )
         if isinstance(exp_cfg_obj, dict):
             ram_tracker_kwargs.update(exp_cfg_obj)
+        ram_tracker_kwargs.update(subsystem_exp_overrides)
+
+    osnet_ckpt = str(
+        ram_tracker_kwargs.get("osnet_pretrained_checkpoint", "imagenet")
+    ).strip()
+    if osnet_ckpt:
+        if osnet_ckpt not in OSNET_CHECKPOINT_CHOICES:
+            choices = ", ".join(sorted(OSNET_CHECKPOINT_CHOICES))
+            raise ValueError(
+                f"Unsupported osnet_pretrained_checkpoint='{osnet_ckpt}'. "
+                f"Expected one of: {choices}."
+            )
+
+    osnet_model_path_raw = str(ram_tracker_kwargs.get("osnet_model_path", "")).strip()
+    if osnet_model_path_raw:
+        ram_tracker_kwargs["osnet_model_path"] = str(
+            _resolve_weights_path(osnet_model_path_raw)
+        )
 
     tracker = tracker_cls(siam_tracker=wrapped, **ram_tracker_kwargs)
     print(f"Using tracker implementation: {tracker_cls.__name__}")

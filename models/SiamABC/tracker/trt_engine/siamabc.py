@@ -56,8 +56,8 @@ from typing import Dict, Optional, Set, Tuple
 
 import torch
 import torch.nn as nn
-# import torch_tensorrt
 
+# import torch_tensorrt
 from ...model import constants
 from ...model.adaptive_batch_norm import AdaptiveBatchNorm
 from .connector import _build_connect_engines, _dispatch_connect
@@ -68,11 +68,12 @@ logging.getLogger("torch_tensorrt").setLevel(logging.ERROR)
 logging.getLogger("torch_tensorrt.dynamo.conversion").setLevel(logging.ERROR)
 logging.getLogger("torch_tensorrt.dynamo.conversion.aten_ops_converters").setLevel(logging.CRITICAL + 1)
 
-import torch_tensorrt
-import sys
-import warnings
 import contextlib
 import os
+import sys
+import warnings
+
+import torch_tensorrt
 
 # ── ANSI helpers ────────────────────────────────────────────────────────────
 _RED    = "\033[1;31m"
@@ -373,6 +374,7 @@ def get_trt_tracker(
 ):
     from hydra.utils import instantiate
     from pytorch_toolbelt.utils import transfer_weights
+
     from ..SiamABC_Tracker import SiamABCTracker
 
     _clog("\n[SiamRAM] Loading model weights …", _YELLOW)

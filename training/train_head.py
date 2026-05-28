@@ -104,14 +104,19 @@ def _repair_path_if_needed(
 
     if "/app/" in norm:
         candidates.append(os.path.join(repo_root, norm.split("/app/", 1)[1]))
+    # The legacy layout split frames into a sibling `data_imgs/` tree; the new
+    # layout merges them under `data/`. Any path that contains `data_imgs/`
+    # gets transparently retargeted into `data/` here so older CSV indexes
+    # keep loading without manual edits.
     if "/data_imgs/" in norm:
         tail = norm.split("/data_imgs/", 1)[1]
-        candidates.append(os.path.join(repo_root, "data_imgs", tail))
+        candidates.append(os.path.join(repo_root, "data", tail))
     if "/data/" in norm:
         tail = norm.split("/data/", 1)[1]
         candidates.append(os.path.join(repo_root, "data", tail))
     if norm.startswith("data_imgs/"):
-        candidates.append(os.path.join(repo_root, norm))
+        tail = norm[len("data_imgs/"):]
+        candidates.append(os.path.join(repo_root, "data", tail))
     if norm.startswith("data/"):
         candidates.append(os.path.join(repo_root, norm))
 

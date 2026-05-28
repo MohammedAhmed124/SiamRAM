@@ -167,14 +167,14 @@ def _iou_label_from_regression_map(
     regression_map is expected in [4, H, W] channel order:
       0: left, 1: top, 2: right, 3: bottom
     """
-    l = regression_map[0]
-    t = regression_map[1]
-    r = regression_map[2]
-    b = regression_map[3]
+    left = regression_map[0]
+    top = regression_map[1]
+    right = regression_map[2]
+    bottom = regression_map[3]
 
-    valid = (l > 0) & (t > 0) & (r > 0) & (b > 0)
-    lr = np.minimum(l, r) / (np.maximum(l, r) + eps)
-    tb = np.minimum(t, b) / (np.maximum(t, b) + eps)
+    valid = (left > 0) & (top > 0) & (right > 0) & (bottom > 0)
+    lr = np.minimum(left, right) / (np.maximum(left, right) + eps)
+    tb = np.minimum(top, bottom) / (np.maximum(top, bottom) + eps)
     centerness = np.sqrt(np.clip(lr * tb, 0.0, 1.0))
     iou_proxy = np.where(valid, centerness, 0.0).astype(np.float32)
     return iou_proxy[None, ...]

@@ -11,7 +11,12 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 
-from utils.utils import _cos_sim, _extract_descriptor, _iou
+from utils.utils import (
+    _cos_sim,
+    _extract_descriptor,
+    _iou,
+    _xcorr_sim_2d_many_to_one,
+)
 
 
 class AppearanceMemory:
@@ -108,15 +113,26 @@ class AppearanceMemory:
         rhs: np.ndarray,
     ) -> np.ndarray:
         """
-        Vectorized cosine similarity between N descriptors and one descriptor.
+        Vectorized similarity between N descriptors (lhs) and one descriptor (rhs).
+
+        Shape-dispatch matches utils.utils._cos_sim:
+            - lhs (N, D), rhs (D,)       → batched cosine dot product.
+            - lhs (N, C, H, W), rhs (C, H, W) → batched 2D cross-correlation peak
+              (siamese xcorr backend). Falls through to the cosine path otherwise.
         """
-        a = np.asarray(lhs, dtype=np.float64)
+        a = np.asarray(lhs)
         if a.size == 0:
             return np.empty((0,), dtype=np.float64)
-        b = np.asarray(rhs, dtype=np.float64)
-        dots = a @ b
-        a_norm = np.linalg.norm(a, axis=1)
-        b_norm = float(np.linalg.norm(b))
+        b = np.asarray(rhs)
+
+        if a.ndim == 4 and b.ndim == 3:
+            return _xcorr_sim_2d_many_to_one(a, b)
+
+        a64 = a.astype(np.float64, copy=False)
+        b64 = b.astype(np.float64, copy=False)
+        dots = a64 @ b64
+        a_norm = np.linalg.norm(a64, axis=1)
+        b_norm = float(np.linalg.norm(b64))
         return dots / (a_norm * b_norm + 1e-8)
 
     def try_admit(

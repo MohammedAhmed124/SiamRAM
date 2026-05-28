@@ -9,11 +9,10 @@ Memory (DRM) for reliable re-acquisition after long-term occlusion.
 
 import os
 from collections import deque
-from typing import List, Optional, Tuple, TypedDict, cast
+from typing import List, Optional, Tuple, TypedDict
 
 import cv2
 import numpy as np
-from numpy._typing import NDArray
 from ultralytics import YOLO
 
 from utils.utils import (
@@ -23,9 +22,23 @@ from utils.utils import (
     configure_descriptor_backend,
 )
 
-from .SiamABC.tracker.SiamABC_Tracker import SiamABCTracker
-from .motion_model import BBoxEKF
-from .ram_memory import AppearanceMemory
+from ..SiamABC.tracker.SiamABC_Tracker import SiamABCTracker
+from .botsort import (
+    CameraMotionEstimator as BotSortMotionEstimator,
+)
+from .botsort import MotionConfig as BotSortMotionConfig
+from .camera_motion import CameraMotionSubsystem
+from .distractor_mode import DistractorModeSubsystem
+from .memory import AppearanceMemory
+from .motion import BBoxEKF
+from .occlusion_recovery import OcclusionRecoverySubsystem
+from .spike_watcher import SpikeWatcher
+from .tracker_state import (
+    CandidateRecord,
+    FrameHistory,
+    FrameRecord,
+    VisualState,
+)
 
 
 class DRMKwargs(TypedDict):
@@ -59,7 +72,7 @@ class DRMKwargs(TypedDict):
     lam_cand_dir: float
 
 
-class SiamRAMTracker:
+class SiamRAMExperimentTracker:
     """
     SiamRAM Tracker.
 
@@ -82,6 +95,8 @@ class SiamRAMTracker:
         osnet_model_path: str = "",
         osnet_pretrained_checkpoint: str = "imagenet",
         osnet_device: str = "auto",
+        siamese_feature_source: str = "neck",
+        siamese_comparison_mode: str = "xcorr",
         conf_threshold: float = 0.60,
         occ_siam_reacq_threshold=0.8,
         reacq_threshold: float = 0.55,
@@ -127,6 +142,40 @@ class SiamRAMTracker:
         homo_max_corners: int = 200,
         homo_inlier_threshold: float = 0.50,
         homography_mode: str = "classic",
+        botsort_motion_model: str = "partial_affine",
+        botsort_motion_work_scale: float = 0.75,
+        botsort_motion_bbox_pad: float = 0.50,
+        botsort_motion_grid_rows: int = 6,
+        botsort_motion_grid_cols: int = 8,
+        botsort_motion_max_corners_per_cell: int = 24,
+        botsort_motion_quality_level: float = 0.01,
+        botsort_motion_min_distance: int = 7,
+        botsort_motion_block_size: int = 7,
+        botsort_motion_lk_win_size: int = 21,
+        botsort_motion_lk_max_level: int = 3,
+        botsort_motion_fb_max_error: float = 1.5,
+        botsort_motion_ransac_reproj_threshold: float = 3.0,
+        botsort_motion_ransac_confidence: float = 0.99,
+        botsort_motion_ransac_max_iters: int = 3000,
+        botsort_motion_min_inliers: int = 30,
+        botsort_motion_min_inlier_ratio: float = 0.35,
+        botsort_motion_max_median_residual: float = 4.0,
+        botsort_motion_min_coverage_cells: int = 6,
+        botsort_motion_max_translation_frac: float = 0.25,
+        botsort_motion_min_scale: float = 0.70,
+        botsort_motion_max_scale: float = 1.40,
+        botsort_motion_max_rotation_deg: float = 25.0,
+        botsort_motion_residual_mad_multiplier: float = 4.0,
+        botsort_motion_residual_min_threshold: int = 18,
+        botsort_motion_residual_max_fraction: float = 0.22,
+        botsort_motion_residual_min_area: int = 12,
+        botsort_motion_dynamic_dilate: int = 9,
+        botsort_motion_feature_detect_interval: int = 2,
+        botsort_motion_min_points_to_redetect: int = 120,
+        botsort_motion_max_track_points: int = 320,
+        botsort_motion_enable_dynamic_mask: bool = True,
+        botsort_motion_residual_update_interval: int = 2,
+        botsort_motion_use_fallback_transform: bool = True,
         shrinkage_min_drop_frac: float = 0.06,
         shrinkage_max_lookback: int = 60,
         velocity_lookback: int = 3,
@@ -140,6 +189,13 @@ class SiamRAMTracker:
         long_distance_area_fraction: float = 0.004,
         long_distance_mode: bool = False,
         enter_occlusion_on_loss: bool = True,
+        block_distractor_mode_on_camera_motion: bool = True,
+        block_occlusion_on_camera_motion: bool = True,
+        camera_motion_heavy_disp_threshold: float = 18.0,
+        camera_motion_heavy_norm_threshold: float = 0.35,
+        early_occlusion_entry_n_frames: int = -1,
+        early_occlusion_max_frames: int = -1,
+        occlusion_use_ram_until_drm_full: bool = True,
         velocity_window_average: int = 80,
         occlusion_patience: int = 5,
         occlusion_hysteresis: float = 0.10,
@@ -157,9 +213,91 @@ class SiamRAMTracker:
         vel_dir_hard_gate: float = 0.5,
         yolo_filter_class: bool = False,
         yolo_class_detect_frames: int = 5,
+        jump_reject_enabled: bool = True,
+        jump_reject_min_frames: int = 3,
+        jump_reject_min_score: float = 0.50,
+        jump_reject_norm_threshold: float = 1.25,
+        jump_reject_max_iou: float = 0.15,
+        jump_reject_use_velocity_residual: bool = True,
+        jump_reject_use_appearance: bool = True,
+        jump_reject_max_sim: float = 0.60,
+        jump_reject_force_occlusion: bool = True,
+        jump_reject_watch_min_frames: int = 2,
+        jump_reject_watch_max_frames: int = 12,
+        jump_reject_stable_norm_threshold: float = 0.35,
+        jump_reject_stable_frames: int = 2,
+        jump_reject_distractor_mode_frames: int = 12,
+        jump_reject_distractor_penalty_enabled: bool = True,
+        jump_reject_distractor_penalty_weight: float = 0.25,
+        jump_reject_distractor_penalty_sim_floor: float = 0.55,
+        jump_reject_distractor_penalty_bank_topk: int = 5,
+        distractor_focus_dist_penalty_enabled: bool = True,
+        distractor_focus_dist_penalty_weight: float = 0.35,
+        distractor_focus_dist_soft_radius: float = 0.60,
+        distractor_focus_dist_hard_radius: float = 2.00,
+        distractor_mode_min_similarity: float = 0.50,
+        distractor_mode_selected_min_similarity: float = 0.0,
+        distractor_mode_yolo_topk: int = 2,
+        distractor_mode_history_limit: int = 80,
+        distractor_mode_use_tracker_mapping: bool = True,
+        distractor_mode_roi_expand: float = 1.20,
+        distractor_mode_roi_min_side: int = 32,
+        distractor_drm_lam_iou: float = 0.25,
+        distractor_drm_lam_app: float = 1.00,
+        distractor_drm_lam_dist: float = 0.35,
+        distractor_drm_gamma: float = 0.30,
+        distractor_drm_dist_sigma_factor: float = 2.5,
+        distractor_drm_bank_topk: int = 5,
+        distractor_compare_mode: str = "drm",
+        distractor_mode_update_memory: bool = False,
+        distractor_mode_exit_reinit_enabled: bool = True,
+        distractor_mode_exit_stable_frames: int = 4,
+        distractor_mode_exit_same_iou: float = 0.60,
+        distractor_mode_anchor_ekf_enabled: bool = True,
+        distractor_mode_anchor_uncertainty_roi_scale: float = 2.0,
+        distractor_mode_anchor_uncertainty_roi_cap: float = 96.0,
+        distractor_mode_mahalanobis_gate_enabled: bool = True,
+        distractor_mode_mahalanobis_threshold: float = 9.21,
+        distractor_mode_mahalanobis_meas_var: float = 25.0,
+        distractor_mode_switch_margin: float = 0.08,
+        distractor_mode_ambiguity_hold_frames: int = 2,
+        distractor_mode_reentry_cooldown_frames: int = 12,
+        distractor_mode_post_exit_memory_freeze_frames: int = 8,
+        distractor_mode_post_exit_template_freeze_frames: int = 8,
+        distractor_mode_behavior_mode: str = "standard",
+        distractor_mode_overlap_motion_lock_enabled: bool = False,
+        distractor_mode_overlap_iou_enter: float = 0.35,
+        distractor_mode_overlap_iou_exit: float = 0.15,
+        distractor_mode_overlap_clear_frames: int = 3,
+        distractor_mode_overlap_lock_max_frames: int = 24,
+        spike_anchor_history_window: int = 20,
+        spike_anchor_trigger_norm: float = 0.60,
+        spike_anchor_update_norm_max: float = 0.45,
+        spike_reject_enabled: bool = True,
+        spike_reject_min_frames: int = 5,
+        spike_reject_min_score: float = 0.0,
+        spike_reject_history_window: int = 40,
+        spike_reject_min_history: int = 6,
+        spike_reject_ratio: float = 3.5,
+        spike_reject_abs_norm_min: float = 0.90,
+        spike_reject_settle_ratio: float = 1.4,
+        spike_reject_settle_abs_norm_max: float = 0.35,
+        spike_reject_settle_frames: int = 2,
+        spike_reject_watch_max_frames: int = 12,
+        spike_reject_settle_from_spike_frac: float = 0.45,
+        spike_reject_use_appearance: bool = True,
+        spike_reject_max_sim: float = 0.65,
         copile_yolo=False,
         debug=True,
         disable_camera_motion: bool = False,
+        gmc_prior_enabled: bool = True,
+        gmc_prior_require_reliable_h: bool = True,
+        gmc_prior_skip_in_distractor_mode: bool = True,
+        gmc_prior_max_translation_frac: float = 0.25,
+        gmc_prior_min_scale: float = 0.70,
+        gmc_prior_max_scale: float = 1.40,
+        gmc_prior_max_rotation_deg: float = 25.0,
+        gmc_prior_max_corner_displacement_frac: float = 0.25,
     ):
         """
         Stores every configuration parameter and builds all the runtime state
@@ -205,7 +343,7 @@ class SiamRAMTracker:
             ekf_meas_noise (any): EKF measurement noise covariance scalar
             homo_max_corners (any): max GFTT feature points used by the accurate homography mode
             homo_inlier_threshold (any): minimum RANSAC inlier ratio to mark a homography as reliable
-            homography_mode (any): homography estimator mode; "classic" keeps old grid+affine RANSAC, "accurate" uses feature tracking + full homography RANSAC
+            homography_mode (any): camera-motion mode; "classic" uses grid+affine RANSAC, "accurate" uses feature tracking + full homography RANSAC, "botsort" uses BoT-SORT-inspired GMC gating/fallback
             shrinkage_min_drop_frac (any): minimum fractional area drop to trigger shrinkage detection
             shrinkage_max_lookback (any): how many frames back shrinkage and drift detection looks
             velocity_lookback (any): how many frames back finite-difference velocity is computed over
@@ -219,6 +357,13 @@ class SiamRAMTracker:
             long_distance_area_fraction (any): object area / frame area ratio below which long-distance mode activates
             long_distance_mode (any): force long-distance mode on regardless of area fraction
             enter_occlusion_on_loss (any): if False the tracker never enters the occlusion recovery path
+            block_distractor_mode_on_camera_motion (any): if True, suppresses distractor-mode entry during heavy camera motion
+            block_occlusion_on_camera_motion (any): if True, suppresses occlusion entry during heavy camera motion
+            camera_motion_heavy_disp_threshold (any): camera displacement threshold in px for heavy-motion gating
+            camera_motion_heavy_norm_threshold (any): normalized camera displacement threshold (disp / bbox_diag) for heavy-motion gating, useful for tiny objects
+            early_occlusion_entry_n_frames (any): if non-negative, entering occlusion at frame_idx <= this value enables early-occlusion mode for that occlusion episode
+            early_occlusion_max_frames (any): max occlusion duration (frames) still considered "early"; negative keeps legacy behavior (always early on successful reacquisition)
+            occlusion_use_ram_until_drm_full (any): if True, occlusion recovery uses RAM matching until DRM reaches its configured capacity
             velocity_window_average (any): window length for robust velocity estimation at occlusion entry
             occlusion_patience (any): unused legacy parameter (replaced by entry_patience)
             occlusion_hysteresis (any): unused legacy parameter reserved for future use
@@ -244,6 +389,9 @@ class SiamRAMTracker:
             osnet_model_path=osnet_model_path,
             osnet_pretrained_checkpoint=osnet_pretrained_checkpoint,
             osnet_device=osnet_device,
+            siam_tracker=siam_tracker,
+            siamese_feature_source=siamese_feature_source,
+            siamese_comparison_mode=siamese_comparison_mode,
         )
 
         if copile_yolo:
@@ -274,12 +422,72 @@ class SiamRAMTracker:
         self.homo_max_corners = homo_max_corners
         self.homo_inlier_threshold = homo_inlier_threshold
         mode = str(homography_mode).strip().lower()
-        if mode not in {"classic", "accurate"} and self.debug:
+        if mode in {"bot_sort", "gmc", "botsort_gmc"}:
+            mode = "botsort"
+        if mode not in {"classic", "accurate", "botsort"} and self.debug:
             print(
                 f"[homography] unsupported mode '{homography_mode}', "
                 "falling back to 'classic'"
             )
-        self._homography_mode = mode if mode in {"classic", "accurate"} else "classic"
+        self._homography_mode = (
+            mode if mode in {"classic", "accurate", "botsort"} else "classic"
+        )
+        bot_model = str(botsort_motion_model).strip().lower()
+        if bot_model not in {"partial_affine", "full_affine", "homography"}:
+            if self.debug:
+                print(
+                    f"[homography:botsort] unsupported model '{botsort_motion_model}', "
+                    "falling back to 'partial_affine'"
+                )
+            bot_model = "partial_affine"
+        self._botsort_motion_cfg = BotSortMotionConfig(
+            model=bot_model,
+            work_scale=float(max(0.10, botsort_motion_work_scale)),
+            bbox_pad=float(max(0.0, botsort_motion_bbox_pad)),
+            grid_rows=max(1, int(botsort_motion_grid_rows)),
+            grid_cols=max(1, int(botsort_motion_grid_cols)),
+            max_corners_per_cell=max(1, int(botsort_motion_max_corners_per_cell)),
+            quality_level=float(max(1e-6, botsort_motion_quality_level)),
+            min_distance=int(max(1, botsort_motion_min_distance)),
+            block_size=int(max(3, botsort_motion_block_size)),
+            lk_win_size=int(max(5, botsort_motion_lk_win_size)),
+            lk_max_level=int(max(0, botsort_motion_lk_max_level)),
+            fb_max_error=float(max(0.0, botsort_motion_fb_max_error)),
+            ransac_reproj_threshold=float(max(0.1, botsort_motion_ransac_reproj_threshold)),
+            ransac_confidence=float(np.clip(botsort_motion_ransac_confidence, 0.50, 0.9999)),
+            ransac_max_iters=int(max(50, botsort_motion_ransac_max_iters)),
+            min_inliers=int(max(4, botsort_motion_min_inliers)),
+            min_inlier_ratio=float(np.clip(botsort_motion_min_inlier_ratio, 0.0, 1.0)),
+            max_median_residual=float(max(0.0, botsort_motion_max_median_residual)),
+            min_coverage_cells=int(max(1, botsort_motion_min_coverage_cells)),
+            max_translation_frac=float(max(0.0, botsort_motion_max_translation_frac)),
+            min_scale=float(max(0.01, botsort_motion_min_scale)),
+            max_scale=float(max(0.02, botsort_motion_max_scale)),
+            max_rotation_deg=float(max(0.0, botsort_motion_max_rotation_deg)),
+            residual_mad_multiplier=float(max(0.1, botsort_motion_residual_mad_multiplier)),
+            residual_min_threshold=int(max(1, botsort_motion_residual_min_threshold)),
+            residual_max_fraction=float(np.clip(botsort_motion_residual_max_fraction, 0.0, 1.0)),
+            residual_min_area=int(max(1, botsort_motion_residual_min_area)),
+            dynamic_dilate=int(max(1, botsort_motion_dynamic_dilate)),
+            feature_detect_interval=int(max(1, botsort_motion_feature_detect_interval)),
+            min_points_to_redetect=int(max(4, botsort_motion_min_points_to_redetect)),
+            max_track_points=int(max(8, botsort_motion_max_track_points)),
+            enable_dynamic_mask=bool(botsort_motion_enable_dynamic_mask),
+            residual_update_interval=int(max(1, botsort_motion_residual_update_interval)),
+        )
+        if self._botsort_motion_cfg.max_scale <= self._botsort_motion_cfg.min_scale:
+            self._botsort_motion_cfg.max_scale = self._botsort_motion_cfg.min_scale + 1e-3
+        if (
+            self._botsort_motion_cfg.min_points_to_redetect
+            > self._botsort_motion_cfg.max_track_points
+        ):
+            self._botsort_motion_cfg.min_points_to_redetect = (
+                self._botsort_motion_cfg.max_track_points
+            )
+        self._botsort_motion_use_fallback_transform = bool(
+            botsort_motion_use_fallback_transform
+        )
+        self._botsort_motion_estimator: Optional[BotSortMotionEstimator] = None
 
         self.shrinkage_min_drop_frac = shrinkage_min_drop_frac
         self.shrinkage_max_lookback = shrinkage_max_lookback
@@ -307,6 +515,23 @@ class SiamRAMTracker:
         self.long_distance_mode = long_distance_mode
         self.recovered_early_occlusion = True
         self.enter_occlusion_on_loss = enter_occlusion_on_loss
+        self._block_distractor_mode_on_camera_motion = bool(
+            block_distractor_mode_on_camera_motion
+        )
+        self._block_occlusion_on_camera_motion = bool(
+            block_occlusion_on_camera_motion
+        )
+        self._camera_motion_heavy_disp_threshold = max(
+            0.0, float(camera_motion_heavy_disp_threshold)
+        )
+        self._camera_motion_heavy_norm_threshold = max(
+            0.0, float(camera_motion_heavy_norm_threshold)
+        )
+        self._early_occlusion_entry_n_frames = int(early_occlusion_entry_n_frames)
+        self._early_occlusion_max_frames = int(early_occlusion_max_frames)
+        self._occlusion_use_ram_until_drm_full = bool(
+            occlusion_use_ram_until_drm_full
+        )
         self._drm_kwargs: DRMKwargs = {
             "lam_iou": drm_lam_iou,
             "lam_app": drm_lam_app,
@@ -323,7 +548,7 @@ class SiamRAMTracker:
 
         self._drm_lam_cand_dir = drm_lam_cand_dir
         self._use_distractor_bank = (
-            self._distractor_bank_maxlen > 0 and self._drm_kwargs["gamma"] > 0.0
+            self._distractor_bank_maxlen > 0
         )
         self._vel_score_min_speed = vel_score_min_speed
         self._entry_patience = max(1, entry_patience)
@@ -343,6 +568,22 @@ class SiamRAMTracker:
         )
 
         self.disable_camera_motion = disable_camera_motion
+        self._gmc_prior_enabled = bool(gmc_prior_enabled)
+        self._gmc_prior_require_reliable_h = bool(gmc_prior_require_reliable_h)
+        self._gmc_prior_skip_in_distractor_mode = bool(
+            gmc_prior_skip_in_distractor_mode
+        )
+        self._gmc_prior_max_translation_frac = max(
+            0.0, float(gmc_prior_max_translation_frac)
+        )
+        self._gmc_prior_min_scale = max(0.01, float(gmc_prior_min_scale))
+        self._gmc_prior_max_scale = max(
+            self._gmc_prior_min_scale + 1e-3, float(gmc_prior_max_scale)
+        )
+        self._gmc_prior_max_rotation_deg = max(0.0, float(gmc_prior_max_rotation_deg))
+        self._gmc_prior_max_corner_displacement_frac = max(
+            0.0, float(gmc_prior_max_corner_displacement_frac)
+        )
 
         self.memory = AppearanceMemory(
             capacity=mem_capacity,
@@ -352,6 +593,7 @@ class SiamRAMTracker:
             tau_sim=drm_tau_sim,
             window_W=drm_window_W,
             mmin=drm_mmin,
+            distractor_bank_maxlen=distractor_bank_maxlen,
         )
 
         self.current_bbox: Optional[np.ndarray] = None
@@ -373,19 +615,229 @@ class SiamRAMTracker:
         self._center_history: deque = deque(maxlen=200)
         self._cam_vel_history: deque = deque(maxlen=200)
 
+        self._heavy_motion_cache_frame_idx: int = -1
+        self._heavy_motion_cache_weighted_disp: float = 0.0
+        self._heavy_motion_cache_inst_disp: float = 0.0
+
+        self._spike_step_norms: deque = deque(
+            maxlen=max(2, int(spike_reject_history_window))
+        )
+        self._history = FrameHistory(
+            conf_history=self._conf_history,
+            size_history=self._size_history,
+            center_history=self._center_history,
+            vel_history=self._vel_history,
+            cam_vel_history=self._cam_vel_history,
+            cam_disp_history=self._cam_disp_history,
+            spike_step_norms=self._spike_step_norms,
+        )
+
         self._vel_dir_hard_gate = vel_dir_hard_gate
         self._yolo_filter_class = yolo_filter_class
         self._yolo_class_detect_frames = yolo_class_detect_frames
         self._target_class_id: Optional[int] = None
         self._class_warmup_done: bool = False
         self._class_votes: dict[int, int] = {}
+        self._jump_reject_enabled = bool(jump_reject_enabled)
+        self._jump_reject_min_frames = max(0, int(jump_reject_min_frames))
+        self._jump_reject_min_score = float(jump_reject_min_score)
+        self._jump_reject_norm_threshold = float(jump_reject_norm_threshold)
+        self._jump_reject_max_iou = float(jump_reject_max_iou)
+        self._jump_reject_use_velocity_residual = bool(jump_reject_use_velocity_residual)
+        self._jump_reject_use_appearance = bool(jump_reject_use_appearance)
+        self._jump_reject_max_sim = float(jump_reject_max_sim)
+        self._jump_reject_force_occlusion = bool(jump_reject_force_occlusion)
+        self._jump_reject_watch_min_frames = max(1, int(jump_reject_watch_min_frames))
+        self._jump_reject_watch_max_frames = max(
+            self._jump_reject_watch_min_frames, int(jump_reject_watch_max_frames)
+        )
+        self._jump_reject_stable_norm_threshold = float(
+            jump_reject_stable_norm_threshold
+        )
+        self._jump_reject_stable_frames = max(1, int(jump_reject_stable_frames))
+        self._jump_reject_distractor_mode_frames = max(
+            0, int(jump_reject_distractor_mode_frames)
+        )
+        self._jump_reject_distractor_penalty_enabled = bool(
+            jump_reject_distractor_penalty_enabled
+        )
+        self._jump_reject_distractor_penalty_weight = max(
+            0.0, float(jump_reject_distractor_penalty_weight)
+        )
+        self._jump_reject_distractor_penalty_sim_floor = float(
+            np.clip(jump_reject_distractor_penalty_sim_floor, 0.0, 0.999)
+        )
+        self._jump_reject_distractor_penalty_bank_topk = max(
+            1, int(jump_reject_distractor_penalty_bank_topk)
+        )
+        self._distractor_focus_dist_penalty_enabled = bool(
+            distractor_focus_dist_penalty_enabled
+        )
+        self._distractor_focus_dist_penalty_weight = max(
+            0.0, float(distractor_focus_dist_penalty_weight)
+        )
+        self._distractor_focus_dist_soft_radius = max(
+            0.0, float(distractor_focus_dist_soft_radius)
+        )
+        self._distractor_focus_dist_hard_radius = max(
+            self._distractor_focus_dist_soft_radius + 1e-3,
+            float(distractor_focus_dist_hard_radius),
+        )
+        self._distractor_mode_min_similarity = float(
+            np.clip(distractor_mode_min_similarity, 0.0, 1.0)
+        )
+        self._distractor_mode_selected_min_similarity = float(
+            np.clip(distractor_mode_selected_min_similarity, 0.0, 1.0)
+        )
+        # 0 means "use all ROI detections" (bounded by osnet_max_candidate_batch if set).
+        self._distractor_mode_yolo_topk = max(0, int(distractor_mode_yolo_topk))
+        self._distractor_mode_history_limit = max(4, int(distractor_mode_history_limit))
+        self._distractor_mode_use_tracker_mapping = bool(
+            distractor_mode_use_tracker_mapping
+        )
+        self._distractor_mode_roi_expand = max(1.0, float(distractor_mode_roi_expand))
+        self._distractor_mode_roi_min_side = max(8, int(distractor_mode_roi_min_side))
+        self._distractor_drm_lam_iou = float(distractor_drm_lam_iou)
+        self._distractor_drm_lam_app = float(distractor_drm_lam_app)
+        self._distractor_drm_lam_dist = float(distractor_drm_lam_dist)
+        self._distractor_drm_gamma = max(0.0, float(distractor_drm_gamma))
+        self._distractor_drm_dist_sigma_factor = max(
+            0.1, float(distractor_drm_dist_sigma_factor)
+        )
+        self._distractor_drm_bank_topk = max(1, int(distractor_drm_bank_topk))
+        mode = str(distractor_compare_mode).strip().lower()
+        self._distractor_compare_mode = mode if mode in {"drm", "ram"} else "drm"
+        self._distractor_mode_update_memory = bool(distractor_mode_update_memory)
+        self._distractor_mode_exit_reinit_enabled = bool(
+            distractor_mode_exit_reinit_enabled
+        )
+        self._distractor_mode_exit_stable_frames = max(
+            1, int(distractor_mode_exit_stable_frames)
+        )
+        self._distractor_mode_exit_same_iou = float(
+            np.clip(distractor_mode_exit_same_iou, 0.0, 1.0)
+        )
+        self._distractor_mode_anchor_ekf_enabled = bool(
+            distractor_mode_anchor_ekf_enabled
+        )
+        self._distractor_mode_anchor_uncertainty_roi_scale = max(
+            0.0, float(distractor_mode_anchor_uncertainty_roi_scale)
+        )
+        self._distractor_mode_anchor_uncertainty_roi_cap = max(
+            0.0, float(distractor_mode_anchor_uncertainty_roi_cap)
+        )
+        self._distractor_mode_mahalanobis_gate_enabled = bool(
+            distractor_mode_mahalanobis_gate_enabled
+        )
+        self._distractor_mode_mahalanobis_threshold = max(
+            0.0, float(distractor_mode_mahalanobis_threshold)
+        )
+        self._distractor_mode_mahalanobis_meas_var = max(
+            1e-6, float(distractor_mode_mahalanobis_meas_var)
+        )
+        self._distractor_mode_switch_margin = max(
+            0.0, float(distractor_mode_switch_margin)
+        )
+        self._distractor_mode_ambiguity_hold_frames = max(
+            0, int(distractor_mode_ambiguity_hold_frames)
+        )
+        self._distractor_mode_reentry_cooldown_frames = max(
+            0, int(distractor_mode_reentry_cooldown_frames)
+        )
+        self._distractor_mode_post_exit_memory_freeze_frames = max(
+            0, int(distractor_mode_post_exit_memory_freeze_frames)
+        )
+        self._distractor_mode_post_exit_template_freeze_frames = max(
+            0, int(distractor_mode_post_exit_template_freeze_frames)
+        )
+        self._distractor_mode_behavior_mode = str(
+            distractor_mode_behavior_mode
+        ).strip().lower()
+        if self._distractor_mode_behavior_mode not in {
+            "standard",
+            "overlap_motion_lock",
+        }:
+            self._distractor_mode_behavior_mode = "standard"
+        self._distractor_mode_overlap_motion_lock_enabled = bool(
+            distractor_mode_overlap_motion_lock_enabled
+        ) or (self._distractor_mode_behavior_mode == "overlap_motion_lock")
+        self._distractor_mode_overlap_iou_enter = float(
+            np.clip(distractor_mode_overlap_iou_enter, 0.0, 1.0)
+        )
+        self._distractor_mode_overlap_iou_exit = float(
+            np.clip(distractor_mode_overlap_iou_exit, 0.0, 1.0)
+        )
+        if self._distractor_mode_overlap_iou_exit > self._distractor_mode_overlap_iou_enter:
+            self._distractor_mode_overlap_iou_exit = self._distractor_mode_overlap_iou_enter
+        self._distractor_mode_overlap_clear_frames = max(
+            1, int(distractor_mode_overlap_clear_frames)
+        )
+        self._distractor_mode_overlap_lock_max_frames = max(
+            self._distractor_mode_overlap_clear_frames,
+            int(distractor_mode_overlap_lock_max_frames),
+        )
+        self._spike_anchor_history_window = max(3, int(spike_anchor_history_window))
+        self._spike_anchor_trigger_norm = max(0.05, float(spike_anchor_trigger_norm))
+        self._spike_anchor_update_norm_max = max(0.01, float(spike_anchor_update_norm_max))
+        self._spike_reject_enabled = bool(spike_reject_enabled)
+        self._spike_reject_min_frames = max(0, int(spike_reject_min_frames))
+        self._spike_reject_min_score = float(spike_reject_min_score)
+        self._spike_reject_history_window = max(2, int(spike_reject_history_window))
+        self._spike_reject_min_history = max(2, int(spike_reject_min_history))
+        self._spike_reject_ratio = float(spike_reject_ratio)
+        self._spike_reject_abs_norm_min = float(spike_reject_abs_norm_min)
+        self._spike_reject_settle_ratio = float(spike_reject_settle_ratio)
+        self._spike_reject_settle_abs_norm_max = float(
+            spike_reject_settle_abs_norm_max
+        )
+        self._spike_reject_settle_frames = max(1, int(spike_reject_settle_frames))
+        self._spike_reject_watch_max_frames = max(2, int(spike_reject_watch_max_frames))
+        self._spike_reject_settle_from_spike_frac = float(
+            np.clip(spike_reject_settle_from_spike_frac, 0.05, 0.95)
+        )
+        self._spike_reject_use_appearance = bool(spike_reject_use_appearance)
+        self._spike_reject_max_sim = float(spike_reject_max_sim)
+
+        self._jump_watch_active: bool = False
+        self._jump_watch_anchor_bbox: Optional[np.ndarray] = None
+        self._jump_watch_prev_bbox: Optional[np.ndarray] = None
+        self._jump_watch_frames: int = 0
+        self._jump_watch_stable_count: int = 0
+        self._jump_watch_baseline_norm: float = 0.0
+        self._jump_watch_last_speed_norm: float = 0.0
+        self._jump_watch_last_ratio: float = 1.0
+        self._jump_watch_last_sim: Optional[float] = None
+        self._jump_reject_distractor_timer: int = 0
+        self._jump_watch_last_step_norm: float = 0.0
+        self._spike_debug_speed_norm: float = float("nan")
+        self._spike_debug_baseline_norm: float = float("nan")
+        self._spike_debug_ratio: float = float("nan")
+        self._spike_debug_trigger: bool = False
+        self._stable_anchor_bbox: Optional[np.ndarray] = None
+        self._distractor_focus_bbox: Optional[np.ndarray] = None
+        self._distractor_mode_active: bool = False
+        self._distractor_mode_visual_reals: List[np.ndarray] = []
+        self._distractor_mode_visual_distractors: List[np.ndarray] = []
+        self._distractor_mode_roi: Optional[np.ndarray] = None
+        self._distractor_mode_roi_size: Optional[Tuple[int, int]] = None
+        self._distractor_mode_stable_count: int = 0
+        self._distractor_mode_ambiguous_count: int = 0
+        self._distractor_mode_reentry_cooldown: int = 0
+        self._distractor_mode_memory_freeze_left: int = 0
+        self._distractor_mode_template_freeze_left: int = 0
+        self._distractor_anchor_ekf: Optional[BBoxEKF] = None
+        self._distractor_anchor_pred_bbox: Optional[np.ndarray] = None
+        self._distractor_anchor_uncertainty: float = 0.0
+        self._distractor_mode_overlap_lock_active: bool = False
+        self._distractor_mode_overlap_clear_count: int = 0
+        self._distractor_mode_overlap_lock_frames: int = 0
 
         self._occ_phase: int = 0
-        self._pending_candidates: List = []
+        self._pending_candidates: List[CandidateRecord] = []
         self._reacq_confirm_active: bool = False
         self._reacq_confirm_streak: int = 0
 
-        self._cand_frames: List = []
+        self._cand_frames: List[List[CandidateRecord]] = []
         self._occ_cam_vels: List = []
 
         self._entry_streak: int = 0
@@ -402,6 +854,18 @@ class SiamRAMTracker:
         self._occlusion_patience = occlusion_patience
         self._occlusion_hysteresis = occlusion_hysteresis
         self._gated_score = 1.0
+        self.visual_mode: str = "tracking"
+        self.visual_reason: str = ""
+        self.visual_details: str = ""
+        self._visual_state = VisualState(
+            mode=self.visual_mode,
+            reason=self.visual_reason,
+            details=self.visual_details,
+        )
+        self._spike_watcher = SpikeWatcher(self)
+        self._distractor_mode_subsystem = DistractorModeSubsystem(self)
+        self._camera_motion_subsystem = CameraMotionSubsystem(self)
+        self._occlusion_subsystem = OcclusionRecoverySubsystem(self)
 
     def initialize(
         self,
@@ -438,6 +902,8 @@ class SiamRAMTracker:
         self.tracker.initialize(proc_frame, bbox)
         self.current_bbox = bbox.copy()
         self.held_box = bbox.copy()
+        self._stable_anchor_bbox = bbox.copy()
+        self._distractor_focus_bbox = bbox.copy()
         self.in_occlusion = False
         self.frame_idx = 0
         self.velocity = np.zeros(2)
@@ -453,6 +919,13 @@ class SiamRAMTracker:
             interpolation=cv2.INTER_LINEAR,
         )
         self.prev_gray = cv2.cvtColor(small_init, cv2.COLOR_BGR2GRAY)
+        if self._homography_mode == "botsort":
+            self._botsort_motion_estimator = BotSortMotionEstimator(
+                first_frame=proc_frame,
+                config=self._botsort_motion_cfg,
+            )
+        else:
+            self._botsort_motion_estimator = None
 
         self.init_frame = proc_frame.copy()
         self.init_bbox = bbox.copy()
@@ -462,10 +935,8 @@ class SiamRAMTracker:
         self._exit_edge = None
         self._search_cx = None
         self._search_cy = None
-        self._size_history.clear()
+        self._clear_all_frame_histories()
         self.memory.reset()
-        self._conf_history.clear()
-        self._cam_disp_history.clear()
         self._yolo_cache = []
         self._occ_frames = 0
         self._occ_phase = 0
@@ -483,6 +954,39 @@ class SiamRAMTracker:
 
         self._target_class_id = None
         self._class_warmup_done = False
+        self._clear_jump_watch_state()
+        self._jump_watch_last_step_norm = 0.0
+        self._spike_debug_speed_norm = float("nan")
+        self._spike_debug_baseline_norm = float("nan")
+        self._spike_debug_ratio = float("nan")
+        self._spike_debug_trigger = False
+        self._stable_anchor_bbox = bbox.copy()
+        self._distractor_focus_bbox = bbox.copy()
+        self._distractor_mode_active = False
+        self._distractor_mode_visual_reals = []
+        self._distractor_mode_visual_distractors = []
+        self._distractor_mode_roi = None
+        self._distractor_mode_roi_size = None
+        self._distractor_mode_stable_count = 0
+        self._distractor_mode_ambiguous_count = 0
+        self._distractor_mode_reentry_cooldown = 0
+        self._distractor_mode_memory_freeze_left = 0
+        self._distractor_mode_template_freeze_left = 0
+        self._distractor_anchor_ekf = None
+        self._distractor_anchor_pred_bbox = None
+        self._distractor_mode_overlap_lock_active = False
+        self._distractor_mode_overlap_clear_count = 0
+        self._distractor_mode_overlap_lock_frames = 0
+        self._distractor_anchor_uncertainty = 0.0
+        self._jump_reject_distractor_timer = 0
+        if self._distractor_mode_active or self._jump_reject_distractor_timer > 0:
+            self.visual_mode = "distractor"
+            self.visual_reason = "Distractor suppression active"
+            self.visual_details = ""
+        else:
+            self.visual_mode = "tracking"
+            self.visual_reason = "Normal tracking"
+            self.visual_details = ""
 
         self.ekf = BBoxEKF(
             bbox,
@@ -494,9 +998,6 @@ class SiamRAMTracker:
 
         desc = _extract_descriptor(proc_frame, bbox)
 
-        self._vel_history.clear()
-        self._center_history.clear()
-        self._cam_vel_history.clear()
         if desc is not None:
             self.memory.try_admit(bbox, desc, bbox)
 
@@ -521,6 +1022,10 @@ class SiamRAMTracker:
         self.frame_idx += 1
         self._last_yolo = []
         self._yolo_cache = []
+        self._spike_debug_speed_norm = float("nan")
+        self._spike_debug_baseline_norm = float("nan")
+        self._spike_debug_ratio = float("nan")
+        self._spike_debug_trigger = False
         ekf = self.ekf
         assert ekf is not None
 
@@ -535,6 +1040,10 @@ class SiamRAMTracker:
 
         if self.in_occlusion:
             bbox, score = self._occlusion_update(proc_frame)
+            self.visual_mode = "occluded"
+            if not self.visual_reason:
+                self.visual_reason = "Occlusion recovery"
+            self.visual_details = ""
         else:
             bbox, score = self._normal_update(proc_frame)
 
@@ -543,6 +1052,7 @@ class SiamRAMTracker:
         scale_inv = 1.0 / self._frame_scale
 
         if self.in_occlusion:
+            self._sync_visual_state()
             return np.zeros(4, dtype=int), 0.0, True, self._last_yolo
 
         bbox_out = np.round(np.array(bbox, dtype=float) * scale_inv).astype(int)
@@ -552,7 +1062,873 @@ class SiamRAMTracker:
             for b in self._last_yolo
         ]
 
+        self._sync_visual_state()
         return bbox_out, float(score), self.in_occlusion, yolo_out
+
+    def _evaluate_hard_jump_candidate(
+        self,
+        frame: np.ndarray,
+        pred_bbox: np.ndarray,
+        score: float,
+    ) -> Tuple[bool, Optional[np.ndarray], float, float, float, Optional[float]]:
+        """
+        Backward-compatible wrapper delegated to SpikeWatcher.
+        """
+        return self._spike_watcher.evaluate_hard_jump_candidate(
+            frame=frame,
+            pred_bbox=pred_bbox,
+            score=score,
+        )
+
+    @staticmethod
+    def _camera_displacement_from_h_at_point(
+        H: Optional[np.ndarray],
+        px: float,
+        py: float,
+    ) -> Optional[np.ndarray]:
+        """
+        Estimate camera-induced displacement at a specific image point using H.
+
+        Returns None when homography cannot be safely evaluated.
+        """
+        if H is None:
+            return None
+        denom = H[2, 0] * px + H[2, 1] * py + H[2, 2]
+        if abs(float(denom)) < 1e-8:
+            return None
+        npx = (H[0, 0] * px + H[0, 1] * py + H[0, 2]) / denom
+        npy = (H[1, 0] * px + H[1, 1] * py + H[1, 2]) / denom
+        if not np.isfinite(npx) or not np.isfinite(npy):
+            return None
+        return np.array([float(npx - px), float(npy - py)], dtype=float)
+
+    def _record_spike_step_norm(
+        self,
+        new_bbox: np.ndarray,
+        H: Optional[np.ndarray],
+        H_reliable: bool,
+        *,
+        append: bool = True,
+    ) -> Optional[float]:
+        """
+        Computes an incremental camera-compensated step norm so that
+        _evaluate_hard_jump_candidate does not have to recompute the entire
+        baseline window from _conf_history each frame.
+        """
+        if not self._conf_history:
+            return None
+        prev_bbox = self._conf_history[-1].bbox
+        h_step = H if bool(H_reliable) else None
+        step = self._camera_compensated_step_norm(
+            prev_bbox=np.asarray(prev_bbox, dtype=float),
+            curr_bbox=np.asarray(new_bbox, dtype=float),
+            H=h_step,
+        )
+        if append:
+            self._spike_step_norms.append(float(step))
+        return float(step)
+
+    def _camera_compensated_step_norm(
+        self,
+        prev_bbox: np.ndarray,
+        curr_bbox: np.ndarray,
+        H: Optional[np.ndarray] = None,
+    ) -> float:
+        """
+        Normalized bbox-centre displacement after subtracting camera motion.
+
+        Uses H whenever available. Falls back to raw displacement only when
+        homography is unavailable or cannot be safely evaluated.
+        """
+        prev = np.asarray(prev_bbox, dtype=float)
+        curr = np.asarray(curr_bbox, dtype=float)
+        p0x = float(prev[0] + prev[2] / 2.0)
+        p0y = float(prev[1] + prev[3] / 2.0)
+        p1x = float(curr[0] + curr[2] / 2.0)
+        p1y = float(curr[1] + curr[3] / 2.0)
+
+        rel_dx = p1x - p0x
+        rel_dy = p1y - p0y
+        if H is not None:
+            cam_delta = self._camera_displacement_from_h_at_point(H, p0x, p0y)
+            if cam_delta is not None:
+                rel_dx -= float(cam_delta[0])
+                rel_dy -= float(cam_delta[1])
+
+        diag = float(np.hypot(prev[2], prev[3])) + 1e-8
+        return float(np.hypot(rel_dx, rel_dy) / diag)
+
+    @staticmethod
+    def _normalized_center_distance(
+        ref_bbox: np.ndarray,
+        test_bbox: np.ndarray,
+    ) -> float:
+        ref = np.asarray(ref_bbox, dtype=float)
+        tst = np.asarray(test_bbox, dtype=float)
+        rcx = float(ref[0] + ref[2] / 2.0)
+        rcy = float(ref[1] + ref[3] / 2.0)
+        tcx = float(tst[0] + tst[2] / 2.0)
+        tcy = float(tst[1] + tst[3] / 2.0)
+        diag = float(np.hypot(ref[2], ref[3])) + 1e-8
+        return float(np.hypot(tcx - rcx, tcy - rcy) / diag)
+
+    def _select_pre_spike_anchor_bbox(
+        self,
+    ) -> Optional[np.ndarray]:
+        """
+        Backward-compatible wrapper delegated to SpikeWatcher.
+        """
+        return self._spike_watcher.select_pre_spike_anchor_bbox()
+
+    def _target_descriptor_history(
+        self,
+    ) -> List[np.ndarray]:
+        """
+        Get descriptor history for the real target from memory buffers.
+        """
+        descs: List[np.ndarray] = []
+        if hasattr(self.memory, "_buf"):
+            buf = list(getattr(self.memory, "_buf"))
+            for _bbox, d in buf[-self._distractor_mode_history_limit:]:
+                if d is not None:
+                    descs.append(np.asarray(d, dtype=float))
+        if not descs and hasattr(self.memory, "_drm"):
+            drm = list(getattr(self.memory, "_drm"))
+            for _bbox, d, _t in drm[-self._distractor_mode_history_limit:]:
+                if d is not None:
+                    descs.append(np.asarray(d, dtype=float))
+        best = self.memory.best_descriptor()
+        if best is not None:
+            descs.append(np.asarray(best, dtype=float))
+        return descs
+
+    def _get_active_distractor_bank(
+        self,
+    ) -> List[np.ndarray]:
+        """
+        Return distractor descriptors currently stored for scoring/penalties.
+
+        Preference is the memory-owned bank; local legacy bank is used as a
+        fallback for compatibility.
+        """
+        mem_bank: List[np.ndarray] = []
+        if hasattr(self.memory, "get_distractor_bank"):
+            mem_bank = list(getattr(self.memory, "get_distractor_bank")())
+        if mem_bank:
+            return mem_bank
+        return list(self._distractor_bank)
+
+    def _add_distractor_descriptor(
+        self,
+        desc: Optional[np.ndarray],
+    ) -> None:
+        """
+        Insert one descriptor into both local and memory distractor banks.
+        """
+        if desc is None or self._distractor_bank_maxlen <= 0:
+            return
+        desc_arr = np.asarray(desc, dtype=float).copy()
+        self._distractor_bank.append(desc_arr)
+        if hasattr(self.memory, "add_distractor"):
+            getattr(self.memory, "add_distractor")(desc_arr)
+
+    def _extend_distractor_descriptors(
+        self,
+        descs: List[Optional[np.ndarray]],
+    ) -> None:
+        """
+        Insert multiple descriptors into both local and memory distractor banks.
+        """
+        if self._distractor_bank_maxlen <= 0 or not descs:
+            return
+        valid = [np.asarray(d, dtype=float).copy() for d in descs if d is not None]
+        if not valid:
+            return
+        self._distractor_bank.extend(valid)
+        if hasattr(self.memory, "extend_distractor_bank"):
+            getattr(self.memory, "extend_distractor_bank")(valid)
+
+    def _get_distractor_mode_roi(
+        self,
+        frame: np.ndarray,
+        focus_override: Optional[np.ndarray] = None,
+        uncertainty_pad_px: float = 0.0,
+    ) -> Tuple[int, int, int, int]:
+        return self._distractor_mode_subsystem.get_distractor_mode_roi(
+            frame=frame,
+            focus_override=focus_override,
+            uncertainty_pad_px=uncertainty_pad_px,
+        )
+
+    @staticmethod
+    def _mahalanobis_distance_sq(
+        point_xy: np.ndarray,
+        mean_xy: np.ndarray,
+        cov: np.ndarray,
+    ) -> Optional[float]:
+        try:
+            delta = np.asarray(point_xy, dtype=float) - np.asarray(mean_xy, dtype=float)
+            cov_arr = np.asarray(cov, dtype=float)
+            inv_cov = np.linalg.pinv(cov_arr)
+            d2 = float(delta.T @ inv_cov @ delta)
+            if not np.isfinite(d2):
+                return None
+            return d2
+        except Exception:
+            return None
+
+    def _yolo_detect_in_roi(
+        self,
+        frame: np.ndarray,
+        roi: Tuple[int, int, int, int],
+    ) -> List[np.ndarray]:
+        rx, ry, rw, rh = roi
+        crop = frame[ry: ry + rh, rx: rx + rw]
+        if crop.size == 0:
+            return []
+        results = self.yolo.predict(
+            crop,
+            conf=self.yolo_conf,
+            iou=self.yolo_iou_thr,
+            verbose=False,
+            imgsz=320,
+        )
+        boxes: List[np.ndarray] = []
+        if results and results[0].boxes is not None and len(results[0].boxes) > 0:
+            result_boxes = results[0].boxes
+            xyxy_all = result_boxes.xyxy.detach().cpu().numpy()
+            cls_all = result_boxes.cls.detach().cpu().numpy().astype(np.int32, copy=False)
+            if self._yolo_filter_class and self._target_class_id is not None:
+                keep = cls_all == int(self._target_class_id)
+                xyxy_all = xyxy_all[keep]
+            if xyxy_all.size > 0:
+                xywh = np.empty((xyxy_all.shape[0], 4), dtype=np.int32)
+                xywh[:, 0] = xyxy_all[:, 0].astype(np.int32, copy=False) + rx
+                xywh[:, 1] = xyxy_all[:, 1].astype(np.int32, copy=False) + ry
+                xywh[:, 2] = (xyxy_all[:, 2] - xyxy_all[:, 0]).astype(np.int32, copy=False)
+                xywh[:, 3] = (xyxy_all[:, 3] - xyxy_all[:, 1]).astype(np.int32, copy=False)
+                boxes = [xywh[i].copy() for i in range(xywh.shape[0])]
+        return boxes
+
+    def _reinit_dynamic_template_only(
+        self,
+        frame: np.ndarray,
+        bbox: np.ndarray,
+        score_hint: float = 1.0,
+    ) -> np.ndarray:
+        """
+        Re-anchor SiamABC dynamic template/search state without touching static template.
+
+        This keeps frame-0 static template features intact and only refreshes
+        dynamic features + dynamic memory around the provided bbox.
+        """
+        bb = self._clamp_bbox_to_frame(np.array(bbox, dtype=int).copy(), frame)
+        self.tracker.tracking_state.bbox = bb.copy()
+
+        dyn_template = self.tracker.get_template_features(frame, bb)
+        dyn_search, _, _ = self.tracker.get_search_features(frame, bb)
+        self.tracker.dynamic_template_features = dyn_template
+        self.tracker.dynamic_search_features = dyn_search
+        self.tracker.running_dynamic_image = frame.copy()
+        self.tracker.running_dynamic_bbox = bb.copy()
+
+        mem_cap = max(1, int(getattr(self.tracker, "memory_window_size", 1)))
+        thr = float(getattr(self.tracker, "dynamic_update_threshold", 0.87))
+        seed_score = float(np.clip(score_hint, 0.0, 1.0))
+        seed_score = max(seed_score, min(1.0, thr + 1e-3))
+
+        self.tracker.all_memory_imgs = deque([[frame.copy(), bb.copy()]], maxlen=mem_cap)
+        self.tracker.classification_scores = deque([seed_score], maxlen=mem_cap)
+        self.tracker._best_idx = 0
+        self.tracker._best_score = seed_score
+        self.tracker._is_full = False
+
+        if hasattr(self.tracker, "_prev_bbox"):
+            self.tracker._prev_bbox = bb.copy()
+        if hasattr(self.tracker, "prev_good_bbox"):
+            self.tracker.prev_good_bbox = bb.copy()
+        if hasattr(self.tracker.tracking_state, "pred_score"):
+            self.tracker.tracking_state.pred_score = seed_score
+        if hasattr(self.tracker.net, "invalidate_template_cache"):
+            self.tracker.net.invalidate_template_cache()
+
+        return bb
+
+    def _enter_distractor_mode(
+        self,
+        anchor_bbox: np.ndarray,
+    ) -> None:
+        self._distractor_mode_subsystem.enter_distractor_mode(
+            anchor_bbox=anchor_bbox,
+        )
+
+    def _exit_distractor_mode(
+        self,
+        reason: str,
+        resolved: bool = False,
+    ) -> None:
+        self._distractor_mode_subsystem.exit_distractor_mode(
+            reason=reason,
+            resolved=resolved,
+        )
+
+    def _maybe_apply_ambiguity_hold(
+        self,
+        *,
+        frame: np.ndarray,
+        pred_bbox: np.ndarray,
+        score: float,
+        best_sim: float,
+        focus_override: Optional[np.ndarray],
+        cands: List[Tuple],
+        top_margin: float,
+        roi: Tuple[int, int, int, int],
+    ) -> Optional[Tuple[np.ndarray, float]]:
+        """
+        Updates the ambiguity counter and, while the top-2 score margin is
+        below the switch threshold for fewer than the allowed hold frames,
+        returns a (hold_bbox, score) tuple to keep identity locked on the
+        previous focus instead of switching to the slightly-higher-scoring
+        candidate. Returns None when the caller should fall through to the
+        ranking-driven commit path.
+        """
+        ambiguous = (
+            len(cands) > 1
+            and top_margin < self._distractor_mode_switch_margin
+        )
+        if ambiguous:
+            self._distractor_mode_ambiguous_count += 1
+        else:
+            self._distractor_mode_ambiguous_count = 0
+
+        if not (
+            ambiguous
+            and self._distractor_mode_ambiguous_count
+            <= self._distractor_mode_ambiguity_hold_frames
+        ):
+            return None
+
+        hold_source = (
+            focus_override
+            if focus_override is not None
+            else (
+                self._distractor_focus_bbox
+                if self._distractor_focus_bbox is not None
+                else pred_bbox
+            )
+        )
+        hold_bbox = self._clamp_bbox_to_frame(
+            np.array(hold_source, dtype=int).copy(), frame
+        )
+        self._distractor_mode_visual_reals = [hold_bbox.copy()]
+        self._distractor_mode_visual_distractors = [
+            np.array(bb, dtype=int).copy() for bb, *_ in cands
+        ]
+        self._distractor_mode_stable_count = 0
+        self._distractor_focus_bbox = hold_bbox.copy()
+        self.tracker.tracking_state.bbox = hold_bbox.copy()
+        self.visual_mode = "distractor"
+        self.visual_reason = "Distractor mode: ambiguity hold"
+        self.visual_details = (
+            f"margin={top_margin:.3f}<{self._distractor_mode_switch_margin:.3f}  "
+            f"hold={self._distractor_mode_ambiguous_count}/{self._distractor_mode_ambiguity_hold_frames}  "
+            f"best_app={best_sim:.2f}  cands={len(cands)}  roi={roi[2]}x{roi[3]}"
+        )
+        self._jump_reject_distractor_timer = max(
+            self._jump_reject_distractor_timer,
+            self._jump_reject_distractor_mode_frames,
+        )
+        adjusted_score = max(float(score), float(np.clip(best_sim, 0.0, 1.0)))
+        adjusted_score = self._apply_distractor_mode_penalty(
+            frame, hold_bbox, adjusted_score
+        )
+        return hold_bbox.copy(), float(adjusted_score)
+
+    def _maybe_engage_overlap_motion_lock(
+        self,
+        *,
+        frame: np.ndarray,
+        focus_bbox_arr: np.ndarray,
+        best_sim: float,
+        max_overlap_iou: float,
+        distractor_entries: List[Tuple],
+        cands: List[Tuple],
+        roi: Tuple[int, int, int, int],
+        score: float,
+    ) -> Optional[Tuple[np.ndarray, float]]:
+        """
+        Handles the overlap motion-lock branch of distractor-mode update.
+
+        When the best ROI candidate overlaps a distractor heavily (entry
+        threshold), engages a motion-only lock that holds the EKF/anchor box
+        instead of switching identity until the overlap clears or the lock
+        times out.
+
+        Returns (motion_bbox, adjusted_score) when the lock is engaged and the
+        caller should commit that result and return now. Returns None when
+        the lock did not engage (or just released cleanly), so the caller
+        should fall through to the normal ranking path.
+        """
+        if not self._distractor_mode_overlap_motion_lock_enabled:
+            return None
+
+        if (
+            not self._distractor_mode_overlap_lock_active
+            and distractor_entries
+            and max_overlap_iou >= self._distractor_mode_overlap_iou_enter
+        ):
+            self._distractor_mode_overlap_lock_active = True
+            self._distractor_mode_overlap_clear_count = 0
+            self._distractor_mode_overlap_lock_frames = 0
+
+        if not self._distractor_mode_overlap_lock_active:
+            return None
+
+        self._distractor_mode_overlap_lock_frames += 1
+        if (
+            not distractor_entries
+            or max_overlap_iou <= self._distractor_mode_overlap_iou_exit
+        ):
+            self._distractor_mode_overlap_clear_count += 1
+        else:
+            self._distractor_mode_overlap_clear_count = 0
+
+        cleared = (
+            self._distractor_mode_overlap_clear_count
+            >= self._distractor_mode_overlap_clear_frames
+        )
+        timed_out = (
+            self._distractor_mode_overlap_lock_frames
+            >= self._distractor_mode_overlap_lock_max_frames
+        )
+
+        if cleared or timed_out:
+            self._distractor_mode_overlap_lock_active = False
+            self._distractor_mode_overlap_clear_count = 0
+            self._distractor_mode_overlap_lock_frames = 0
+            return None
+
+        motion_source = self._distractor_anchor_pred_bbox
+        if motion_source is None and self.ekf is not None:
+            motion_source = self.ekf.get_bbox()
+        if motion_source is None:
+            motion_source = np.array(focus_bbox_arr, dtype=int)
+        motion_bbox = self._clamp_bbox_to_frame(
+            np.array(motion_source, dtype=int).copy(),
+            frame,
+        )
+        self._distractor_mode_visual_reals = [motion_bbox.copy()]
+        self._distractor_mode_visual_distractors = [
+            np.array(bb, dtype=int).copy() for bb, *_ in cands
+        ]
+        self._distractor_mode_stable_count = 0
+        self._distractor_mode_ambiguous_count = 0
+        self._distractor_focus_bbox = motion_bbox.copy()
+        self.tracker.tracking_state.bbox = motion_bbox.copy()
+        self.visual_mode = "distractor"
+        self.visual_reason = "Distractor mode: overlap motion lock"
+        self.visual_details = (
+            f"ov={max_overlap_iou:.2f}  "
+            f"clear={self._distractor_mode_overlap_clear_count}/{self._distractor_mode_overlap_clear_frames}  "
+            f"frames={self._distractor_mode_overlap_lock_frames}/{self._distractor_mode_overlap_lock_max_frames}  "
+            f"best_app={best_sim:.2f}  roi={roi[2]}x{roi[3]}"
+        )
+        self._jump_reject_distractor_timer = max(
+            self._jump_reject_distractor_timer,
+            self._jump_reject_distractor_mode_frames,
+        )
+        adjusted_score = max(
+            float(score),
+            float(np.clip(best_sim, 0.0, 1.0)),
+        )
+        adjusted_score = self._apply_distractor_mode_penalty(
+            frame,
+            motion_bbox,
+            adjusted_score,
+        )
+        return motion_bbox.copy(), float(adjusted_score)
+
+    def _score_distractor_candidates(
+        self,
+        *,
+        dets_for_desc: List[np.ndarray],
+        det_descs: List[Optional[np.ndarray]],
+        refs: List[np.ndarray],
+        focus_bbox_arr: np.ndarray,
+        focus_cx: float,
+        focus_cy: float,
+        dist_sigma: float,
+        distractor_bank: List[np.ndarray],
+        anchor_mean: Optional[np.ndarray],
+        anchor_cov: Optional[np.ndarray],
+    ) -> List[Tuple[np.ndarray, np.ndarray, float, float, float, float, float, float]]:
+        """
+        Builds the per-candidate DRM score tuples for distractor-mode ranking.
+
+        For each (bbox, descriptor) pair this scores:
+        - appearance similarity vs the target descriptor history (max over refs);
+        - IoU with the focus bbox;
+        - Mahalanobis distance vs the anchor EKF mean (gated, candidate dropped
+          if it exceeds the chi-squared threshold);
+        - spatial Gaussian distance penalty from the focus centre;
+        - cosine similarity vs the recent distractor bank (negative term).
+
+        Returns a list of tuples shaped exactly like the legacy inline path:
+        (bbox_int, desc, app_sim, drm_score, iou_focus, dist_term, dist_sim, maha_d2).
+        """
+        cands: List[
+            Tuple[np.ndarray, np.ndarray, float, float, float, float, float, float]
+        ] = []
+        for bb, dd in zip(dets_for_desc, det_descs):
+            if dd is None:
+                continue
+            bb_arr = np.asarray(bb, dtype=float)
+            app_sim = max(float(_cos_sim(dd, r)) for r in refs)
+            iou_focus = float(_iou(focus_bbox_arr, bb_arr))
+
+            cand_cx = float(bb_arr[0] + bb_arr[2] / 2.0)
+            cand_cy = float(bb_arr[1] + bb_arr[3] / 2.0)
+            maha_d2 = float("nan")
+            if (
+                self._distractor_mode_mahalanobis_gate_enabled
+                and anchor_mean is not None
+                and anchor_cov is not None
+            ):
+                cov_eff = anchor_cov + np.eye(2, dtype=float) * self._distractor_mode_mahalanobis_meas_var
+                maha_val = self._mahalanobis_distance_sq(
+                    np.array([cand_cx, cand_cy], dtype=float),
+                    anchor_mean,
+                    cov_eff,
+                )
+                if maha_val is not None:
+                    maha_d2 = float(maha_val)
+                    if maha_d2 > self._distractor_mode_mahalanobis_threshold:
+                        continue
+            d_center = float(np.hypot(cand_cx - focus_cx, cand_cy - focus_cy))
+            dist_term = 1.0 - float(np.exp(-0.5 * (d_center / (dist_sigma + 1e-8)) ** 2))
+
+            dist_sim = 0.0
+            if distractor_bank and self._distractor_drm_gamma > 0.0:
+                dist_sim = max(float(_cos_sim(dd, nu)) for nu in distractor_bank)
+
+            drm_score = (
+                self._distractor_drm_lam_app * app_sim
+                + self._distractor_drm_lam_iou * iou_focus
+                - self._distractor_drm_lam_dist * dist_term
+                - self._distractor_drm_gamma * dist_sim
+            )
+
+            cands.append(
+                (
+                    np.array(bb, dtype=int),
+                    dd,
+                    app_sim,
+                    float(drm_score),
+                    float(iou_focus),
+                    float(dist_term),
+                    float(dist_sim),
+                    float(maha_d2),
+                )
+            )
+        return cands
+
+    def _advance_distractor_anchor_ekf(
+        self,
+        frame: np.ndarray,
+    ) -> Tuple[
+        Optional[np.ndarray],
+        Optional[np.ndarray],
+        Optional[np.ndarray],
+        float,
+    ]:
+        """
+        Predicts the distractor-mode anchor EKF forward one frame using the
+        latest homography, then derives the focus-override bbox, the EKF
+        position mean/covariance used for Mahalanobis gating, and an additional
+        ROI padding scaled by the EKF position uncertainty.
+
+        Returns (focus_override, anchor_mean, anchor_cov, uncertainty_pad_px).
+        When the anchor EKF is disabled or not yet initialised, returns the
+        no-op (None, None, None, 0.0) tuple.
+        """
+        if not (
+            self._distractor_mode_anchor_ekf_enabled
+            and self._distractor_anchor_ekf is not None
+        ):
+            return None, None, None, 0.0
+
+        self._distractor_anchor_ekf.predict(
+            H=self._last_H,
+            H_reliable=self._last_H_reliable,
+        )
+        anchor_bbox = self._clamp_bbox_to_frame(
+            self._distractor_anchor_ekf.get_bbox(), frame
+        )
+        self._distractor_anchor_pred_bbox = anchor_bbox.copy()
+        self._distractor_anchor_uncertainty = float(
+            self._distractor_anchor_ekf.get_uncertainty()
+        )
+        focus_override = anchor_bbox.copy()
+        uncertainty_pad_px = min(
+            self._distractor_mode_anchor_uncertainty_roi_cap,
+            self._distractor_mode_anchor_uncertainty_roi_scale
+            * self._distractor_anchor_uncertainty,
+        )
+        anchor_mean = np.asarray(self._distractor_anchor_ekf.x[:2], dtype=float).copy()
+        anchor_cov = np.asarray(self._distractor_anchor_ekf.P[:2, :2], dtype=float).copy()
+        return focus_override, anchor_mean, anchor_cov, uncertainty_pad_px
+
+    def _distractor_mode_update(
+        self,
+        frame: np.ndarray,
+        pred_bbox: np.ndarray,
+        score: float,
+    ) -> Tuple[np.ndarray, float]:
+        return self._distractor_mode_subsystem.distractor_mode_update(
+            frame=frame,
+            pred_bbox=pred_bbox,
+            score=score,
+        )
+
+    def _clear_jump_watch_state(
+        self,
+    ) -> None:
+        self._spike_watcher.clear_watch_state()
+
+    def _start_jump_watch(
+        self,
+        prev_bbox: np.ndarray,
+        first_switched_bbox: np.ndarray,
+        spike_speed_norm: float,
+        spike_ratio: float,
+        baseline_norm: float,
+        sim: Optional[float],
+    ) -> None:
+        self._spike_watcher.start_watch(
+            prev_bbox=prev_bbox,
+            first_switched_bbox=first_switched_bbox,
+            spike_speed_norm=spike_speed_norm,
+            spike_ratio=spike_ratio,
+            baseline_norm=baseline_norm,
+            sim=sim,
+        )
+
+    def _apply_distractor_mode_penalty(
+        self,
+        frame: np.ndarray,
+        pred_bbox: np.ndarray,
+        score: float,
+    ) -> float:
+        return self._distractor_mode_subsystem.apply_distractor_mode_penalty(
+            frame=frame,
+            pred_bbox=pred_bbox,
+            score=score,
+        )
+
+    def _apply_hard_jump_rejection(
+        self,
+        frame: np.ndarray,
+        pred_bbox: np.ndarray,
+        score: float,
+        effective_threshold: float,
+    ) -> Tuple[np.ndarray, float]:
+        """
+        Backward-compatible wrapper delegated to SpikeWatcher.
+        """
+        return self._spike_watcher.apply_hard_jump_rejection(
+            frame=frame,
+            pred_bbox=pred_bbox,
+            score=score,
+            effective_threshold=effective_threshold,
+        )
+
+    @staticmethod
+    def _camera_velocity_from_h(
+        H: Optional[np.ndarray],
+        frame_shape: Tuple[int, ...],
+    ) -> np.ndarray:
+        """
+        Projects the frame centre through H and returns the 2-vector camera
+        velocity (px) at the centre. Returns zeros when H is None. Shared by
+        _normal_update and _commit_reacquisition for cam_vel_history bookkeeping.
+        """
+        if H is None:
+            return np.zeros(2)
+        h_fr, w_fr = frame_shape[:2]
+        cx, cy = w_fr / 2.0, h_fr / 2.0
+        denom = H[2, 0] * cx + H[2, 1] * cy + H[2, 2] + 1e-8
+        ncx = (H[0, 0] * cx + H[0, 1] * cy + H[0, 2]) / denom
+        ncy = (H[1, 0] * cx + H[1, 1] * cy + H[1, 2]) / denom
+        return np.array([ncx - cx, ncy - cy])
+
+    def _sync_visual_state(self) -> None:
+        self._visual_state = VisualState(
+            mode=self.visual_mode,
+            reason=self.visual_reason,
+            details=self.visual_details,
+        )
+
+    def _set_visual_mode_for_normal_update(self) -> None:
+        """
+        Picks the visual_mode/reason/details strings shown to the UI overlay
+        for normal-mode frames. Distractor-suppression timer wins over normal.
+        """
+        if self._jump_reject_distractor_timer > 0:
+            self.visual_mode = "distractor"
+            self.visual_reason = "Distractor suppression active"
+        else:
+            self.visual_mode = "tracking"
+            self.visual_reason = "Normal tracking"
+        self.visual_details = ""
+
+    def _maybe_run_class_warmup(self, frame: np.ndarray) -> None:
+        """
+        Runs the YOLO class-vote warmup during the first few frames so that
+        downstream YOLO calls can class-filter detections to the inferred target
+        class. Once the warmup window closes, commits the majority class.
+        """
+        if not (
+            self._yolo_filter_class
+            and not self._class_warmup_done
+            and self.frame_idx <= self._yolo_class_detect_frames * 3
+            and self.frame_idx % max(1, self._yolo_class_detect_frames) == 0
+        ):
+            return
+        self._try_detect_target_class(frame)
+        if self.frame_idx >= self._yolo_class_detect_frames * 2:
+            self._maybe_commit_target_class()
+
+    def _compute_effective_threshold(self, frame: np.ndarray) -> float:
+        """
+        Returns the score threshold used to decide if the current frame is
+        a tracking loss. Also adjusts the visual tracker search-context offset
+        to widen the search when the object is far away ("long-distance" mode).
+        """
+        if self.frame_idx <= 0:
+            return 0.0
+        long_distanced_object = self._is_long_distance(frame)
+        effective_threshold = (
+            self.long_distance_conf_threshold
+            if long_distanced_object
+            else self.conf_threshold
+        )
+        self.tracker.offset = (
+            self.tracker.tracking_config["search_context"]
+            if not long_distanced_object
+            else self.tracker.tracking_config["search_context"] + 0.5
+        )
+        return effective_threshold
+
+    def _record_camera_motion_history(self, frame: np.ndarray) -> None:
+        """
+        Appends the per-frame scalar camera displacement magnitude and the
+        2-vector camera velocity to their respective histories. Called once
+        per successful normal-mode frame.
+        """
+        cam_disp = self._h_translation_magnitude(self._last_H, frame)
+        self._cam_disp_history.append(cam_disp)
+        self._cam_vel_history.append(
+            self._camera_velocity_from_h(self._last_H, frame.shape)
+        )
+
+    def _maybe_update_stable_anchor(self, pred_bbox: np.ndarray) -> None:
+        """
+        Promotes the latest pred_bbox to be the new stable anchor (used as the
+        pre-spike fallback) when motion is calm and no jump-watch / distractor
+        timer is active. Anchor stays put otherwise so we keep a clean pre-jump
+        reference for spike recovery.
+        """
+        if (
+            self._jump_reject_distractor_timer > 0
+            or self._jump_watch_active
+            or self.current_bbox is None
+        ):
+            return
+        step_norm_anchor = self._camera_compensated_step_norm(
+            prev_bbox=np.asarray(self.current_bbox, dtype=float),
+            curr_bbox=np.asarray(pred_bbox, dtype=float),
+            H=self._last_H,
+        )
+        if step_norm_anchor <= self._spike_anchor_update_norm_max:
+            self._stable_anchor_bbox = pred_bbox.copy()
+            self._distractor_focus_bbox = pred_bbox.copy()
+
+    def _clear_all_frame_histories(self) -> None:
+        """
+        Resets every per-frame history deque at once. Centralising this in one
+        place avoids the previous pattern of scattered `.clear()` calls that
+        drifted out of sync as new histories were added.
+        """
+        self._history.clear()
+
+    def _commit_normal_frame_history(
+        self,
+        frame: np.ndarray,
+        pred_bbox: np.ndarray,
+    ) -> None:
+        """
+        Atomically appends one frame's worth of state to every per-frame
+        history deque consumed downstream (occlusion recovery, spike detection,
+        shrinkage analysis, stable-anchor selection, velocity smoothing).
+
+        Order matters: _record_spike_step_norm reads the previous
+        _conf_history bbox, so it MUST run before the new _conf_history append.
+        """
+        cx = float(pred_bbox[0] + pred_bbox[2] / 2.0)
+        cy = float(pred_bbox[1] + pred_bbox[3] / 2.0)
+        cam_disp = self._h_translation_magnitude(self._last_H, frame)
+        cam_vel = self._camera_velocity_from_h(self._last_H, frame.shape)
+        spike_step_norm = self._record_spike_step_norm(
+            new_bbox=pred_bbox,
+            H=self._last_H,
+            H_reliable=self._last_H_reliable,
+            append=False,
+        )
+        self._history.commit_normal(
+            record=FrameRecord(
+                bbox=pred_bbox.copy(),
+                velocity=self.velocity.copy(),
+                H=self._last_H,
+                H_reliable=self._last_H_reliable,
+            ),
+            center=np.array([cx, cy], dtype=float),
+            velocity=self.velocity,
+            size_wh=(int(pred_bbox[2]), int(pred_bbox[3])),
+            cam_velocity=cam_vel,
+            cam_displacement=cam_disp,
+            spike_step_norm=spike_step_norm,
+        )
+
+    def _commit_recovery_frame_history(
+        self,
+        frame: np.ndarray,
+        ekf_bbox: np.ndarray,
+    ) -> None:
+        """
+        Lighter-weight history commit used by _commit_reacquisition. Writes
+        centre, cam-vel, spike step-norm, and the FrameRecord — does NOT touch
+        size_history, vel_history, or cam_disp_history, matching the legacy
+        behaviour at the post-recovery commit point.
+        """
+        cx = float(ekf_bbox[0] + ekf_bbox[2] / 2.0)
+        cy = float(ekf_bbox[1] + ekf_bbox[3] / 2.0)
+        spike_step_norm = self._record_spike_step_norm(
+            new_bbox=ekf_bbox,
+            H=self._last_H,
+            H_reliable=self._last_H_reliable,
+            append=False,
+        )
+        self._history.commit_recovery(
+            record=FrameRecord(
+                bbox=ekf_bbox.copy(),
+                velocity=self.velocity.copy(),
+                H=self._last_H,
+                H_reliable=self._last_H_reliable,
+            ),
+            center=np.array([cx, cy], dtype=float),
+            cam_velocity=self._camera_velocity_from_h(self._last_H, frame.shape),
+            spike_step_norm=spike_step_norm,
+        )
 
     def _normal_update(
         self,
@@ -583,40 +1959,68 @@ class SiamRAMTracker:
             pred_bbox: np.ndarray [x, y, w, h] from SiamABC
             score: float confidence from SiamABC
     """
+        if self._distractor_mode_template_freeze_left > 0:
+            self.tracker.dynamic_update = False
+            self._distractor_mode_template_freeze_left = max(
+                0, self._distractor_mode_template_freeze_left - 1
+            )
+        else:
+            self.tracker.dynamic_update = bool(
+                self.tracker.tracking_config["dynamic_update"]
+            )
+        if not self._distractor_mode_active and self._distractor_mode_memory_freeze_left > 0:
+            self._distractor_mode_memory_freeze_left = max(
+                0, self._distractor_mode_memory_freeze_left - 1
+            )
+
+        self._set_visual_mode_for_normal_update()
+
+        if self._gmc_prior_enabled:
+            self._apply_gmc_search_prior(frame)
         pred_bbox, score, _ = self.tracker.update(frame)
         pred_bbox = np.array(pred_bbox, dtype=int)
 
-        if (
-            self._yolo_filter_class
-            and not self._class_warmup_done
-            and self.frame_idx <= self._yolo_class_detect_frames * 3
-            and self.frame_idx % max(1, self._yolo_class_detect_frames) == 0
-        ):
-            self._try_detect_target_class(frame)
-            if self.frame_idx >= self._yolo_class_detect_frames * 2:
-                self._maybe_commit_target_class()
+        self._maybe_run_class_warmup(frame)
 
-        if self.frame_idx > 0:
-            long_distanced_object = self._is_long_distance(frame)
-            effective_threshold = (
-                self.long_distance_conf_threshold
-                if long_distanced_object
-                else self.conf_threshold
-            )
-            self.tracker.offset = (
-                self.tracker.tracking_config["search_context"]
-                if not long_distanced_object
-                else self.tracker.tracking_config["search_context"] + 0.5
+        effective_threshold = self._compute_effective_threshold(frame)
+
+        if self._distractor_mode_active:
+            pred_bbox, score = self._distractor_mode_update(
+                frame=frame,
+                pred_bbox=pred_bbox,
+                score=float(score),
             )
         else:
-            effective_threshold = 0.0
+            pred_bbox, score = self._apply_hard_jump_rejection(
+                frame=frame,
+                pred_bbox=pred_bbox,
+                score=float(score),
+                effective_threshold=float(effective_threshold),
+            )
 
-        if (
+        heavy_cam_motion, heavy_cam_disp = self._is_heavy_camera_motion(
+            frame, bbox_hint=pred_bbox
+        )
+
+        if self._distractor_mode_active:
+            self._entry_streak = 0
+        elif (
             score < effective_threshold
             and self.frame_idx >= 0
             and self.enter_occlusion_on_loss
         ):
-            self._entry_streak += 1
+            if (
+                self._block_occlusion_on_camera_motion
+                and heavy_cam_motion
+            ):
+                self._entry_streak = 0
+                if self.debug:
+                    print(
+                        f"[occlusion guard] frame={self.frame_idx} blocked streak by camera motion "
+                        f"disp={heavy_cam_disp:.2f} thr={self._camera_motion_heavy_disp_threshold:.2f}"
+                    )
+            else:
+                self._entry_streak += 1
         else:
             self._entry_streak = 0
 
@@ -627,13 +2031,45 @@ class SiamRAMTracker:
         ):
 
             entry_streak_val = self._entry_streak
-            self._entry_streak = 0
-            self.in_occlusion = True
-
             is_exiting, exit_edge = self._detect_exit_direction(frame)
+            if (
+                self._block_occlusion_on_camera_motion
+                and heavy_cam_motion
+                and not is_exiting
+            ):
+                self._entry_streak = 0
+                if self.debug:
+                    print(
+                        f"[occlusion guard] frame={self.frame_idx} blocked entry by camera motion "
+                        f"disp={heavy_cam_disp:.2f} thr={self._camera_motion_heavy_disp_threshold:.2f}"
+                    )
+                return pred_bbox, float(score)
+
+            self._entry_streak = 0
+            self._set_early_occlusion_mode_on_entry()
+            self.in_occlusion = True
+            self._distractor_mode_active = False
+            self._distractor_mode_visual_reals = []
+            self._distractor_mode_visual_distractors = []
+            self._distractor_mode_roi = None
+            self._distractor_mode_roi_size = None
+            self._distractor_mode_stable_count = 0
+            self._distractor_mode_ambiguous_count = 0
+            self._distractor_mode_overlap_lock_active = False
+            self._distractor_mode_overlap_clear_count = 0
+            self._distractor_mode_overlap_lock_frames = 0
+            self._distractor_anchor_ekf = None
+            self._distractor_anchor_pred_bbox = None
+            self._distractor_anchor_uncertainty = 0.0
+            self._clear_jump_watch_state()
+            self._jump_reject_distractor_timer = 0
+            if self.visual_mode != "distractor":
+                self.visual_mode = "occluded"
+                self.visual_reason = "Occlusion recovery"
+                self.visual_details = ""
+
             self._out_of_frame = is_exiting
             self._exit_edge = exit_edge
-
             loss_cause = self._classify_loss_cause()
             if is_exiting:
                 loss_cause = "out_of_frame"
@@ -692,51 +2128,21 @@ class SiamRAMTracker:
         assert ekf is not None
         ekf.update(pred_bbox)
 
-        cam_disp = self._h_translation_magnitude(self._last_H, frame)
-        self._cam_disp_history.append(cam_disp)
-
-        h_fr, w_fr = frame.shape[:2]
-        if self._last_H is not None:
-            cx, cy = w_fr / 2.0, h_fr / 2.0
-            denom = (
-                self._last_H[2, 0] * cx
-                + self._last_H[2, 1] * cy
-                + self._last_H[2, 2]
-                + 1e-8
-            )
-            ncx = (
-                      self._last_H[0, 0] * cx + self._last_H[0, 1] * cy + self._last_H[0, 2]
-                  ) / denom
-            ncy = (
-                      self._last_H[1, 0] * cx + self._last_H[1, 1] * cy + self._last_H[1, 2]
-                  ) / denom
-            self._cam_vel_history.append(np.array([ncx - cx, ncy - cy]))
-        else:
-            self._cam_vel_history.append(np.zeros(2))
-
-        cx = float(pred_bbox[0] + pred_bbox[2] / 2.0)
-        cy = float(pred_bbox[1] + pred_bbox[3] / 2.0)
-        self._center_history.append(np.array([cx, cy]))
-
         self.velocity = self._compute_velocity_from_history(pred_bbox)
-        self._vel_history.append(self.velocity.copy())
 
-        if score >= effective_threshold:
+        if (
+            score >= effective_threshold
+            and self._distractor_mode_memory_freeze_left <= 0
+        ):
             desc = _extract_descriptor(frame, pred_bbox)
             if desc is not None:
                 self.memory.try_admit(pred_bbox, desc, self.current_bbox)
 
+        self._maybe_update_stable_anchor(pred_bbox)
+
         self.current_bbox = pred_bbox.copy()
         self.held_box = pred_bbox.copy()
-        self._size_history.append((int(pred_bbox[2]), int(pred_bbox[3])))
-        self._conf_history.append(
-            (
-                pred_bbox.copy(),
-                self.velocity.copy(),
-                self._last_H,
-                self._last_H_reliable,
-            )
-        )
+        self._commit_normal_frame_history(frame, pred_bbox)
 
         return pred_bbox, score
 
@@ -781,7 +2187,7 @@ class SiamRAMTracker:
         curr_cx = current_bbox[0] + current_bbox[2] / 2.0
         curr_cy = current_bbox[1] + current_bbox[3] / 2.0
 
-        ref_bbox = history[-n_back][0]
+        ref_bbox = history[-n_back].bbox
         ref_cx = ref_bbox[0] + ref_bbox[2] / 2.0
         ref_cy = ref_bbox[1] + ref_bbox[3] / 2.0
 
@@ -821,7 +2227,7 @@ class SiamRAMTracker:
         clean = history[: len(history) - skip] if skip > 0 else history
 
         if clean:
-            last_clean_bbox = clean[-1][0].astype(float)
+            last_clean_bbox = np.asarray(clean[-1].bbox, dtype=float)
             self._search_cx = last_clean_bbox[0] + last_clean_bbox[2] / 2.0
             self._search_cy = last_clean_bbox[1] + last_clean_bbox[3] / 2.0
         else:
@@ -834,90 +2240,9 @@ class SiamRAMTracker:
         self,
         frame: np.ndarray,
     ) -> Tuple[np.ndarray, float]:
-        """
-        Dispatcher for all three occlusion recovery phases. At each call it
-                    pulls the latest EKF prediction to update the search centre and
-                    held_box, increments the occlusion frame counter, and handles all
-                    out-of-frame edge pinning and re-entry logic (e.g. if the target
-                    exited right, the search centre is pinned to the right edge until
-                    the EKF velocity turns inward). Then routes to:
-                        phase 0       → _occ_phase_siam (SiamABC fast attempt)
-                        phase 1…N     → _occ_phase_collect (YOLO candidate collection)
-                        phase N+1+    → _occ_phase_final_drm (velocity-scored DRM + verify)
-
-        Called every frame while in_occlusion is True. It owns the
-                    out-of-frame state machine and the phase routing. Centralising both
-                    here means neither individual phase method has to worry about edge
-                    pinning or out-of-frame transitions — they just run their own logic
-                    and return.
-        Args:
-            frame (any): current video frame as a numpy BGR array
-        Returns:
-            held_box: np.ndarray [x, y, w, h] last known / EKF-predicted position
-            score: float; 0.0 when no reacquisition happened
-    """
-        h_fr, w_fr = frame.shape[:2]
-        ekf = self.ekf
-        assert ekf is not None
-
-        ekf_raw = ekf.get_bbox()
-        self._search_cx = float(ekf_raw[0] + ekf_raw[2] / 2.0)
-        self._search_cy = float(ekf_raw[1] + ekf_raw[3] / 2.0)
-        self.held_box = self._clamp_bbox_to_frame(ekf_raw, frame)
-        self.velocity = ekf.get_velocity()
-        self._occ_frames += 1
-
-        if self._out_of_frame and self._exit_edge is not None:
-            if self._exit_edge == "right":
-                self._search_cx = float(w_fr - 1)
-            elif self._exit_edge == "left":
-                self._search_cx = 0.0
-            elif self._exit_edge == "bottom":
-                self._search_cy = float(h_fr - 1)
-            elif self._exit_edge == "top":
-                self._search_cy = 0.0
-
-        if self._out_of_frame:
-            ekf_inside = 0 <= self._search_cx < w_fr and 0 <= self._search_cy < h_fr
-            vel_inward = False
-            if ekf_inside and self._exit_edge is not None:
-                vel_inward = {
-                    "right": float(self.velocity[0]) < 0,
-                    "left": float(self.velocity[0]) > 0,
-                    "bottom": float(self.velocity[1]) < 0,
-                    "top": float(self.velocity[1]) > 0,
-                }.get(self._exit_edge, True)
-            if ekf_inside and vel_inward:
-                self._out_of_frame = False
-                self._exit_edge = None
-
-        else:
-            obj_w, obj_h = self._get_median_size()
-            oof_margin = float(max(obj_w, obj_h)) * 0.5
-            if (
-                self._search_cx < -oof_margin
-                or self._search_cx >= w_fr + oof_margin
-                or self._search_cy < -oof_margin
-                or self._search_cy >= h_fr + oof_margin
-            ):
-                if self._search_cx >= w_fr + oof_margin:
-                    self._exit_edge = "right"
-                elif self._search_cx < -oof_margin:
-                    self._exit_edge = "left"
-                elif self._search_cy >= h_fr + oof_margin:
-                    self._exit_edge = "bottom"
-                else:
-                    self._exit_edge = "top"
-                self._out_of_frame = True
-
-        if self._reacq_confirm_active:
-            return self._occ_phase_reacq_confirm(frame)
-        if self._occ_phase == 0:
-            return self._occ_phase_siam(frame)
-        elif 1 <= self._occ_phase <= self._cand_collection_frames:
-            return self._occ_phase_collect(frame)
-        else:
-            return self._occ_phase_final_drm(frame)
+        return self._occlusion_subsystem.occlusion_update(
+            frame=frame,
+        )
 
     def _begin_reacq_confirmation(
         self,
@@ -925,476 +2250,129 @@ class SiamRAMTracker:
         bbox: np.ndarray,
         score: float,
     ) -> Tuple[np.ndarray, float]:
-        """
-        Start tentative lock-on after a successful Stage-3 verification.
-
-        The tracker must stay above reacq_threshold for
-        `_reacq_confirm_frames` consecutive frames before exiting occlusion.
-        """
-        seed_bbox = self._clamp_bbox_to_frame(np.array(bbox, dtype=int), frame)
-        self.tracker.tracking_state.bbox = seed_bbox.copy()
-        self._cand_frames = []
-        self._occ_cam_vels = []
-        self._occ_phase = 0
-        self._reacq_confirm_active = True
-        self._reacq_confirm_streak = 1 if score >= self.reacq_threshold else 0
-        if self.debug:
-            print(
-                f"[occ frame {self._occ_frames}] phase=reacq_confirm_start  "
-                f"score={score:.3f}  streak={self._reacq_confirm_streak}/"
-                f"{self._reacq_confirm_frames}"
-            )
-        return self.held_box, score
+        return self._occlusion_subsystem.begin_reacq_confirmation(
+            frame=frame,
+            bbox=bbox,
+            score=score,
+        )
 
     def _reset_reacq_confirmation(
         self,
     ) -> None:
-        self._reacq_confirm_active = False
-        self._reacq_confirm_streak = 0
+        self._occlusion_subsystem.reset_reacq_confirmation()
 
     def _occ_phase_reacq_confirm(
         self,
         frame: np.ndarray,
     ) -> Tuple[np.ndarray, float]:
-        """
-        Confirmation sub-stage after Stage-3 candidate verification.
-
-        Success: require N consecutive frames with score >= reacq_threshold.
-        Failure: fall back to EKF-propagated held_box and restart occlusion phases.
-        """
-        held_box = self.held_box
-        assert held_box is not None
-        pred_bbox, score, _ = self.tracker.update(frame)
-        pred_bbox = np.array(pred_bbox, dtype=int)
-        conf_ok = score >= self.reacq_threshold
-        if conf_ok:
-            self._reacq_confirm_streak += 1
-            if self.debug:
-                print(
-                    f"[occ frame {self._occ_frames}] phase=reacq_confirm  "
-                    f"score={score:.3f}  streak={self._reacq_confirm_streak}/"
-                    f"{self._reacq_confirm_frames}"
-                )
-            if self._reacq_confirm_streak >= self._reacq_confirm_frames:
-                self._reset_reacq_confirmation()
-                self.recovered_early_occlusion = True
-                desc = _extract_descriptor(frame, pred_bbox)
-                return self._commit_reacquisition(frame, pred_bbox, desc, score)
-            return self.held_box, score
-
-        if self.debug:
-            print(
-                f"[occ frame {self._occ_frames}] phase=reacq_confirm  "
-                f"score={score:.3f}  streak_broken -> restart"
-            )
-        self._reset_reacq_confirmation()
-        self._cand_frames = []
-        self._occ_cam_vels = []
-        self._occ_phase = 0
-        self.tracker.tracking_state.bbox = held_box.copy()
-        return self.held_box, 0.0
+        return self._occlusion_subsystem.occ_phase_reacq_confirm(
+            frame=frame,
+        )
 
     def _occ_phase_siam(
         self,
         frame: np.ndarray,
     ) -> Tuple[np.ndarray, float]:
-        """
-        Phase 0 of occlusion recovery — the fast path. Computes the search
-                    ROI, plants a seed bbox there at the object's median size, runs
-                    SiamABC, and if the score clears reacq_threshold, runs a DRM check
-                    augmented with a single-frame direction score. If both pass, calls
-                    _commit_reacquisition and exits occlusion immediately. If either
-                    fails, resets the SiamABC state to held_box and advances to phase 1
-                    (candidate collection).
-
-        This is the cheapest recovery attempt — one tracker forward pass,
-                    one DRM call. When the target reappears quickly (e.g. brief occlusion
-                    by a thin object), this phase catches it without ever invoking YOLO,
-                    keeping latency low. Only if this fails do we pay the cost of YOLO
-                    candidate collection.
-        Args:
-            frame (any): current video frame as a numpy BGR array
-        Returns:
-            held_box: np.ndarray [x, y, w, h] if recovery failed this frame
-            score: float SiamABC confidence
-            OR, on success, returns the output of _commit_reacquisition.
-    """
-        held_box = self.held_box
-        assert held_box is not None
-
-        rx, ry, rw, rh = self._get_yolo_search_roi(frame=frame)
-
-        obj_w, obj_h = self._get_median_size()
-
-        roi_cx = rx + rw / 2.0
-        roi_cy = ry + rh / 2.0
-        seed_bbox = np.array(
-            [
-                int(roi_cx - obj_w / 2.0),
-                int(roi_cy - obj_h / 2.0),
-                obj_w,
-                obj_h,
-            ],
-            dtype=int,
+        return self._occlusion_subsystem.occ_phase_siam(
+            frame=frame,
         )
-        seed_bbox = self._clamp_bbox_to_frame(seed_bbox, frame)
-
-        self.tracker.tracking_state.bbox = seed_bbox
-        pred_bbox, score, _ = self.tracker.update(frame)
-        pred_bbox = np.array(pred_bbox, dtype=int)
-
-        if score >= self.occ_siam_reacq_threshold:
-
-            if (
-                not self._is_near_exit_edge(pred_bbox, frame, fraction=0.50)
-                and self.recovered_early_occlusion
-            ):
-                if self.debug:
-                    print(
-                        f"[occ frame {self._occ_frames}] phase=siam  "
-                        f"score={score:.3f}  REJECTED — too far from exit edge "
-                        f"({self._exit_edge})"
-                    )
-                self.tracker.tracking_state.bbox = held_box.copy()
-                self._cand_frames = []
-                self._occ_cam_vels = []
-                self._occ_phase = 1
-                return self.held_box, score
-            pred_desc = _extract_descriptor(frame, pred_bbox)
-
-            cand_vel_phase0 = None
-            if self._conf_history:
-                last_bbox = self._conf_history[-1][0]
-                dx = (pred_bbox[0] + pred_bbox[2] / 2.0) - (
-                    last_bbox[0] + last_bbox[2] / 2.0
-                )
-                dy = (pred_bbox[1] + pred_bbox[3] / 2.0) - (
-                    last_bbox[1] + last_bbox[3] / 2.0
-                )
-                cam = self._cam_vel_from_H(frame)
-                cand_vel_phase0 = np.array([dx - cam[0], dy - cam[1]])
-
-            drm_results = self.memory.drm_match(
-                frame=frame,
-                candidates=[pred_bbox],
-                ref_bbox=held_box,
-                velocity=self.velocity,
-                distractor_bank=self._distractor_bank if self._use_distractor_bank else (),
-                search_cx=self._search_cx,
-                search_cy=self._search_cy,
-                dist_sigma=self._effective_dist_sigma(frame),
-                lam_iou=self._drm_kwargs["lam_iou"],
-                lam_app=self._drm_kwargs["lam_app"],
-                lam_mot=self._drm_kwargs["lam_mot"],
-                lam_time=self._drm_kwargs["lam_time"],
-                alpha=self._drm_kwargs["alpha"],
-                gamma=self._drm_kwargs["gamma"],
-                margin=self.occ_siam_margin,
-                top_k=self._drm_kwargs["top_k"],
-                skip_threshold=self._drm_kwargs["skip_threshold"],
-                lam_dist=self._drm_kwargs["lam_dist"],
-                lam_cand_dir=self._drm_kwargs["lam_cand_dir"],
-            )
-
-            drm_score = drm_results[0][1] if drm_results else -1.0
-
-            lam_dir = self._drm_lam_cand_dir
-            if lam_dir > 0 and cand_vel_phase0 is not None:
-                dir_score = self._compute_velocity_score(cand_vel_phase0, self.velocity)
-                drm_score += lam_dir * (2.0 * dir_score - 1.0)
-
-            drm_ok = drm_score >= self.app_match_threshold
-            if self.debug:
-                print(
-                    f"[occ frame {self._occ_frames}] phase=siam  "
-                    f"score={score:.3f}  drm={drm_score:.3f}  pass={drm_ok}"
-                )
-
-            if drm_ok:
-                self.recovered_early_occlusion = True
-                return self._commit_reacquisition(frame, pred_bbox, pred_desc, score)
-
-            held_box = self.held_box
-            assert held_box is not None
-            self.tracker.tracking_state.bbox = held_box.copy()
-
-        self._cand_frames = []
-        self._occ_cam_vels = []
-        self._occ_phase = 1
-        return self.held_box, score
 
     def _occ_phase_collect(
         self,
         frame: np.ndarray,
     ) -> Tuple[np.ndarray, float]:
+        return self._occlusion_subsystem.occ_phase_collect(
+            frame=frame,
+        )
+
+    def _set_recovered_early_occlusion_flag(
+        self,
+    ) -> None:
         """
-        Runs YOLO on the search ROI for this frame, extracts appearance
-                    descriptors for detections (optionally capped by
-                    osnet_max_candidate_batch), and appends (bbox, desc) pairs to
-                    _cand_frames. Also records the camera velocity vector for this frame
-                    in _occ_cam_vels so the final phase can camera-compensate each
-                    per-step displacement. Updates the distractor bank with any detection
-                    that heavily overlaps held_box. Advances _occ_phase by 1 each call;
-                    when _occ_phase exceeds cand_collection_frames, the dispatcher will
-                    automatically route to the final phase next frame.
+        Mark whether the just-finished occlusion was "early" based on duration.
+        Negative threshold keeps legacy behavior (always early on success).
+        """
+        if self._early_occlusion_entry_n_frames >= 0:
+            return
+        if self._early_occlusion_max_frames < 0:
+            self.recovered_early_occlusion = True
+            return
+        self.recovered_early_occlusion = (
+            self._occ_frames <= self._early_occlusion_max_frames
+        )
 
-        Runs for `cand_collection_frames` consecutive frames (default 3) after
-                    phase 0 fails. Gathering candidates across multiple frames rather than
-                    a single frame is what makes velocity scoring possible — without a
-                    multi-frame track we can't measure how fast and in what direction each
-                    candidate is moving.
-        Args:
-            frame (any): current video frame as a numpy BGR array
-        Returns:
-            held_box: np.ndarray [x, y, w, h] — no position update this frame
-            0.0: score is always 0.0 during collection; no reacquisition here
-    """
-        cam_vel = self._cam_vel_from_H(frame)
-        self._occ_cam_vels.append(cam_vel)
+    def _set_early_occlusion_mode_on_entry(
+        self,
+    ) -> None:
+        """
+        Decide early-occlusion mode exactly at occlusion entry from frame_idx.
+        """
+        if self._early_occlusion_entry_n_frames < 0:
+            return
+        self.recovered_early_occlusion = (
+            self.frame_idx <= self._early_occlusion_entry_n_frames
+        )
 
-        detections = self._yolo_detect(frame)
-        self._last_yolo = detections
+    def _should_use_ram_for_occlusion_recovery(
+        self,
+    ) -> bool:
+        """
+        Returns True when occlusion matching should use RAM instead of DRM.
+        """
+        if not self._occlusion_use_ram_until_drm_full:
+            return False
+        drm_cap = max(1, int(getattr(self.memory, "drm_capacity", 1)))
+        return self.memory.drm_size() < drm_cap
 
-        dets_for_desc = self._limit_osnet_candidates(detections)
-        det_descs = _extract_descriptor(frame, dets_for_desc) if dets_for_desc else []
-        frame_cands = [
-            (np.array(bbox, dtype=int), desc.copy())
-            for bbox, desc in zip(dets_for_desc, det_descs)
-            if desc is not None
-        ]
-
-        self._cand_frames.append(frame_cands)
-
-        if self._use_distractor_bank and dets_for_desc:
-            held_box = self.held_box
-            assert held_box is not None
-            ious = self._iou_many_to_one(
-                np.asarray(dets_for_desc, dtype=np.float64), held_box
-            )
-            self._distractor_bank.extend(
-                det_desc
-                for det_desc, iou in zip(det_descs, ious)
-                if det_desc is not None and iou >= self.tau_occ
-            )
-
-        collection_phase_num = self._occ_phase
-        if self.debug:
-            print(
-                f"[occ frame {self._occ_frames}] "
-                f"phase=collect({collection_phase_num}/{self._cand_collection_frames})  "
-                f"detections={len(detections)}  stored={len(frame_cands)}"
-            )
-
-        self._occ_phase += 1
-
-        return self.held_box, 0.0
+    def _occlusion_memory_match(
+        self,
+        frame: np.ndarray,
+        candidates: List[np.ndarray],
+        ref_bbox: np.ndarray,
+        velocity: np.ndarray,
+        margin: float,
+        search_cx: Optional[float],
+        search_cy: Optional[float],
+        dist_sigma: Optional[float],
+        lam_iou: float,
+        lam_app: float,
+        lam_mot: float,
+        lam_time: float,
+        alpha: float,
+        gamma: float,
+        top_k: int,
+        skip_threshold: float,
+        lam_dist: float,
+        lam_cand_dir: float,
+    ) -> Tuple[List[Tuple[np.ndarray, float]], str]:
+        return self._occlusion_subsystem.occlusion_memory_match(
+            frame=frame,
+            candidates=candidates,
+            ref_bbox=ref_bbox,
+            velocity=velocity,
+            margin=margin,
+            search_cx=search_cx,
+            search_cy=search_cy,
+            dist_sigma=dist_sigma,
+            lam_iou=lam_iou,
+            lam_app=lam_app,
+            lam_mot=lam_mot,
+            lam_time=lam_time,
+            alpha=alpha,
+            gamma=gamma,
+            top_k=top_k,
+            skip_threshold=skip_threshold,
+            lam_dist=lam_dist,
+            lam_cand_dir=lam_cand_dir,
+        )
 
     def _occ_phase_final_drm(
         self,
         frame: np.ndarray,
     ) -> Tuple[np.ndarray, float]:
-        """
-        The full reacquisition phase. Works through these steps:
-
-                    1. Finds the last non-empty collection frame and uses its detections
-                       as the candidate pool.
-                    2. Calls _build_candidate_velocities to trace each candidate back
-                       through all earlier collection frames. Candidates that cannot be
-                       matched across every prior frame are dropped — they have no
-                       reliable velocity measurement.
-                    3. Runs DRM matching on the surviving fully-tracked candidates using
-                       an EKF-uncertainty-aware dist_sigma.
-                    4. Augments each DRM score with a direction/velocity consistency term
-                       (lam_cand_dir). If the target is out-of-frame or tiny, this term
-                       is reduced or zeroed.
-                    5. Sorts candidates by augmented score and verifies the top-k with
-                       the SiamABC tracker (motion-compensated by one frame of EKF velocity
-                       to account for the candidates being from a prior frame).
-                    6. The first candidate that clears reacq_threshold is committed via
-                       _commit_reacquisition. If all fail, resets to phase 0 and returns
-                       held_box.
-
-        This is the expensive but high-quality recovery path. It only runs
-                    once after the collection window closes, so its cost is amortised
-                    across the collection frames. Velocity scoring is the key advantage
-                    over a single-frame DRM match — a candidate that moves in the same
-                    direction and at roughly the same speed as the EKF-predicted target
-                    gets a boost; one moving the wrong way gets penalised, reducing
-                    false reacquisitions on distractors.
-        Args:
-            frame (any): current video frame as a numpy BGR array
-        Returns:
-            On success  → output of _commit_reacquisition (ekf_bbox, verify_score)
-            On failure  → held_box, 0.0  and phase reset to 0
-    """
-
-        def _reset():
-            self._occ_phase = 0
-            self._cand_frames = []
-            self._occ_cam_vels = []
-            held_box = self.held_box
-            assert held_box is not None
-            self.tracker.tracking_state.bbox = held_box.copy()
-
-        last_idx = -1
-        for i in range(len(self._cand_frames) - 1, -1, -1):
-            if self._cand_frames[i]:
-                last_idx = i
-                break
-
-        if last_idx == -1:
-            if self.debug:
-                print(
-                    f"[occ frame {self._occ_frames}] phase=final_drm  "
-                    f"no candidates in any collection frame — resetting"
-                )
-            _reset()
-            return self.held_box, 0.0
-
-        last_frame_cands = self._cand_frames[last_idx]
-        last_cand_bboxes = [b for (b, _) in last_frame_cands]
-        last_cand_arr = (
-            np.asarray(last_cand_bboxes, dtype=np.float64)
-            if last_cand_bboxes
-            else np.empty((0, 4), dtype=np.float64)
-        )
-
-        cand_vels = self._build_candidate_velocities(last_idx)
-
-        single_frame_mode = last_idx == 0
-
-        fully_tracked_bboxes = [
-            bbox
-            for bbox, vel in zip(last_cand_bboxes, cand_vels)
-            if (vel is not None or single_frame_mode)
-               and self._is_near_exit_edge(bbox, frame, fraction=0.50)
-        ]
-
-        _n_edge_rejected = sum(
-            1
-            for bbox, vel in zip(last_cand_bboxes, cand_vels)
-            if (vel is not None or single_frame_mode)
-            and not self._is_near_exit_edge(bbox, frame, fraction=0.50)
-        )
-        if self.debug:
-            print(
-                f"[occ frame {self._occ_frames}] phase=final_drm  "
-                f"last_cands={len(last_cand_bboxes)}  "
-                f"fully_tracked={len(fully_tracked_bboxes)}  "
-                f"drm_size={self.memory.drm_size()}  ram={len(self.memory)}  "
-                f"ekf_unc={cast(BBoxEKF, self.ekf).get_uncertainty():.1f}px"
-            )
-
-        if not fully_tracked_bboxes:
-            if self.debug:
-                print(
-                    f"[occ frame {self._occ_frames}] phase=final_drm  "
-                    f"no fully-tracked candidates — resetting"
-                )
-            if last_cand_bboxes:
-                self.held_box = self._nudge_toward_nearest(frame, last_cand_bboxes)
-                ekf = self.ekf
-                assert ekf is not None
-                ekf.nudge_position(self.held_box)
-            _reset()
-            return self.held_box, 0.0
-
-        dist_sigma = self._effective_dist_sigma(frame)
-
-        drm_results = self.memory.drm_match(
+        return self._occlusion_subsystem.occ_phase_final_drm(
             frame=frame,
-            candidates=fully_tracked_bboxes,
-            ref_bbox=self.held_box,
-            velocity=self.velocity,
-            distractor_bank=self._distractor_bank if self._use_distractor_bank else (),
-            search_cx=self._search_cx,
-            search_cy=self._search_cy,
-            dist_sigma=dist_sigma,
-            **self._drm_kwargs,
         )
-
-        if not drm_results:
-            if last_cand_bboxes:
-                self.held_box = self._nudge_toward_nearest(frame, last_cand_bboxes)
-                ekf = self.ekf
-                assert ekf is not None
-                ekf.nudge_position(self.held_box)
-            _reset()
-            return self.held_box, 0.0
-
-        lam_dir = self._drm_lam_cand_dir
-        if self._out_of_frame:
-            lam_dir = 0.0
-        elif self._is_long_distance(frame):
-            lam_dir *= 0.5
-
-        expected_vel = self.velocity
-
-        def _find_cand_idx(
-            drm_bbox,
-        ):
-            if last_cand_arr.size == 0:
-                return None
-            ious = self._iou_many_to_one(last_cand_arr, drm_bbox)
-            best_idx = int(np.argmax(ious))
-            return best_idx if float(ious[best_idx]) > 0.3 else None
-
-        final_scored = []
-        for drm_bbox, drm_score in drm_results:
-            cand_idx = _find_cand_idx(drm_bbox)
-
-            vel = (
-                cand_vels[cand_idx]
-                if cand_idx is not None and cand_idx < len(cand_vels)
-                else None
-            )
-            dir_score = (
-                self._compute_velocity_score(vel, expected_vel)
-                if vel is not None
-                else 0.5
-            )
-
-            augmented = drm_score + lam_dir * (2.0 * dir_score - 1.0)
-            final_scored.append((drm_bbox, augmented, dir_score))
-
-        final_scored.sort(key=lambda x: x[1], reverse=True)
-
-        vx = float(self.velocity[0])
-        vy = float(self.velocity[1])
-        top_k = self._drm_kwargs.get("top_k", 3)
-
-        for match_bbox, match_score, vel_score in final_scored[:top_k]:
-            adjusted = match_bbox.astype(float).copy()
-            adjusted[0] += vx
-            adjusted[1] += vy
-            adjusted = self._clamp_bbox_to_frame(np.array(adjusted, dtype=int), frame)
-
-            self.tracker.dynamic_update = False
-            verify_bbox, verify_score, _ = self.tracker.run_track_for_candidate(
-                frame, adjusted
-            )
-            verify_bbox = np.array(verify_bbox, dtype=int)
-            if self.debug:
-                print(
-                    f"[occ frame {self._occ_frames}] phase=final_drm_verify  "
-                    f"drm={match_score:.3f}  vel={vel_score:.3f}  "
-                    f"verify={verify_score:.3f}  "
-                    f"pass={verify_score >= self.reacq_threshold}"
-                )
-
-            if verify_score >= self.reacq_threshold:
-                if self._reacq_confirm_frames <= 1:
-                    self.recovered_early_occlusion = True
-                    desc = _extract_descriptor(frame, verify_bbox)
-                    self._cand_frames = []
-                    self._occ_cam_vels = []
-                    return self._commit_reacquisition(
-                        frame, verify_bbox, desc, verify_score
-                    )
-                return self._begin_reacq_confirmation(frame, verify_bbox, verify_score)
-
-        _reset()
-        return self.held_box, 0.0
 
     def _commit_reacquisition(
         self,
@@ -1403,89 +2381,12 @@ class SiamRAMTracker:
         desc: Optional[np.ndarray],
         score: float,
     ) -> Tuple[np.ndarray, float]:
-        """
-        Shared exit point for all three recovery phases. Updates the EKF
-                    with the confirmed bbox, then resets every occlusion-related flag
-                    and counter — in_occlusion, out_of_frame, exit_edge, occ_frames,
-                    occ_phase, cand_frames, entry_streak. Re-enables TTA and dynamic
-                    update on the SiamABC tracker. Admits the new descriptor to memory
-                    if available, syncs current_bbox / held_box / tracker state to the
-                    EKF output, and appends a history entry so _normal_update starts
-                    with a clean slate on the very next frame.
-
-        Every successful reacquisition path funnels through here. Centralising
-                    the teardown means none of the three phase methods has to individually
-                    worry about leaving stale state — one call cleans everything up. Any
-                    bug in the reset logic would affect all three phases equally, making
-                    it easy to test and audit.
-        Args:
-            frame (any): current video frame as a numpy BGR array
-            bbox (any): np.ndarray [x, y, w, h] of the verified reacquired position
-            desc (any): appearance descriptor for the reacquired bbox, or None
-            score (any): tracker confidence at the reacquired position
-        Returns:
-            ekf_bbox: np.ndarray [x, y, w, h] EKF-smoothed position after update
-            score: float passed through from the caller unchanged
-    """
-        ekf = self.ekf
-        assert ekf is not None
-        ekf.update(bbox)
-        ekf_bbox = ekf.get_bbox()
-        self.velocity = ekf.get_velocity()
-
-        self.in_occlusion = False
-        self._out_of_frame = False
-        self._exit_edge = None
-        self._occ_frames = 0
-        self._occ_phase = 0
-        self._pending_candidates = []
-        self._cand_frames = []
-        self._occ_cam_vels = []
-        self._reset_reacq_confirmation()
-        self._entry_streak = 0
-        self.tracker.enable_tta()
-        self.tracker.dynamic_update = self.tracker.tracking_config["dynamic_update"]
-
-        if desc is not None:
-            self.memory.try_admit(ekf_bbox, desc, self.held_box)
-        self.current_bbox: NDArray = ekf_bbox.copy()
-        self.held_box = ekf_bbox.copy()
-        self.tracker.tracking_state.bbox = ekf_bbox.copy()
-        self._search_cx = float(ekf_bbox[0] + ekf_bbox[2] / 2.0)
-        self._search_cy = float(ekf_bbox[1] + ekf_bbox[3] / 2.0)
-
-        cx = float(ekf_bbox[0] + ekf_bbox[2] / 2.0)
-        cy = float(ekf_bbox[1] + ekf_bbox[3] / 2.0)
-        self._center_history.append(np.array([cx, cy]))
-
-        cam_disp = np.zeros(2)
-        if self._last_H is not None:
-            h_fr, w_fr = frame.shape[:2]
-            cx, cy = w_fr / 2.0, h_fr / 2.0
-            denom = (
-                self._last_H[2, 0] * cx
-                + self._last_H[2, 1] * cy
-                + self._last_H[2, 2]
-                + 1e-8
-            )
-            ncx = (
-                      self._last_H[0, 0] * cx + self._last_H[0, 1] * cy + self._last_H[0, 2]
-                  ) / denom
-            ncy = (
-                      self._last_H[1, 0] * cx + self._last_H[1, 1] * cy + self._last_H[1, 2]
-                  ) / denom
-            cam_disp = np.array([ncx - cx, ncy - cy])
-        self._cam_vel_history.append(cam_disp)
-
-        self._conf_history.append(
-            (
-                ekf_bbox.copy(),
-                self.velocity.copy(),
-                self._last_H,
-                self._last_H_reliable,
-            )
+        return self._occlusion_subsystem.commit_reacquisition(
+            frame=frame,
+            bbox=bbox,
+            desc=desc,
+            score=score,
         )
-        return ekf_bbox, score
 
     def _get_median_size(
         self,
@@ -1521,175 +2422,25 @@ class SiamRAMTracker:
         self,
         frame: np.ndarray,
     ) -> np.ndarray:
-        """
-        Projects the frame centre through self._last_H and returns the
-                    displacement (dx, dy) as the camera velocity vector for this frame.
-                    Returns zeros if _last_H is None.
-
-        Called in _occ_phase_collect and _build_candidate_velocities to
-                    camera-compensate candidate displacements. Without this, a candidate
-                    that is stationary but appears to move because the camera panned would
-                    receive an undeserved velocity score and might beat a genuinely moving
-                    true target.
-        Args:
-            frame (any): current video frame (used only for its shape)
-        Returns:
-            np.ndarray of shape (2,) — (dx, dy) camera motion in pixels this frame
-    """
-        if self._last_H is None:
-            return np.zeros(2)
-        h_fr, w_fr = frame.shape[:2]
-        cx, cy = w_fr / 2.0, h_fr / 2.0
-        denom = (
-            self._last_H[2, 0] * cx
-            + self._last_H[2, 1] * cy
-            + self._last_H[2, 2]
-            + 1e-8
+        return self._occlusion_subsystem.cam_vel_from_h(
+            frame=frame,
         )
-        ncx = (
-                  self._last_H[0, 0] * cx + self._last_H[0, 1] * cy + self._last_H[0, 2]
-              ) / denom
-        ncy = (
-                  self._last_H[1, 0] * cx + self._last_H[1, 1] * cy + self._last_H[1, 2]
-              ) / denom
-        return np.array([ncx - cx, ncy - cy])
 
     def _effective_dist_sigma(
         self,
         frame: np.ndarray,
     ) -> float:
-        """
-        Computes the Gaussian distance penalty sigma for the DRM scoring
-                    function. Takes the larger of two candidates:
-                        size_sigma = drm_dist_sigma_factor × max(obj_w, obj_h)
-                        ekf_sigma  = ekf.get_uncertainty() × 1.5
-                    When the EKF is very uncertain (large covariance = long occlusion),
-                    ekf_sigma dominates and the penalty softens, allowing correct
-                    candidates that have drifted far from the stale EKF prediction to
-                    still score well.
-
-        Passed to drm_match in both _occ_phase_siam and _occ_phase_final_drm.
-                    A fixed sigma would over-penalise spatially displaced candidates after
-                    a long occlusion. This adaptive version ensures the spatial penalty
-                    stays meaningful early (tight sigma) and relaxes late (wide sigma)
-                    automatically, without any manual tuning per sequence.
-        Args:
-            frame (any): current video frame (used only for its shape via _get_median_size
-            and _is_long_distance)
-        Returns:
-            float: sigma in pixels to pass as dist_sigma to drm_match
-    """
-        obj_w, obj_h = self._get_median_size()
-        size_sigma = self._drm_dist_sigma_factor * float(max(obj_w, obj_h))
-        ekf = self.ekf
-        assert ekf is not None
-        ekf_sigma = ekf.get_uncertainty() * 1.5
-        return max(size_sigma, ekf_sigma)
+        return self._occlusion_subsystem.effective_dist_sigma(
+            frame=frame,
+        )
 
     def _build_candidate_velocities(
         self,
         last_idx: int,
     ) -> List[Optional[np.ndarray]]:
-        """
-        For each candidate in _cand_frames[last_idx], tries to match it back
-                    through every prior collection frame (0 … last_idx-1) using a combined
-                    IoU + cosine similarity score. If the candidate cannot be matched in
-                    any one prior frame, it is marked as None (will be excluded from DRM).
-
-                    For candidates that survive all frames, computes per-step displacements,
-                    subtracts the camera velocity at each step from _occ_cam_vels, and
-                    returns the mean camera-compensated velocity vector over the full track.
-
-                    Special case: if last_idx == 0 (only one collection frame), no prior
-                    frames exist so no matching is attempted — every candidate gets None
-                    (neutral score, not excluded).
-
-        Called once per final DRM phase from _occ_phase_final_drm. The
-                    velocities it produces are what separate "this detection is moving
-                    like the target" from "this is a distractor that just happens to look
-                    similar." Without cross-frame tracking, the velocity score would be
-                    meaningless single-frame noise.
-        Args:
-            last_idx (any): index into _cand_frames pointing to the last non-empty
-            collection frame; candidates from this frame are the ones
-            being scored
-        Returns:
-            List of Optional[np.ndarray] — one entry per candidate in last_frame.
-            Each is either a (2,) velocity vector [vx, vy] in px/frame,
-            or None if the candidate was not found in every prior frame.
-    """
-        last_frame = self._cand_frames[last_idx]
-        if not last_frame:
-            return []
-
-        n_prior = last_idx
-
-        results: List[Optional[np.ndarray]] = []
-
-        for bbox_last, desc_last in last_frame:
-            cx_last = float(bbox_last[0] + bbox_last[2] / 2.0)
-            cy_last = float(bbox_last[1] + bbox_last[3] / 2.0)
-
-            if n_prior == 0:
-                results.append(None)
-                continue
-
-            per_frame_cx = []
-            per_frame_cy = []
-            all_found = True
-
-            for j in range(last_idx):
-                early_frame = self._cand_frames[j]
-                if not early_frame:
-                    all_found = False
-                    break
-
-                best_score = 0.35
-                best_cx_e = None
-                best_cy_e = None
-
-                for bbox_e, desc_e in early_frame:
-                    match = 0.55 * _iou(bbox_last, bbox_e) + 0.45 * _cos_sim(
-                        desc_last, desc_e
-                    )
-                    if match > best_score:
-                        best_score = match
-                        best_cx_e = float(bbox_e[0] + bbox_e[2] / 2.0)
-                        best_cy_e = float(bbox_e[1] + bbox_e[3] / 2.0)
-
-                if best_cx_e is None:
-                    all_found = False
-                    break
-
-                per_frame_cx.append(best_cx_e)
-                per_frame_cy.append(best_cy_e)
-
-            if not all_found:
-                results.append(None)
-                continue
-
-            per_frame_cx.append(cx_last)
-            per_frame_cy.append(cy_last)
-
-            step_vels = []
-            for step in range(last_idx):
-                raw_dx = per_frame_cx[step + 1] - per_frame_cx[step]
-                raw_dy = per_frame_cy[step + 1] - per_frame_cy[step]
-
-                cam_idx = step + 1
-                if cam_idx < len(self._occ_cam_vels):
-                    cam = self._occ_cam_vels[cam_idx]
-                else:
-                    cam = np.zeros(2)
-
-                step_vels.append(
-                    np.array([raw_dx - cam[0], raw_dy - cam[1]], dtype=float)
-                )
-
-            found_vel = np.mean(step_vels, axis=0) if step_vels else np.zeros(2)
-            results.append(found_vel)
-
-        return results
+        return self._occlusion_subsystem.build_candidate_velocities(
+            last_idx=last_idx,
+        )
 
     def _compute_velocity_score(
         self,
@@ -1951,53 +2702,9 @@ class SiamRAMTracker:
         self,
         frame: np.ndarray,
     ) -> Tuple[Optional[np.ndarray], bool, np.ndarray]:
-        """
-        Estimate background motion homography between consecutive frames.
-
-        Mode selection:
-        - classic: original grid+affine RANSAC path (fast).
-        - accurate: feature+full-homography path with fallback to classic.
-        """
-        scale = self._flow_scale
-        small = cv2.resize(
-            frame, None, fx=scale, fy=scale, interpolation=cv2.INTER_LINEAR
+        return self._camera_motion_subsystem.estimate_homography(
+            frame=frame,
         )
-        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-
-        if self.disable_camera_motion:
-            return None, False, gray
-        if self.prev_gray is None:
-            return None, False, gray
-
-        if self.prev_gray.shape != gray.shape:
-            prev_gray_scaled = cv2.resize(
-                self.prev_gray,
-                (gray.shape[1], gray.shape[0]),
-                interpolation=cv2.INTER_LINEAR,
-            )
-        else:
-            prev_gray_scaled = self.prev_gray
-
-        if self._homography_mode == "accurate":
-            H, reliable = self._estimate_homography_accurate(
-                prev_gray_scaled=prev_gray_scaled,
-                gray=gray,
-                scale=scale,
-            )
-            if H is None:
-                H, reliable = self._estimate_homography_classic(
-                    prev_gray_scaled=prev_gray_scaled,
-                    gray=gray,
-                    scale=scale,
-                )
-            return H, reliable, gray
-
-        H, reliable = self._estimate_homography_classic(
-            prev_gray_scaled=prev_gray_scaled,
-            gray=gray,
-            scale=scale,
-        )
-        return H, reliable, gray
 
     def _limit_osnet_candidates(
         self,
@@ -2152,7 +2859,6 @@ class SiamRAMTracker:
         max_side = min(w_fr, h_fr)
 
         if self.frame_idx <= self._yolo_warmup_frames or not self.recovered_early_occlusion:
-            self.recovered_early_occlusion = False
             scale = self._yolo_warmup_center_scale
             bw = int(w_fr * scale)
             bh = int(h_fr * scale)
@@ -2305,6 +3011,161 @@ class SiamRAMTracker:
         y = int(np.clip(y, -h, h_fr))
         return np.array([x, y, w, h], dtype=int)
 
+    def _clip_bbox_inside_frame(
+        self,
+        bbox: np.ndarray,
+        frame: np.ndarray,
+    ) -> np.ndarray:
+        """
+        Strict frame clip used by GMC prior injection.
+        """
+        h_fr, w_fr = frame.shape[:2]
+        x, y, w, h = np.asarray(bbox, dtype=float).reshape(-1)[:4]
+        w = max(1.0, min(float(w), float(w_fr)))
+        h = max(1.0, min(float(h), float(h_fr)))
+        x = min(max(0.0, float(x)), max(0.0, float(w_fr) - w))
+        y = min(max(0.0, float(y)), max(0.0, float(h_fr) - h))
+        return np.array([round(x), round(y), round(w), round(h)], dtype=int)
+
+    def _to_homography_matrix(
+        self,
+        transform: Optional[np.ndarray],
+    ) -> Optional[np.ndarray]:
+        if transform is None:
+            return None
+        mat = np.asarray(transform, dtype=np.float64)
+        if mat.shape == (3, 3):
+            out = mat.copy()
+        elif mat.shape == (2, 3):
+            out = np.eye(3, dtype=np.float64)
+            out[:2, :] = mat
+        else:
+            return None
+        if not np.all(np.isfinite(out)):
+            return None
+        return out
+
+    def _gmc_motion_stats(
+        self,
+        transform: Optional[np.ndarray],
+        frame: np.ndarray,
+    ) -> Optional[Tuple[float, float, float, float, float]]:
+        hmat = self._to_homography_matrix(transform)
+        if hmat is None:
+            return None
+        dx = float(hmat[0, 2])
+        dy = float(hmat[1, 2])
+        a = float(hmat[0, 0])
+        b = float(hmat[1, 0])
+        scale = float(np.sqrt(max(a * a + b * b, 1e-9)))
+        rotation_deg = float(np.degrees(np.arctan2(b, a)))
+
+        h_fr, w_fr = frame.shape[:2]
+        corners = np.array(
+            [
+                [0.0, 0.0],
+                [float(w_fr - 1), 0.0],
+                [float(w_fr - 1), float(h_fr - 1)],
+                [0.0, float(h_fr - 1)],
+            ],
+            dtype=np.float32,
+        ).reshape(-1, 1, 2)
+        try:
+            warped = cv2.perspectiveTransform(corners, hmat).reshape(-1, 2)
+        except cv2.error:
+            return None
+        base = corners.reshape(-1, 2)
+        max_corner_disp = float(np.linalg.norm(warped - base, axis=1).max())
+        if not np.isfinite(max_corner_disp):
+            return None
+        return dx, dy, scale, rotation_deg, max_corner_disp
+
+    def _gmc_motion_is_valid(
+        self,
+        transform: Optional[np.ndarray],
+        frame: np.ndarray,
+    ) -> Tuple[bool, str]:
+        return self._camera_motion_subsystem.gmc_motion_is_valid(
+            transform=transform,
+            frame=frame,
+        )
+
+    def _warp_bbox_with_homography(
+        self,
+        bbox: np.ndarray,
+        transform: Optional[np.ndarray],
+        frame: np.ndarray,
+    ) -> Optional[np.ndarray]:
+        hmat = self._to_homography_matrix(transform)
+        if hmat is None:
+            return None
+
+        arr = np.asarray(bbox, dtype=float).reshape(-1)
+        if arr.size < 4:
+            return None
+        x, y, w, h = arr[:4]
+        if w <= 0 or h <= 0:
+            return None
+
+        corners = np.array(
+            [
+                [x, y],
+                [x + w, y],
+                [x + w, y + h],
+                [x, y + h],
+            ],
+            dtype=np.float32,
+        ).reshape(-1, 1, 2)
+        try:
+            warped = cv2.perspectiveTransform(corners, hmat).reshape(-1, 2)
+        except cv2.error:
+            return None
+
+        if not np.all(np.isfinite(warped)):
+            return None
+
+        x1 = float(np.min(warped[:, 0]))
+        y1 = float(np.min(warped[:, 1]))
+        x2 = float(np.max(warped[:, 0]))
+        y2 = float(np.max(warped[:, 1]))
+        warped_bbox = np.array([x1, y1, max(1.0, x2 - x1), max(1.0, y2 - y1)])
+        return self._clip_bbox_inside_frame(warped_bbox, frame)
+
+    def _innermost_visual_tracker(self):
+        tracker = self.tracker
+        if hasattr(tracker, "tracker") and hasattr(tracker.tracker, "tracking_state"):
+            return tracker.tracker
+        if hasattr(tracker, "base_tracker"):
+            base = tracker.base_tracker
+            if hasattr(base, "tracker") and hasattr(base.tracker, "tracking_state"):
+                return base.tracker
+            if hasattr(base, "tracking_state"):
+                return base
+        if hasattr(tracker, "tracking_state"):
+            return tracker
+        return None
+
+    def _set_tracker_search_prior(
+        self,
+        prior_bbox: np.ndarray,
+    ) -> bool:
+        visual_tracker = self._innermost_visual_tracker()
+        if visual_tracker is None:
+            return False
+        prior = np.asarray(prior_bbox, dtype=int).copy()
+        visual_tracker.tracking_state.bbox = prior.copy()
+        if hasattr(visual_tracker, "_ot"):
+            visual_tracker._ot.state = list(prior.astype(float))
+        return True
+
+    def _apply_gmc_search_prior(
+        self,
+        frame: np.ndarray,
+    ) -> None:
+        self._camera_motion_subsystem.apply_gmc_search_prior(
+            frame=frame,
+        )
+
     def _h_translation_magnitude(
         self,
         H,
@@ -2334,6 +3195,64 @@ class SiamRAMTracker:
         new_cx = (H[0, 0] * cx + H[0, 1] * cy + H[0, 2]) / denom
         new_cy = (H[1, 0] * cx + H[1, 1] * cy + H[1, 2]) / denom
         return float(np.hypot(new_cx - cx, new_cy - cy))
+
+    def _camera_motion_weighted_disp(
+        self,
+        frame: Optional[np.ndarray] = None,
+    ) -> float:
+        """
+        Exponentially weighted camera displacement mean. If frame is provided,
+        includes the current-frame displacement in addition to history.
+        """
+        cam_hist = list(self._cam_disp_history)
+        if frame is not None:
+            cam_hist.append(self._h_translation_magnitude(self._last_H, frame))
+        if not cam_hist:
+            return 0.0
+
+        vals = np.asarray(cam_hist, dtype=float)
+        weights = np.exp(np.linspace(-1.0, 0.0, len(vals)))
+        denom = float(np.sum(weights))
+        if denom <= 1e-8:
+            return float(vals[-1])
+        weights /= denom
+        return float(np.dot(weights, vals))
+
+    def _motion_gate_reference_diag(
+        self,
+        frame: np.ndarray,
+        bbox_hint: Optional[np.ndarray] = None,
+    ) -> float:
+        """
+        Reference bbox diagonal used to normalize camera displacement for
+        tiny-object-aware heavy-motion gating.
+        """
+        ref_bbox = bbox_hint
+        if ref_bbox is None:
+            ref_bbox = self.current_bbox
+        if ref_bbox is None:
+            ref_bbox = self.held_box
+
+        if ref_bbox is not None:
+            arr = np.asarray(ref_bbox, dtype=float).reshape(-1)
+            if arr.size >= 4:
+                w = float(arr[2])
+                h = float(arr[3])
+                if w > 0.0 and h > 0.0:
+                    return max(1e-6, float(np.hypot(w, h)))
+
+        h_fr, w_fr = frame.shape[:2]
+        return max(1e-6, float(np.hypot(float(w_fr), float(h_fr))))
+
+    def _is_heavy_camera_motion(
+        self,
+        frame: np.ndarray,
+        bbox_hint: Optional[np.ndarray] = None,
+    ) -> Tuple[bool, float]:
+        return self._camera_motion_subsystem.is_heavy_camera_motion(
+            frame=frame,
+            bbox_hint=bbox_hint,
+        )
 
     def _classify_loss_cause(
         self,
@@ -2368,7 +3287,7 @@ class SiamRAMTracker:
 
         area_vote = "occlusion"
         if len(history) >= 3:
-            areas = np.array([float(b[2] * b[3]) for b, _, _, _ in history])
+            areas = np.array([float(e.bbox[2] * e.bbox[3]) for e in history])
             med_area = float(np.median(areas))
             n = len(areas)
             t = np.arange(n, dtype=float)
@@ -2379,9 +3298,7 @@ class SiamRAMTracker:
 
         cam_vote = "occlusion"
         if cam_hist:
-            weights = np.exp(np.linspace(-1, 0, len(cam_hist)))
-            weights /= weights.sum()
-            mean_disp = float(np.dot(weights, cam_hist))
+            mean_disp = self._camera_motion_weighted_disp(frame=None)
             if mean_disp >= cam_disp_threshold:
                 cam_vote = "camera_motion"
 
@@ -2458,16 +3375,16 @@ class SiamRAMTracker:
             assert ekf is not None
             return ekf
 
-        first_bbox, _, _, _ = clean[0]
+        first_bbox = clean[0].bbox
         fresh_ekf = BBoxEKF(
             first_bbox,
             process_noise=self.ekf_process_noise,
             meas_noise=self.ekf_meas_noise,
         )
 
-        for bbox, _vel, h, h_rel in clean[1:]:
-            fresh_ekf.predict(H=h, H_reliable=(h is not None))
-            fresh_ekf.update(bbox)
+        for entry in clean[1:]:
+            fresh_ekf.predict(H=entry.H, H_reliable=(entry.H is not None))
+            fresh_ekf.update(entry.bbox)
 
         robust_vel = self._robust_velocity_from_history(
             skip=skip,
@@ -2517,7 +3434,7 @@ class SiamRAMTracker:
         if n < 4:
             return 0
 
-        areas = np.array([float(b[2] * b[3]) for b, _, _, _ in history], dtype=float)
+        areas = np.array([float(e.bbox[2] * e.bbox[3]) for e in history], dtype=float)
         smoothed = np.array(
             [
                 float(np.median(areas[max(0, i - smooth_k + 1): i + 1]))
@@ -2671,8 +3588,8 @@ class SiamRAMTracker:
 
         if n_use >= 3:
             recent = history[-n_use:]
-            xs = np.array([float(b[0] + b[2] / 2) for b, *_ in recent])
-            ys = np.array([float(b[1] + b[3] / 2) for b, *_ in recent])
+            xs = np.array([float(e.bbox[0] + e.bbox[2] / 2) for e in recent])
+            ys = np.array([float(e.bbox[1] + e.bbox[3] / 2) for e in recent])
             t = np.arange(n_use, dtype=float)
 
             vx_trend = float(np.polyfit(t, xs, 1)[0])

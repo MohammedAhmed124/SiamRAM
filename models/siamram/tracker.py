@@ -138,6 +138,21 @@ class SiamRAMExperimentTracker:
         drm_dist_sigma_factor: float = 2.5,
         drm_lam_cand_dir: float = 0.15,
         drm_lam_cand_vel: float = 0.20,
+        # Separate occlusion-recovery DRM weights used only when occlusion was
+        # entered via the distractor below-gate force path. Defaults mirror the
+        # normal occlusion DRM params, so an unset block reproduces old behavior.
+        distractor_occ_drm_lam_iou: float = 0.40,
+        distractor_occ_drm_lam_app: float = 0.30,
+        distractor_occ_drm_lam_mot: float = 0.20,
+        distractor_occ_drm_lam_time: float = 0.10,
+        distractor_occ_drm_alpha: float = 0.05,
+        distractor_occ_drm_gamma: float = 0.30,
+        distractor_occ_drm_margin: float = 0.35,
+        distractor_occ_drm_top_k: int = 3,
+        distractor_occ_drm_skip_threshold: float = 0.80,
+        distractor_occ_drm_lam_dist: float = 0.15,
+        distractor_occ_drm_lam_cand_dir: float = 0.15,
+        distractor_occ_drm_dist_sigma_factor: float = 2.5,
         vel_score_min_speed: float = 0.5,
         ekf_process_noise: float = 2.0,
         ekf_meas_noise: float = 5.0,
@@ -195,6 +210,19 @@ class SiamRAMExperimentTracker:
         block_occlusion_on_camera_motion: bool = True,
         camera_motion_heavy_disp_threshold: float = 18.0,
         camera_motion_heavy_norm_threshold: float = 0.35,
+        # Optionally swap the inner SiamABC dynamic-template update params
+        # (re-selection cadence N + memory window length) while camera motion is
+        # heavy. Disabled by default; high-motion values default to the base
+        # tracker values (resolved lazily) so enabling is a no-op until tuned.
+        camera_motion_template_adapt_enabled: bool = False,
+        camera_motion_high_N: int = 15,
+        camera_motion_high_memory_window_size: int = 15,
+        # Dynamic-update admission gates under heavy motion; < 0 = leave unchanged.
+        camera_motion_high_dynamic_update_threshold: float = -1.0,
+        camera_motion_high_iou_threshold: float = -1.0,
+        # Keep high-motion template behavior for this many frames after motion
+        # calms before reverting to base (0 = revert immediately).
+        camera_motion_template_adapt_linger_frames: int = 0,
         early_occlusion_entry_n_frames: int = -1,
         early_occlusion_max_frames: int = -1,
         occlusion_use_ram_until_drm_full: bool = True,
@@ -215,6 +243,7 @@ class SiamRAMExperimentTracker:
         out_of_frame_search_expand_growth_every: int = -1,
         max_proc_long_edge: int = 1280,
         entry_patience: int = 3,
+        entry_patience_high_motion: int = -1,
         cand_collection_frames: int = 3,
         osnet_max_candidate_batch: int = 0,
         yolo_warmup_frames: int = 60,
@@ -271,6 +300,8 @@ class SiamRAMExperimentTracker:
         distractor_mode_mahalanobis_meas_var: float = 25.0,
         distractor_mode_switch_margin: float = 0.08,
         distractor_mode_ambiguity_hold_frames: int = 2,
+        distractor_mode_selected_below_gate_hold_frames: int = 0,
+        distractor_mode_selected_below_gate_force_occlusion: bool = False,
         distractor_mode_reentry_cooldown_frames: int = 12,
         distractor_mode_post_exit_memory_freeze_frames: int = 8,
         distractor_mode_post_exit_template_freeze_frames: int = 8,
@@ -543,6 +574,30 @@ class SiamRAMExperimentTracker:
         self._camera_motion_heavy_norm_threshold = max(
             0.0, float(camera_motion_heavy_norm_threshold)
         )
+        self._camera_motion_template_adapt_enabled = bool(
+            camera_motion_template_adapt_enabled
+        )
+        self._camera_motion_high_N = max(1, int(camera_motion_high_N))
+        self._camera_motion_high_memory_window_size = max(
+            1, int(camera_motion_high_memory_window_size)
+        )
+        self._camera_motion_high_dynamic_update_threshold = float(
+            camera_motion_high_dynamic_update_threshold
+        )
+        self._camera_motion_high_iou_threshold = float(
+            camera_motion_high_iou_threshold
+        )
+        self._camera_motion_template_adapt_linger_frames = max(
+            0, int(camera_motion_template_adapt_linger_frames)
+        )
+        # Frames of high-motion behavior still owed after motion calmed.
+        self._camera_motion_adapt_linger_left: int = 0
+        # Base (calm-motion) values captured lazily from the inner tracker on the
+        # first adapt call, so we restore exactly what the tracker config set.
+        self._base_template_N: Optional[int] = None
+        self._base_template_window: Optional[int] = None
+        self._base_dynamic_update_threshold: Optional[float] = None
+        self._base_iou_threshold: Optional[float] = None
         self._early_occlusion_entry_n_frames = int(early_occlusion_entry_n_frames)
         self._early_occlusion_max_frames = int(early_occlusion_max_frames)
         self._occlusion_use_ram_until_drm_full = bool(
@@ -563,11 +618,42 @@ class SiamRAMExperimentTracker:
         }
 
         self._drm_lam_cand_dir = drm_lam_cand_dir
+
+        # Parallel occlusion-DRM params, selected by _active_drm_* when the
+        # active occlusion episode was triggered by the distractor below-gate
+        # force-occlusion path (_distractor_occlusion_active).
+        self._distractor_occ_drm_kwargs: DRMKwargs = {
+            "lam_iou": distractor_occ_drm_lam_iou,
+            "lam_app": distractor_occ_drm_lam_app,
+            "lam_mot": distractor_occ_drm_lam_mot,
+            "lam_time": distractor_occ_drm_lam_time,
+            "alpha": distractor_occ_drm_alpha,
+            "gamma": distractor_occ_drm_gamma,
+            "margin": distractor_occ_drm_margin,
+            "top_k": distractor_occ_drm_top_k,
+            "skip_threshold": distractor_occ_drm_skip_threshold,
+            "lam_dist": distractor_occ_drm_lam_dist,
+            "lam_cand_dir": distractor_occ_drm_lam_cand_dir,
+        }
+        self._distractor_occ_drm_lam_cand_dir = distractor_occ_drm_lam_cand_dir
+        self._distractor_occ_drm_dist_sigma_factor = max(
+            0.1, float(distractor_occ_drm_dist_sigma_factor)
+        )
         self._use_distractor_bank = (
             self._distractor_bank_maxlen > 0
         )
         self._vel_score_min_speed = vel_score_min_speed
         self._entry_patience = max(1, entry_patience)
+        # Alternate occlusion-entry patience used while camera motion is heavy.
+        # < 1 disables it (always use _entry_patience). Meant as a softer
+        # alternative to block_occlusion_on_camera_motion: set that False and set
+        # a larger patience here to wait longer before declaring loss during pans
+        # (with blocking ON the streak resets each heavy frame, so this is moot).
+        self._entry_patience_high_motion = (
+            max(1, int(entry_patience_high_motion))
+            if int(entry_patience_high_motion) >= 1
+            else -1
+        )
         self._cand_collection_frames = max(1, cand_collection_frames)
         self._reacq_confirm_frames = max(1, int(reacq_confirm_frames))
 
@@ -777,6 +863,12 @@ class SiamRAMExperimentTracker:
         self._distractor_mode_ambiguity_hold_frames = max(
             0, int(distractor_mode_ambiguity_hold_frames)
         )
+        self._distractor_mode_selected_below_gate_hold_frames = max(
+            0, int(distractor_mode_selected_below_gate_hold_frames)
+        )
+        self._distractor_mode_selected_below_gate_force_occlusion = bool(
+            distractor_mode_selected_below_gate_force_occlusion
+        )
         self._distractor_mode_reentry_cooldown_frames = max(
             0, int(distractor_mode_reentry_cooldown_frames)
         )
@@ -869,6 +961,12 @@ class SiamRAMExperimentTracker:
         self._distractor_mode_roi_size: Optional[Tuple[int, int]] = None
         self._distractor_mode_stable_count: int = 0
         self._distractor_mode_ambiguous_count: int = 0
+        self._distractor_mode_below_gate_count: int = 0
+        # True while the current occlusion episode was entered via the distractor
+        # below-gate force path (selects _distractor_occ_drm_* ranking params).
+        self._distractor_occlusion_active: bool = False
+        # Per-frame request set by the force path, consumed at occlusion entry.
+        self._pending_distractor_occlusion: bool = False
         self._distractor_mode_reentry_cooldown: int = 0
         self._distractor_mode_memory_freeze_left: int = 0
         self._distractor_mode_template_freeze_left: int = 0
@@ -952,6 +1050,8 @@ class SiamRAMExperimentTracker:
         self._stable_anchor_bbox = bbox.copy()
         self._distractor_focus_bbox = bbox.copy()
         self.in_occlusion = False
+        self._distractor_occlusion_active = False
+        self._pending_distractor_occlusion = False
         self.frame_idx = 0
         self.velocity = np.zeros(2)
 
@@ -1016,6 +1116,7 @@ class SiamRAMExperimentTracker:
         self._distractor_mode_roi_size = None
         self._distractor_mode_stable_count = 0
         self._distractor_mode_ambiguous_count = 0
+        self._distractor_mode_below_gate_count = 0
         self._distractor_mode_reentry_cooldown = 0
         self._distractor_mode_memory_freeze_left = 0
         self._distractor_mode_template_freeze_left = 0
@@ -1731,11 +1832,13 @@ class SiamRAMExperimentTracker:
         frame: np.ndarray,
         pred_bbox: np.ndarray,
         score: float,
+        effective_threshold: float = 0.0,
     ) -> Tuple[np.ndarray, float]:
         return self._distractor_mode_subsystem.distractor_mode_update(
             frame=frame,
             pred_bbox=pred_bbox,
             score=score,
+            effective_threshold=effective_threshold,
         )
 
     def _clear_jump_watch_state(
@@ -1978,6 +2081,88 @@ class SiamRAMExperimentTracker:
             spike_step_norm=spike_step_norm,
         )
 
+    def _apply_camera_motion_template_adapt(self, heavy: bool) -> None:
+        """
+        Swap the inner SiamABC dynamic-template update params to the high-motion
+        set while camera motion is heavy, and restore the base values otherwise.
+
+        - N is the select_representatives() cadence (read fresh each frame, so a
+          plain reassignment takes effect immediately).
+        - memory_window_size is the maxlen of the fixed-size memory deques, so a
+          change requires rebuilding them (oldest frames drop when shrinking),
+          mirroring the warmup rebuild and _reinit_dynamic_template_only. The
+          rebuild only runs on an actual size change, so a flickering motion
+          signal does not thrash the deques every frame.
+        - The dynamic-update admission gates (dynamic_update_threshold score gate
+          and the iou_threshold continuity gate) are also swapped when their
+          high-motion values are set (>= 0); each is read fresh per frame by the
+          inner tracker, so a plain reassignment takes effect immediately.
+
+        No-op unless camera_motion_template_adapt_enabled.
+        """
+        if not self._camera_motion_template_adapt_enabled:
+            return
+        tr = self.tracker
+        if self._base_template_N is None:
+            self._base_template_N = int(getattr(tr, "N", self._camera_motion_high_N))
+            self._base_template_window = int(
+                getattr(
+                    tr,
+                    "memory_window_size",
+                    self._camera_motion_high_memory_window_size,
+                )
+            )
+            self._base_dynamic_update_threshold = float(
+                getattr(tr, "dynamic_update_threshold", 0.8)
+            )
+            self._base_iou_threshold = float(
+                tr.tracking_config.get("iou_threshold", 0.3)
+            )
+
+        desired_n = self._camera_motion_high_N if heavy else self._base_template_N
+        desired_w = (
+            self._camera_motion_high_memory_window_size
+            if heavy
+            else self._base_template_window
+        )
+
+        if int(getattr(tr, "N", desired_n)) != desired_n:
+            tr.N = desired_n
+
+        if int(getattr(tr, "memory_window_size", desired_w)) != desired_w:
+            tr.memory_window_size = desired_w
+            tr.all_memory_imgs = deque(tr.all_memory_imgs, maxlen=desired_w)
+            tr.classification_scores = deque(
+                tr.classification_scores, maxlen=desired_w
+            )
+            if tr.classification_scores:
+                scores = np.array(tr.classification_scores, dtype=np.float16)
+                tr._best_idx = int(np.argmax(scores))
+                tr._best_score = float(scores[tr._best_idx])
+            else:
+                tr._best_idx = 0
+                tr._best_score = 0.5
+            tr._is_full = len(tr.classification_scores) == desired_w
+
+        # Dynamic-update admission gates (sentinel < 0 => leave the gate alone).
+        if self._camera_motion_high_dynamic_update_threshold >= 0.0:
+            desired_dut = (
+                self._camera_motion_high_dynamic_update_threshold
+                if heavy
+                else self._base_dynamic_update_threshold
+            )
+            if float(getattr(tr, "dynamic_update_threshold", desired_dut)) != desired_dut:
+                tr.dynamic_update_threshold = desired_dut
+
+        if self._camera_motion_high_iou_threshold >= 0.0:
+            desired_iou = (
+                self._camera_motion_high_iou_threshold
+                if heavy
+                else self._base_iou_threshold
+            )
+            if float(tr.tracking_config.get("iou_threshold", desired_iou)) != desired_iou:
+                tr.tracking_config["iou_threshold"] = desired_iou
+
     def _normal_update(
         self,
         frame: np.ndarray,
@@ -2007,6 +2192,10 @@ class SiamRAMExperimentTracker:
             pred_bbox: np.ndarray [x, y, w, h] from SiamABC
             score: float confidence from SiamABC
     """
+        # Per-frame request flag; only the distractor below-gate force path sets
+        # it (later this frame), and occlusion entry consumes it. Reset here so a
+        # blocked/declined force does not leak into a later occlusion episode.
+        self._pending_distractor_occlusion = False
         if self._distractor_mode_template_freeze_left > 0:
             self.tracker.dynamic_update = False
             self._distractor_mode_template_freeze_left = max(
@@ -2025,6 +2214,24 @@ class SiamRAMExperimentTracker:
 
         if self._gmc_prior_enabled:
             self._apply_gmc_search_prior(frame)
+        if self._camera_motion_template_adapt_enabled:
+            heavy_now, _ = self._is_heavy_camera_motion(
+                frame, bbox_hint=self.current_bbox
+            )
+            # Keep the high-motion behavior lingering for a window of frames after
+            # motion calms, so the template settings don't snap back the instant a
+            # pan ends (and during the brief blur that follows).
+            if heavy_now:
+                self._camera_motion_adapt_linger_left = (
+                    self._camera_motion_template_adapt_linger_frames
+                )
+                effective_heavy = True
+            elif self._camera_motion_adapt_linger_left > 0:
+                self._camera_motion_adapt_linger_left -= 1
+                effective_heavy = True
+            else:
+                effective_heavy = False
+            self._apply_camera_motion_template_adapt(effective_heavy)
         pred_bbox, score, _ = self.tracker.update(frame)
         pred_bbox = np.array(pred_bbox, dtype=int)
 
@@ -2037,6 +2244,7 @@ class SiamRAMExperimentTracker:
                 frame=frame,
                 pred_bbox=pred_bbox,
                 score=float(score),
+                effective_threshold=float(effective_threshold),
             )
         else:
             pred_bbox, score = self._apply_hard_jump_rejection(
@@ -2072,8 +2280,12 @@ class SiamRAMExperimentTracker:
         else:
             self._entry_streak = 0
 
+        effective_entry_patience = self._entry_patience
+        if self._entry_patience_high_motion >= 1 and heavy_cam_motion:
+            effective_entry_patience = self._entry_patience_high_motion
+
         if (
-            self._entry_streak >= self._entry_patience
+            self._entry_streak >= effective_entry_patience
             and self.frame_idx >= 0
             and self.enter_occlusion_on_loss
         ):
@@ -2103,6 +2315,10 @@ class SiamRAMExperimentTracker:
             self._distractor_mode_roi_size = None
             self._distractor_mode_stable_count = 0
             self._distractor_mode_ambiguous_count = 0
+            self._distractor_mode_below_gate_count = 0
+            # Tag this occlusion episode as distractor-origin iff the below-gate
+            # force path requested it this frame (selects _distractor_occ_drm_*).
+            self._distractor_occlusion_active = bool(self._pending_distractor_occlusion)
             self._distractor_mode_overlap_lock_active = False
             self._distractor_mode_overlap_clear_count = 0
             self._distractor_mode_overlap_lock_frames = 0
@@ -2528,6 +2744,25 @@ class SiamRAMExperimentTracker:
         return self._occlusion_subsystem.cam_vel_from_h(
             frame=frame,
         )
+
+    @property
+    def _active_drm_kwargs(self) -> DRMKwargs:
+        """Occlusion-DRM ranking weights for the current episode (distractor-origin → separate set)."""
+        if self._distractor_occlusion_active:
+            return self._distractor_occ_drm_kwargs
+        return self._drm_kwargs
+
+    @property
+    def _active_drm_lam_cand_dir(self) -> float:
+        if self._distractor_occlusion_active:
+            return self._distractor_occ_drm_lam_cand_dir
+        return self._drm_lam_cand_dir
+
+    @property
+    def _active_drm_dist_sigma_factor(self) -> float:
+        if self._distractor_occlusion_active:
+            return self._distractor_occ_drm_dist_sigma_factor
+        return self._drm_dist_sigma_factor
 
     def _effective_dist_sigma(
         self,

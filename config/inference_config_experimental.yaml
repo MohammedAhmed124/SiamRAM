@@ -65,8 +65,7 @@ tracker:
   total_stride: 16
   # Score-map spatial resolution (NxN candidate grid).
   score_size: 16
-  # Number of proposals scored per update.
-  N: 40
+
   # Allow the dynamic template to evolve across frames.
   dynamic_update: true
   # Use the auxiliary similarity score in candidate ranking.
@@ -85,8 +84,10 @@ tracker:
   instance_size: 256
   # Pixel size of the template crop.
   template_size: 128
+  # Number of proposals scored per update.
+  N: 15
   # Length of the rolling template-memory window.
-  memory_window_size: 30
+  memory_window_size: 15
   # Confidence required to admit a new dynamic-template update.
   dynamic_update_threshold: 0.80
   # Lower clamp on the running-confidence smoother.
@@ -150,9 +151,9 @@ ram_tracker:
   # ---------------------------------------------------------------------------
   yolo:
     # Which YOLO checkpoint to load for re-detection.
-    yolo_weights: "checkpoints/yolo12n.pt"
+    yolo_weights: "checkpoints/yolo11n.pt"
     # Drop any YOLO box whose confidence is below this (lower = more candidates, more noise).
-    yolo_conf: 0.60
+    yolo_conf: 0.30
     # Side length YOLO downsamples each crop to (bigger = better on tiny targets, slower).
     yolo_imgsz: 320
     # Run YOLO with test-time augmentation (flips + multi-scale). Higher recall, ~3-4× slower.
@@ -201,8 +202,15 @@ ram_tracker:
     conf_threshold: 0.5
     # How many consecutive low-score frames before declaring occlusion entry.
     entry_patience: 1
+    # Alternate entry patience used only while camera motion is heavy (same signal
+    # as camera_motion gating). Lets you wait longer before declaring loss during
+    # fast pans (a transient low score is often just the tracker lagging, not real
+    # occlusion). -1 = disabled (always use entry_patience). NOTE: only takes
+    # effect if block_occlusion_on_camera_motion is False — with blocking ON the
+    # entry streak is reset every heavy frame, so it never reaches any patience.
+    entry_patience_high_motion: 3
     # Should we even go into occlusion mode when SiamABC reports loss.
-    enter_occlusion_on_loss: true
+    enter_occlusion_on_loss: True
     # Small corrective blend toward the predicted state when drifting (0 = off).
     nudge_alpha: 0.0
 
@@ -291,13 +299,39 @@ ram_tracker:
     # to avoid false triggers caused by the camera moving rather than the target.
     gating:
       # Block distractor-mode entry when camera motion is heavy (avoids false jumps from shake).
-      block_distractor_mode_on_camera_motion: False
+      block_distractor_mode_on_camera_motion: True
       # Block occlusion entry when camera motion is heavy (avoids fake target-loss from shake).
-      block_occlusion_on_camera_motion: true
+      block_occlusion_on_camera_motion: false
       # Camera moved more than this many px in one frame = "heavy".
       camera_motion_heavy_disp_threshold: 15.0
       # Camera moved more than this fraction of bbox diagonal = "heavy" (matters for tiny targets).
-      camera_motion_heavy_norm_threshold: 0.35
+      camera_motion_heavy_norm_threshold: 0.2
+
+    # While camera motion is heavy, optionally swap the SiamABC dynamic-template
+    # update params (re-selection cadence N + memory window length) and revert
+    # when it calms. Useful to let the template adapt faster (smaller window/N)
+    # during fast pans, or be steadier. Reuses the same heavy-motion signal as
+    # the gating block above (camera_motion_heavy_disp/norm thresholds).
+    template_adapt:
+      # Master switch. false = always use the base tracker.N / memory_window_size
+      # (zero behavior change; the heavy-motion signal isn't even computed early).
+      camera_motion_template_adapt_enabled: True
+      # select_representatives() cadence (dynamic template re-picked every N frames) under heavy motion.
+      camera_motion_high_N: 5
+      # Memory window length (frames kept for dynamic-template selection) under heavy motion.
+      # Shrinking drops the oldest memory frames; deques are rebuilt only on an actual change.
+      camera_motion_high_memory_window_size: 5
+      # Dynamic-template ADMISSION GATES under heavy motion (-1 = leave unchanged).
+      # Score gate: min confidence to admit a dynamic-template update. Raising it
+      # under motion avoids learning blurred/low-quality templates during pans.
+      camera_motion_high_dynamic_update_threshold: 0.5
+      # Continuity gate: min IoU(pred, prev) to admit an update. Raising it under
+      # motion rejects large jumpy boxes; lowering it tolerates fast displacement.
+      camera_motion_high_iou_threshold: 0.5
+      # Keep the high-motion behavior above lingering for this many frames after
+      # camera motion calms, before reverting to base (handles the brief blur /
+      # settle right after a pan ends). 0 = revert the instant motion drops.
+      camera_motion_template_adapt_linger_frames: 30
 
   # ---------------------------------------------------------------------------
   # gmc_prior: warp the previous bbox forward by camera motion so SiamABC
@@ -389,7 +423,7 @@ ram_tracker:
     # Thresholds for confirming a successful reacquisition.
     reacquisition:
       # SiamABC score needed to accept "yes, I found the target again".
-      reacq_threshold: 0.75
+      reacq_threshold: 0.5
       # How many consecutive frames must clear that threshold before committing.
       reacq_confirm_frames: 1
       # Stricter SiamABC-only threshold for exiting occlusion via SiamABC alone.
@@ -411,13 +445,13 @@ ram_tracker:
     # DRM (composite candidate ranking) used during occlusion recovery.
     drm:
       # Appearance similarity needed to admit a candidate into the DRM bank.
-      drm_tau_sim: 0.8
+      drm_tau_sim: 0.65
       # Minimum support count required to promote a bank entry.
       drm_mmin: 3
       # Max entries in the DRM bank.
-      drm_capacity: 50
+      drm_capacity: 20
       # Required margin between the DRM winner and runner-up.
-      drm_margin: 0.5
+      drm_margin: 0.6
       # Skip the DRM update if quality score is already this high.
       drm_skip_threshold: 23
       # Number of top candidates evaluated per DRM step.
@@ -439,6 +473,41 @@ ram_tracker:
       # Weight on motion-model agreement.
       drm_lam_mot: 0.0
 
+    # Separate occlusion-recovery DRM ranking weights, used ONLY when occlusion
+    # was entered via the distractor below-gate force path
+    # (distractor_mode_selected_below_gate_force_occlusion). This is a full,
+    # independent set used wholesale — it does not inherit from drm: above, so
+    # keep both in sync where you want them equal. The shared bank params
+    # (tau_sim / mmin / capacity) and the accept threshold (app_match_threshold)
+    # are NOT duplicated here. Seeded to mirror drm: above (no behavior change
+    # until you tune it); e.g. raise distractor_occ_drm_lam_dist to bias recovery
+    # away from the nearby distractor the tracker just lost the target to.
+    distractor_occ_drm:
+      # Required margin between the DRM winner and runner-up.
+      distractor_occ_drm_margin: 0.7
+      # Skip the DRM update if quality score is already this high.
+      distractor_occ_drm_skip_threshold: 23
+      # Number of top candidates evaluated per DRM step.
+      distractor_occ_drm_top_k: 3
+      # Temporal decay rate.
+      distractor_occ_drm_alpha: 0.05
+      # Global suppressor weight (0 = off).
+      distractor_occ_drm_gamma: 0
+      # Weight on appearance similarity in the composite score.
+      distractor_occ_drm_lam_app: 1
+      # Weight on spatial distance penalty (raise to avoid re-locking the distractor).
+      distractor_occ_drm_lam_dist: 0.0
+      # Weight on candidate-direction consistency.
+      distractor_occ_drm_lam_cand_dir: 0.0
+      # Weight on temporal recency (newer = better).
+      distractor_occ_drm_lam_time: 0.0
+      # Weight on IoU overlap.
+      distractor_occ_drm_lam_iou: 0.0
+      # Weight on motion-model agreement.
+      distractor_occ_drm_lam_mot: 0.0
+      # Scales the Gaussian distance sigma by max(obj_w, obj_h).
+      distractor_occ_drm_dist_sigma_factor: 2.5
+
     # Velocity-based scoring that feeds the DRM cand_vel / cand_dir terms above.
     velocity:
       # Below this speed, don't trust velocity-based scoring.
@@ -454,7 +523,7 @@ ram_tracker:
   # ---------------------------------------------------------------------------
   spike_reject:
     # Master switch for the spike / hard-jump rejection workflow.
-    spike_reject_enabled: true
+    spike_reject_enabled: False
     # Don't run spike detection in the first N frames (startup noise).
     spike_reject_min_frames: 3
     # Only run when current tracker score is at least this.
@@ -486,7 +555,7 @@ ram_tracker:
     spike_reject_confirm_frames: 1
     # Stricter absolute floor when target is tiny — kills false positives caused
     # by tiny bbox diagonals amplifying small camera residuals into huge step-norms.
-    spike_reject_long_distance_abs_norm_min: 0.1
+    spike_reject_long_distance_abs_norm_min: 0.0
     # Treat the apparent jump as ego-motion noise when the residual is smaller than
     # this × the raw camera motion at the target point (0 = off).
     spike_reject_camera_residual_min_ratio: 0
@@ -520,13 +589,27 @@ ram_tracker:
       # Restored to the a098fde baseline (0.70) — 0.55-0.60 was too loose and let the wrong object win.
       distractor_mode_min_similarity: 0.0
       # Required similarity for the winning candidate to be accepted this frame.
-      # If below this, tracker stays in distractor mode and holds the previous focus.
-      distractor_mode_selected_min_similarity: 1
+      # If below this, the tracker holds (see below_gate_hold_frames) and then,
+      # if it never recovers, exits distractor mode (legacy a098 behavior).
+      distractor_mode_selected_min_similarity: 0.9
+      # Bounded "below-gate" motion hold: when the winning candidate's appearance
+      # is below selected_min_similarity, keep tracking the EKF/anchor motion
+      # prediction for up to this many consecutive frames instead of immediately
+      # exiting distractor mode (which hands control to the base tracker — often
+      # the distractor — and unfreezes memory). The counter resets the moment the
+      # winner clears the gate again. 0 = disabled (immediate exit, a098 behavior).
+      distractor_mode_selected_below_gate_hold_frames: 15
+      # When the below-gate hold above is exhausted (target presumed lost), force
+      # an immediate handoff to occlusion recovery instead of reverting to the
+      # base tracker (which may be confidently locked on the distractor). Still
+      # subject to the heavy-camera-motion guard. false = legacy behavior (return
+      # the base-tracker box and only enter occlusion if its score later drops).
+      distractor_mode_selected_below_gate_force_occlusion: true
       # Hard spatial leash: the selected candidate's centre must be within this many
       # focus-bbox diagonals of the held focus point. Prevents the system from
       # teleporting to a far-away object during distractor mode and on recovery.
       # 1.0 ≈ within one bbox-diagonal of the held box. <= 0 disables the gate.
-      distractor_mode_selected_max_focus_dist_frac: 1.1
+      distractor_mode_selected_max_focus_dist_frac: -1.0
       # Max YOLO detections considered per frame (0 = all).
       distractor_mode_yolo_topk: 8
       # Max target descriptors stored for ROI similarity scoring.
@@ -537,30 +620,27 @@ ram_tracker:
       distractor_mode_roi_expand: 1.2
       # Minimum ROI side length (px) — prevents absurdly small crops.
       distractor_mode_roi_min_side: 32
-      # How to rank candidates. Both modes now sort by the same composite score
-      # (appearance + IoU + distance penalty + distractor-bank suppression — none
-      # of the weights below are ignored). The label is kept for visual/log
-      # disambiguation and downstream behaviour hooks.
+      # How to label ranking mode. Both modes currently sort by the same
+      # composite score (appearance + IoU + distance + distractor-bank suppression).
       distractor_compare_mode: "ram"
       # Required top1 - top2 margin to actually switch identity.
       distractor_mode_switch_margin: 0.08
       # Stick with the current pick for this many ambiguous frames.
-      distractor_mode_ambiguity_hold_frames: 2
+      distractor_mode_ambiguity_hold_frames: 30
       # Behaviour preset for distractor handling ("standard" or alternatives).
       distractor_mode_behavior_mode: "standard"
 
-    # Composite-score weights used by distractor-mode ranking — applied in
-    # BOTH "ram" and "drm" compare modes (the historical "DRM only" gating has
-    # been removed so IoU / distance / negative-bank penalties always count).
+    # Composite-score weights used by distractor-mode ranking when
+    # `distractor_compare_mode` is "drm".
     drm:
       # Weight on appearance similarity.
       distractor_drm_lam_app: 1.0
       # Weight on IoU with the expected focus box.
-      distractor_drm_lam_iou: 0.5
+      distractor_drm_lam_iou: 1
       # Weight on the distance-from-focus penalty (penalises candidates far from focus).
-      distractor_drm_lam_dist: 0.3
+      distractor_drm_lam_dist: 0
       # Weight on the negative-bank (known-distractor) penalty (EdgeDAM-style suppressor).
-      distractor_drm_gamma: 0.25
+      distractor_drm_gamma: 0.5
       # Controls how quickly the distance penalty grows with offset (must be > 0).
       distractor_drm_dist_sigma_factor: 2.5
       # Only use the last K stored distractors in the negative-bank penalty.
@@ -614,7 +694,7 @@ ram_tracker:
       # Re-init the dynamic SiamABC template when exiting distractor mode.
       distractor_mode_exit_reinit_enabled: True
       # Need this many "stable" frames before exiting distractor mode.
-      distractor_mode_exit_stable_frames: 500
+      distractor_mode_exit_stable_frames: 6
       # IoU between consecutive matches needed to count a frame as "stable".
       distractor_mode_exit_same_iou: 0.6
       # Forbid re-entering distractor mode for this many frames after exit.

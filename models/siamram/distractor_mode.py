@@ -95,6 +95,7 @@ class DistractorModeSubsystem:
         self._host._distractor_mode_roi_size = None
         self._host._distractor_mode_stable_count = 0
         self._host._distractor_mode_ambiguous_count = 0
+        self._host._distractor_mode_below_gate_count = 0
         self._host._distractor_mode_overlap_lock_active = False
         self._host._distractor_mode_overlap_clear_count = 0
         self._host._distractor_mode_overlap_lock_frames = 0
@@ -149,6 +150,7 @@ class DistractorModeSubsystem:
         self._host._distractor_mode_roi_size = None
         self._host._distractor_mode_stable_count = 0
         self._host._distractor_mode_ambiguous_count = 0
+        self._host._distractor_mode_below_gate_count = 0
         self._host._distractor_mode_overlap_lock_active = False
         self._host._distractor_mode_overlap_clear_count = 0
         self._host._distractor_mode_overlap_lock_frames = 0
@@ -176,6 +178,7 @@ class DistractorModeSubsystem:
         frame: np.ndarray,
         pred_bbox: np.ndarray,
         score: float,
+        effective_threshold: float = 0.0,
     ) -> Tuple[np.ndarray, float]:
         """
         During distractor mode:
@@ -287,58 +290,89 @@ class DistractorModeSubsystem:
             return pred_bbox, score
     
         compare_mode = self._host._distractor_compare_mode
-        # Both "ram" and "drm" sort by the composite score (index 3) so the IoU
-        # with the held bbox, the distance-from-focus penalty, and the negative
-        # distractor-bank penalty all contribute in either mode. The two modes
-        # remain distinguishable downstream (visual labels, distractor-bank
-        # admission), but neither silently ignores any weight.
+        # Both modes rank by the same composite weighted score.
         score_idx = 3
         cands.sort(key=lambda t: t[score_idx], reverse=True)
         best_bbox, best_desc, best_sim, best_score, best_iou, best_dist, best_neg, best_maha = cands[0]
         if best_sim < self._host._distractor_mode_selected_min_similarity:
-            hold_source = (
-                self._host._distractor_focus_bbox
-                if self._host._distractor_focus_bbox is not None
-                else (
+            self._host._distractor_mode_below_gate_count += 1
+            hold_frames = self._host._distractor_mode_selected_below_gate_hold_frames
+            if (
+                hold_frames > 0
+                and self._host._distractor_mode_below_gate_count <= hold_frames
+            ):
+                # Bounded "below-gate" motion hold. The top-ranked candidate's
+                # appearance dipped under the accept gate (motion blur / pose
+                # change / partial occlusion). Instead of abandoning the target
+                # and handing control back to the base tracker — which is often
+                # sitting on the distractor, and which also unfreezes memory and
+                # risks template poisoning — ride the EKF/anchor motion
+                # prediction for a few frames and wait for appearance to recover.
+                hold_source = (
                     focus_override
                     if focus_override is not None
-                    else pred_bbox
+                    else (
+                        self._host._distractor_focus_bbox
+                        if self._host._distractor_focus_bbox is not None
+                        else pred_bbox
+                    )
                 )
+                hold_bbox = self._host._clamp_bbox_to_frame(
+                    np.array(hold_source, dtype=int).copy(), frame
+                )
+                self._host._distractor_mode_visual_reals = [hold_bbox.copy()]
+                self._host._distractor_mode_visual_distractors = [
+                    np.array(bb, dtype=int).copy() for bb, *_ in cands
+                ]
+                self._host._distractor_mode_stable_count = 0
+                self._host._distractor_focus_bbox = hold_bbox.copy()
+                self._host.tracker.tracking_state.bbox = hold_bbox.copy()
+                self._host.visual_mode = "distractor"
+                self._host.visual_reason = "Distractor mode: below-gate motion hold"
+                self._host.visual_details = (
+                    f"best_app={best_sim:.2f} < "
+                    f"sel_min={self._host._distractor_mode_selected_min_similarity:.2f}  "
+                    f"hold={self._host._distractor_mode_below_gate_count}/{hold_frames}  "
+                    f"cands={len(cands)}  roi={roi[2]}x{roi[3]}"
+                )
+                self._host._jump_reject_distractor_timer = max(
+                    self._host._jump_reject_distractor_timer,
+                    self._host._jump_reject_distractor_mode_frames,
+                )
+                adjusted_score = max(float(score), float(np.clip(best_sim, 0.0, 1.0)))
+                adjusted_score = self._host._apply_distractor_mode_penalty(
+                    frame, hold_bbox, adjusted_score
+                )
+                return hold_bbox.copy(), float(adjusted_score)
+
+            # Held long enough without the appearance recovering — the target is
+            # presumed lost. Exit distractor mode and, when configured, force the
+            # occlusion-recovery handoff this frame instead of reverting to the
+            # base tracker (which may be confidently locked onto the distractor
+            # and would otherwise never trip the score-based loss gate).
+            self._host._exit_distractor_mode(
+                "Best ROI candidate similarity below distractor-mode gate"
             )
-            hold_bbox = self._host._clamp_bbox_to_frame(
-                np.array(hold_source, dtype=int).copy(),
-                frame,
-            )
-            self._host._distractor_mode_visual_reals = [hold_bbox.copy()]
-            self._host._distractor_mode_visual_distractors = [
-                np.array(bb, dtype=int).copy() for bb, *_ in cands
-            ]
-            self._host._distractor_mode_stable_count = 0
-            self._host._distractor_mode_ambiguous_count = 0
-            self._host._distractor_focus_bbox = hold_bbox.copy()
-            self._host._stable_anchor_bbox = hold_bbox.copy()
-            self._host.tracker.tracking_state.bbox = hold_bbox.copy()
-            self._host.visual_mode = "distractor"
-            self._host.visual_reason = (
-                "Distractor mode: waiting for selected similarity gate"
-            )
-            self._host.visual_details = (
-                f"best_app={best_sim:.2f} < "
-                f"sel_min={self._host._distractor_mode_selected_min_similarity:.2f}  "
-                f"cands={len(cands)}  roi={roi[2]}x{roi[3]}"
-            )
-            self._host._jump_reject_distractor_timer = max(
-                self._host._jump_reject_distractor_timer,
-                self._host._jump_reject_distractor_mode_frames,
-            )
-            adjusted_score = max(float(score), float(np.clip(best_sim, 0.0, 1.0)))
-            adjusted_score = self._host._apply_distractor_mode_penalty(
-                frame,
-                hold_bbox,
-                adjusted_score,
-            )
-            return hold_bbox.copy(), float(adjusted_score)
-    
+            if (
+                self._host._distractor_mode_selected_below_gate_force_occlusion
+                and self._host.enter_occlusion_on_loss
+            ):
+                # Drive the standard occlusion-on-loss entry: saturate the entry
+                # streak and report a sub-threshold score so the caller enters
+                # occlusion recovery immediately. Still routes through the normal
+                # entry path, so the camera-motion guard applies (matching
+                # jump_reject_force_occlusion semantics).
+                self._host._pending_distractor_occlusion = True
+                self._host._entry_streak = max(
+                    self._host._entry_streak, self._host._entry_patience
+                )
+                forced_score = min(float(score), float(effective_threshold) - 1e-6)
+                return pred_bbox, float(forced_score)
+            return pred_bbox, score
+
+        # Winner cleared the appearance gate this frame — reset the hold counter.
+        self._host._distractor_mode_below_gate_count = 0
+
         distractor_entries = cands[1:]
         max_overlap_iou = 0.0
         if distractor_entries:
@@ -411,9 +445,9 @@ class DistractorModeSubsystem:
                 pass
         self._host.visual_mode = "distractor"
         if compare_mode == "ram":
-            self._host.visual_reason = "Distractor mode: RAM composite ROI ranking"
+            self._host.visual_reason = "Distractor mode: RAM appearance ROI ranking"
         else:
-            self._host.visual_reason = "Distractor mode: DRM composite ROI ranking"
+            self._host.visual_reason = "Distractor mode: DRM-style ROI re-ranking"
         maha_txt = "n/a" if not np.isfinite(best_maha) else f"{best_maha:.2f}"
         self._host.visual_details = (
             f"cmp={compare_mode}  app={best_sim:.2f}  score={best_score:.2f}  iou={best_iou:.2f}  "

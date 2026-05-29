@@ -730,6 +730,14 @@ class OcclusionRecoverySubsystem:
         self._host.tracker.enable_tta()
         self._host.tracker.dynamic_update = self._host.tracker.tracking_config["dynamic_update"]
     
+        self._host._record_recovery(
+            mode="occlusion",
+            frame=frame,
+            bbox=ekf_bbox,
+            score=score,
+            desc=desc,
+        )
+
         if desc is not None:
             self._host.memory.try_admit(ekf_bbox, desc, self._host.held_box)
         self._host.current_bbox: NDArray = ekf_bbox.copy()

@@ -255,7 +255,28 @@ class DistractorModeSubsystem:
             anchor_mean=anchor_mean,
             anchor_cov=anchor_cov,
         )
-    
+
+        max_focus_dist_frac = self._host._distractor_mode_selected_max_focus_dist_frac
+        if max_focus_dist_frac > 0.0 and cands:
+            focus_diag = float(
+                np.hypot(focus_bbox_arr[2], focus_bbox_arr[3])
+            ) + 1e-8
+            max_focus_dist = max_focus_dist_frac * focus_diag
+            kept: list = []
+            for cand in cands:
+                bb = cand[0]
+                cand_cx = float(bb[0] + bb[2] / 2.0)
+                cand_cy = float(bb[1] + bb[3] / 2.0)
+                d = float(np.hypot(cand_cx - focus_cx, cand_cy - focus_cy))
+                if d <= max_focus_dist:
+                    kept.append(cand)
+                elif self._host.debug:
+                    print(
+                        f"[distractor:far-cand-reject] frame={self._host.frame_idx} "
+                        f"d={d:.1f} max={max_focus_dist:.1f}"
+                    )
+            cands = kept
+
         if not cands:
             self._host._exit_distractor_mode("No similar objects in ROI")
             return pred_bbox, score
@@ -266,14 +287,57 @@ class DistractorModeSubsystem:
             return pred_bbox, score
     
         compare_mode = self._host._distractor_compare_mode
-        score_idx = 3 if compare_mode == "drm" else 2
+        # Both "ram" and "drm" sort by the composite score (index 3) so the IoU
+        # with the held bbox, the distance-from-focus penalty, and the negative
+        # distractor-bank penalty all contribute in either mode. The two modes
+        # remain distinguishable downstream (visual labels, distractor-bank
+        # admission), but neither silently ignores any weight.
+        score_idx = 3
         cands.sort(key=lambda t: t[score_idx], reverse=True)
         best_bbox, best_desc, best_sim, best_score, best_iou, best_dist, best_neg, best_maha = cands[0]
         if best_sim < self._host._distractor_mode_selected_min_similarity:
-            self._host._exit_distractor_mode(
-                "Best ROI candidate similarity below distractor-mode gate"
+            hold_source = (
+                self._host._distractor_focus_bbox
+                if self._host._distractor_focus_bbox is not None
+                else (
+                    focus_override
+                    if focus_override is not None
+                    else pred_bbox
+                )
             )
-            return pred_bbox, score
+            hold_bbox = self._host._clamp_bbox_to_frame(
+                np.array(hold_source, dtype=int).copy(),
+                frame,
+            )
+            self._host._distractor_mode_visual_reals = [hold_bbox.copy()]
+            self._host._distractor_mode_visual_distractors = [
+                np.array(bb, dtype=int).copy() for bb, *_ in cands
+            ]
+            self._host._distractor_mode_stable_count = 0
+            self._host._distractor_mode_ambiguous_count = 0
+            self._host._distractor_focus_bbox = hold_bbox.copy()
+            self._host._stable_anchor_bbox = hold_bbox.copy()
+            self._host.tracker.tracking_state.bbox = hold_bbox.copy()
+            self._host.visual_mode = "distractor"
+            self._host.visual_reason = (
+                "Distractor mode: waiting for selected similarity gate"
+            )
+            self._host.visual_details = (
+                f"best_app={best_sim:.2f} < "
+                f"sel_min={self._host._distractor_mode_selected_min_similarity:.2f}  "
+                f"cands={len(cands)}  roi={roi[2]}x{roi[3]}"
+            )
+            self._host._jump_reject_distractor_timer = max(
+                self._host._jump_reject_distractor_timer,
+                self._host._jump_reject_distractor_mode_frames,
+            )
+            adjusted_score = max(float(score), float(np.clip(best_sim, 0.0, 1.0)))
+            adjusted_score = self._host._apply_distractor_mode_penalty(
+                frame,
+                hold_bbox,
+                adjusted_score,
+            )
+            return hold_bbox.copy(), float(adjusted_score)
     
         distractor_entries = cands[1:]
         max_overlap_iou = 0.0
@@ -328,6 +392,14 @@ class DistractorModeSubsystem:
         self._host._distractor_focus_bbox = best_bbox.copy()
         self._host._stable_anchor_bbox = best_bbox.copy()
         self._host.tracker.tracking_state.bbox = best_bbox.copy()
+        self._host._record_recovery(
+            mode="distractor",
+            frame=frame,
+            bbox=best_bbox,
+            score=float(np.clip(best_sim, 0.0, 1.0)),
+            sim=float(best_sim),
+            iou=float(best_iou),
+        )
         if self._host._distractor_mode_anchor_ekf_enabled and self._host._distractor_anchor_ekf is not None:
             try:
                 self._host._distractor_anchor_ekf.update(best_bbox)
@@ -339,9 +411,9 @@ class DistractorModeSubsystem:
                 pass
         self._host.visual_mode = "distractor"
         if compare_mode == "ram":
-            self._host.visual_reason = "Distractor mode: RAM appearance ROI ranking"
+            self._host.visual_reason = "Distractor mode: RAM composite ROI ranking"
         else:
-            self._host.visual_reason = "Distractor mode: DRM-style ROI re-ranking"
+            self._host.visual_reason = "Distractor mode: DRM composite ROI ranking"
         maha_txt = "n/a" if not np.isfinite(best_maha) else f"{best_maha:.2f}"
         self._host.visual_details = (
             f"cmp={compare_mode}  app={best_sim:.2f}  score={best_score:.2f}  iou={best_iou:.2f}  "
@@ -365,6 +437,14 @@ class DistractorModeSubsystem:
                     frame=frame,
                     bbox=reinit_bbox.copy(),
                     score_hint=float(np.clip(best_sim, 0.0, 1.0)),
+                )
+                self._host._record_recovery(
+                    mode="distractor",
+                    frame=frame,
+                    bbox=reinit_bbox,
+                    score=float(np.clip(best_sim, 0.0, 1.0)),
+                    sim=float(best_sim),
+                    iou=float(best_iou),
                 )
                 self._host.current_bbox = reinit_bbox.copy()
                 self._host.held_box = reinit_bbox.copy()

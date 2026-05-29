@@ -85,9 +85,9 @@ tracker:
   # Pixel size of the template crop.
   template_size: 128
   # Number of proposals scored per update.
-  N: 15
+  N: 40
   # Length of the rolling template-memory window.
-  memory_window_size: 15
+  memory_window_size: 30
   # Confidence required to admit a new dynamic-template update.
   dynamic_update_threshold: 0.80
   # Lower clamp on the running-confidence smoother.
@@ -192,27 +192,11 @@ ram_tracker:
     # Cap on candidates passed into OSNet per call (0 = no cap).
     osnet_max_candidate_batch: 5
     # Minimum appearance similarity needed to accept an identity (1.0 effectively disables this gate).
-    app_match_threshold: 1
+    app_match_threshold: 0
 
-  # ---------------------------------------------------------------------------
-  # tracking_state: thresholds & hysteresis for the normal-tracking state machine.
-  # ---------------------------------------------------------------------------
-  tracking_state:
-    # SiamABC score below this means the target is probably lost.
-    conf_threshold: 0.5
-    # How many consecutive low-score frames before declaring occlusion entry.
-    entry_patience: 1
-    # Alternate entry patience used only while camera motion is heavy (same signal
-    # as camera_motion gating). Lets you wait longer before declaring loss during
-    # fast pans (a transient low score is often just the tracker lagging, not real
-    # occlusion). -1 = disabled (always use entry_patience). NOTE: only takes
-    # effect if block_occlusion_on_camera_motion is False — with blocking ON the
-    # entry streak is reset every heavy frame, so it never reaches any patience.
-    entry_patience_high_motion: 3
-    # Should we even go into occlusion mode when SiamABC reports loss.
-    enter_occlusion_on_loss: True
-    # Small corrective blend toward the predicted state when drifting (0 = off).
-    nudge_alpha: 0.0
+  # NOTE: normal-tracking loss-detection knobs (conf_threshold, entry_patience,
+  # entry_patience_high_motion, enter_occlusion_on_loss, nudge_alpha) now live
+  # under occlusion.entry below, grouped with the recovery phase they trigger.
 
   # ---------------------------------------------------------------------------
   # camera_motion: estimating and reacting to the camera moving between frames.
@@ -417,21 +401,159 @@ ram_tracker:
     shrinkage_max_lookback: 30
 
   # ---------------------------------------------------------------------------
-  # occlusion: behaviour when the target is lost and we're trying to find it again.
+  # occlusion: the lost-target recovery lifecycle, organized BY PHASE so you can
+  # tune one stage in one place. Flow:
+  #   entry (loss declared)
+  #     -> [detectability_probe verdict, decided earlier in normal tracking]
+  #     -> phase0_siam  -> phase1_collect -> phase2_final_drm
+  #     -> reacquire_confirm -> commit / exit
+  # The loader flattens every leaf below to a tracker kwarg by its leaf-key name,
+  # so this nesting is purely organizational (no behavioral effect).
   # ---------------------------------------------------------------------------
   occlusion:
-    # Thresholds for confirming a successful reacquisition.
-    reacquisition:
+
+    # === ENTRY: when a low SiamABC score is declared a real loss and we switch
+    # from normal tracking into occlusion recovery. ===
+    entry:
+      # SiamABC score below this means the target is probably lost.
+      conf_threshold: 0.5
+      # How many consecutive low-score frames before declaring occlusion entry.
+      entry_patience: 1
+      # Alternate entry patience used only while camera motion is heavy (same signal
+      # as camera_motion gating). Lets you wait longer before declaring loss during
+      # fast pans (a transient low score is often just the tracker lagging, not real
+      # occlusion). -1 = disabled (always use entry_patience). NOTE: only takes
+      # effect if block_occlusion_on_camera_motion is False — with blocking ON the
+      # entry streak is reset every heavy frame, so it never reaches any patience.
+      entry_patience_high_motion: 3
+      # Should we even go into occlusion mode when SiamABC reports loss.
+      enter_occlusion_on_loss: True
+      # Small corrective blend toward the predicted state when drifting (0 = off).
+      nudge_alpha: 0.0
+
+    # === DETECTABILITY PROBE: a class-agnostic check (run EARLY in normal
+    # tracking, not during occlusion) of whether YOLO can see the target at all.
+    # Its verdict selects the recovery strategy:
+    #   detectable     -> skip the phase-0 SiamABC-alone commit; rely on
+    #                     phase1_collect + phase2_final_drm (YOLO + DRM).
+    #   not detectable -> rely solely on phase0_siam (keep retrying SiamABC);
+    #                     YOLO collection is skipped since it cannot find it. ===
+    detectability_probe:
+      # Master switch. When false, occlusion recovery behaves exactly as before.
+      yolo_detectability_enabled: true
+      # N: how many YOLO probe attempts to run during early tracking.
+      yolo_detectability_probe_attempts: 6
+      # Frames between probe attempts. Probe spans ~ attempts x stride frames,
+      # so this knob controls how long the detectability check takes.
+      yolo_detectability_probe_stride: 3
+      # Hits (probes that land a box on the target) needed to call it detectable.
+      yolo_detectability_min_hits: 1
+      # IoU with the tracked box for a YOLO detection to count as a hit.
+      yolo_detectability_iou_thr: 0.3
+
+    # === PHASE 0 — SIAM: the cheap fast path. Seed SiamABC in the search ROI and,
+    # if it clears these gates (plus the shared DRM accept threshold
+    # app_match_threshold under descriptor:), reacquire immediately. ===
+    phase0_siam:
+      # Stricter SiamABC-only threshold for exiting occlusion via SiamABC alone.
+      occ_siam_reacq_threshold: 0.5
+      # Required margin between top-1 and top-2 candidates during occlusion.
+      occ_siam_margin: 0.5
+
+    # === PHASE 1 — COLLECT: gather YOLO candidates (+ appearance descriptors)
+    # across consecutive frames so per-candidate velocity becomes measurable. ===
+    phase1_collect:
+      # Collect YOLO candidates across this many frames before final scoring.
+      cand_collection_frames: 1
+
+    # === PHASE 2 — FINAL DRM: velocity-trace the collected candidates, rank them
+    # with the composite DRM score, then verify the top-k with SiamABC. ===
+    phase2_final_drm:
+
+      # DRM (composite candidate ranking) used during occlusion recovery.
+      drm:
+        # Appearance similarity needed to admit a candidate into the DRM bank.
+        drm_tau_sim: 0.65
+        # Minimum support count required to promote a bank entry.
+        drm_mmin: 3
+        # Max entries in the DRM bank.
+        drm_capacity: 20
+        # Required margin between the DRM winner and runner-up.
+        drm_margin: 0.6
+        # Skip the DRM update if quality score is already this high.
+        drm_skip_threshold: 23
+        # Number of top candidates evaluated per DRM step.
+        drm_top_k: 3
+        # Global suppressor weight (0 = off).
+        drm_gamma: 0
+        # Weight on appearance similarity in the composite score.
+        drm_lam_app: 1
+        # Weight on candidate-velocity consistency.
+        drm_lam_cand_vel: 0.0
+        # Weight on spatial distance penalty.
+        drm_lam_dist: 0.0
+        # Weight on candidate-direction consistency.
+        drm_lam_cand_dir: 0.0
+        # Weight on temporal recency (newer = better).
+        drm_lam_time: 0.0
+        # Weight on IoU overlap.
+        drm_lam_iou: 0.0
+        # Weight on motion-model agreement.
+        drm_lam_mot: 0.0
+
+      # Separate occlusion-recovery DRM ranking weights, used ONLY when occlusion
+      # was entered via the distractor below-gate force path
+      # (distractor_mode_selected_below_gate_force_occlusion). This is a full,
+      # independent set used wholesale — it does not inherit from drm: above, so
+      # keep both in sync where you want them equal. The shared bank params
+      # (tau_sim / mmin / capacity) and the accept threshold (app_match_threshold)
+      # are NOT duplicated here. Seeded to mirror drm: above (no behavior change
+      # until you tune it); e.g. raise distractor_occ_drm_lam_dist to bias recovery
+      # away from the nearby distractor the tracker just lost the target to.
+      distractor_occ_drm:
+        # Required margin between the DRM winner and runner-up.
+        distractor_occ_drm_margin: 0.7
+        # Skip the DRM update if quality score is already this high.
+        distractor_occ_drm_skip_threshold: 23
+        # Number of top candidates evaluated per DRM step.
+        distractor_occ_drm_top_k: 3
+        # Temporal decay rate.
+        distractor_occ_drm_alpha: 0.05
+        # Global suppressor weight (0 = off).
+        distractor_occ_drm_gamma: 0
+        # Weight on appearance similarity in the composite score.
+        distractor_occ_drm_lam_app: 1
+        # Weight on spatial distance penalty (raise to avoid re-locking the distractor).
+        distractor_occ_drm_lam_dist: 0.0
+        # Weight on candidate-direction consistency.
+        distractor_occ_drm_lam_cand_dir: 0.0
+        # Weight on temporal recency (newer = better).
+        distractor_occ_drm_lam_time: 0.0
+        # Weight on IoU overlap.
+        distractor_occ_drm_lam_iou: 0.0
+        # Weight on motion-model agreement.
+        distractor_occ_drm_lam_mot: 0.0
+        # Scales the Gaussian distance sigma by max(obj_w, obj_h).
+        distractor_occ_drm_dist_sigma_factor: 2.5
+
+      # Velocity-based scoring that feeds the DRM cand_vel / cand_dir terms above.
+      velocity:
+        # Below this speed, don't trust velocity-based scoring.
+        vel_score_min_speed: 0.5
+        # Hard direction-mismatch cutoff (above = reject candidate).
+        vel_dir_hard_gate: 0.4
+        # How many frames are averaged when estimating velocity.
+        velocity_window_average: 200
+
+    # === REACQUIRE-CONFIRM: after a candidate verifies, optionally require N
+    # consecutive confident frames before committing the exit from occlusion. ===
+    reacquire_confirm:
       # SiamABC score needed to accept "yes, I found the target again".
       reacq_threshold: 0.5
       # How many consecutive frames must clear that threshold before committing.
       reacq_confirm_frames: 1
-      # Stricter SiamABC-only threshold for exiting occlusion via SiamABC alone.
-      occ_siam_reacq_threshold: 0.8
-      # Required margin between top-1 and top-2 candidates during occlusion.
-      occ_siam_margin: 0.8
 
-    # Higher-level occlusion policy.
+    # === POLICY: higher-level recovery behavior spanning the whole episode. ===
     policy:
       # If occlusion starts before this frame index, use a special "early" recovery mode (-1 = off).
       early_occlusion_entry_n_frames: -1
@@ -439,83 +561,6 @@ ram_tracker:
       early_occlusion_max_frames: -1
       # Stick with appearance-only matching until the DRM bank fills up.
       occlusion_use_ram_until_drm_full: false
-      # Collect YOLO candidates across this many frames before final scoring.
-      cand_collection_frames: 1
-
-    # DRM (composite candidate ranking) used during occlusion recovery.
-    drm:
-      # Appearance similarity needed to admit a candidate into the DRM bank.
-      drm_tau_sim: 0.65
-      # Minimum support count required to promote a bank entry.
-      drm_mmin: 3
-      # Max entries in the DRM bank.
-      drm_capacity: 20
-      # Required margin between the DRM winner and runner-up.
-      drm_margin: 0.6
-      # Skip the DRM update if quality score is already this high.
-      drm_skip_threshold: 23
-      # Number of top candidates evaluated per DRM step.
-      drm_top_k: 3
-      # Global suppressor weight (0 = off).
-      drm_gamma: 0
-      # Weight on appearance similarity in the composite score.
-      drm_lam_app: 1
-      # Weight on candidate-velocity consistency.
-      drm_lam_cand_vel: 0.0
-      # Weight on spatial distance penalty.
-      drm_lam_dist: 0.0
-      # Weight on candidate-direction consistency.
-      drm_lam_cand_dir: 0.0
-      # Weight on temporal recency (newer = better).
-      drm_lam_time: 0.0
-      # Weight on IoU overlap.
-      drm_lam_iou: 0.0
-      # Weight on motion-model agreement.
-      drm_lam_mot: 0.0
-
-    # Separate occlusion-recovery DRM ranking weights, used ONLY when occlusion
-    # was entered via the distractor below-gate force path
-    # (distractor_mode_selected_below_gate_force_occlusion). This is a full,
-    # independent set used wholesale — it does not inherit from drm: above, so
-    # keep both in sync where you want them equal. The shared bank params
-    # (tau_sim / mmin / capacity) and the accept threshold (app_match_threshold)
-    # are NOT duplicated here. Seeded to mirror drm: above (no behavior change
-    # until you tune it); e.g. raise distractor_occ_drm_lam_dist to bias recovery
-    # away from the nearby distractor the tracker just lost the target to.
-    distractor_occ_drm:
-      # Required margin between the DRM winner and runner-up.
-      distractor_occ_drm_margin: 0.7
-      # Skip the DRM update if quality score is already this high.
-      distractor_occ_drm_skip_threshold: 23
-      # Number of top candidates evaluated per DRM step.
-      distractor_occ_drm_top_k: 3
-      # Temporal decay rate.
-      distractor_occ_drm_alpha: 0.05
-      # Global suppressor weight (0 = off).
-      distractor_occ_drm_gamma: 0
-      # Weight on appearance similarity in the composite score.
-      distractor_occ_drm_lam_app: 1
-      # Weight on spatial distance penalty (raise to avoid re-locking the distractor).
-      distractor_occ_drm_lam_dist: 0.0
-      # Weight on candidate-direction consistency.
-      distractor_occ_drm_lam_cand_dir: 0.0
-      # Weight on temporal recency (newer = better).
-      distractor_occ_drm_lam_time: 0.0
-      # Weight on IoU overlap.
-      distractor_occ_drm_lam_iou: 0.0
-      # Weight on motion-model agreement.
-      distractor_occ_drm_lam_mot: 0.0
-      # Scales the Gaussian distance sigma by max(obj_w, obj_h).
-      distractor_occ_drm_dist_sigma_factor: 2.5
-
-    # Velocity-based scoring that feeds the DRM cand_vel / cand_dir terms above.
-    velocity:
-      # Below this speed, don't trust velocity-based scoring.
-      vel_score_min_speed: 0.5
-      # Hard direction-mismatch cutoff (above = reject candidate).
-      vel_dir_hard_gate: 0.4
-      # How many frames are averaged when estimating velocity.
-      velocity_window_average: 200
 
   # ---------------------------------------------------------------------------
   # spike_reject: detect "the tracker just jumped to a distractor" — one-frame

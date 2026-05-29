@@ -195,6 +195,18 @@ def parse_args():
         help="Directory where per-video bounding-box predictions are written.",
     )
     parser.add_argument(
+        "--output_layout",
+        default="dataset",
+        choices=["dataset", "video"],
+        help=(
+            "On-disk output folder layout under --outputs_dir. "
+            "'dataset' (default): <dataset>/<video_name>/ — consistent across all "
+            "datasets, with the video + bbox file together in each video folder. "
+            "'video': <video_name>/ — drops the dataset folder (used by "
+            "run_single_video for a flat, easy-to-reach single-video output)."
+        ),
+    )
+    parser.add_argument(
         "--manifest_path",
         default=str(BASE_DIR / "data" / "metadata" / "contestant_manifest.json"),
         help="Path to the competition manifest JSON file.",
@@ -454,24 +466,74 @@ def _load_initial_bbox(
     raise ValueError(f"Annotation file is empty: {annotation_path}")
 
 
+def _output_rel_path(
+    dataset: str,
+    video_name: str,
+    video_file: str,
+    output_layout: str,
+) -> str:
+    """
+    Compute the consistent on-disk output path for one video, relative to
+    --outputs_dir.
+
+    The structure is identical for every split and every dataset so the output
+    tree is never messy:
+
+      - "dataset" layout : <dataset>/<video_name>/<video_file>
+      - "video"   layout : <video_name>/<video_file>
+
+    The per-frame bbox .txt is written by run_inference() right beside the video
+    file inside the same <video_name>/ folder (see vis/test_model.py).
+
+    Parameters
+    ----------
+    dataset : str
+        Dataset name (e.g. "dataset1").
+    video_name : str
+        Per-video folder name (the sequence name, e.g. "Car_video_2").
+    video_file : str
+        Leaf filename for the (optional) annotated video, e.g. "Car_video_2.mp4".
+    output_layout : str
+        Either "dataset" (include the dataset folder) or "video" (drop it).
+
+    Returns
+    -------
+    str
+        Relative output path joined with the right number of folder levels.
+    """
+    if output_layout == "video":
+        return os.path.join(video_name, video_file)
+    return os.path.join(dataset, video_name, video_file)
+
+
 def _build_manifest_entries(
     manifest: dict,
     target_datasets: set[str],
     split_name: str,
+    output_layout: str = "dataset",
     key_prefix: str = "",
-    output_prefix: str = "",
 ) -> dict[str, dict]:
     """
     Build a uniform entry dictionary from a manifest split.
+
+    The on-disk output path is always <dataset>/<video_name>/... (or
+    <video_name>/... for the "video" layout) regardless of split, so the train,
+    public_lb and combined "all" runs all share one consistent folder tree. The
+    run-entry *key* still carries any key_prefix (e.g. "train/"/"test/") so the
+    submission CSV ids and single-video selection stay unambiguous.
     """
     split_entries = manifest.get(split_name, {})
     entries: dict[str, dict] = {}
     for key, value in split_entries.items():
         if value["dataset"] not in target_datasets:
             continue
-        out_rel_path = value["video_path"]
-        if output_prefix:
-            out_rel_path = os.path.join(output_prefix, out_rel_path)
+        video_rel = Path(value["video_path"])
+        out_rel_path = _output_rel_path(
+            dataset=value["dataset"],
+            video_name=video_rel.parent.name,
+            video_file=video_rel.name,
+            output_layout=output_layout,
+        )
         out_key = f"{key_prefix}{key}"
         entries[out_key] = {
             "dataset": value["dataset"],
@@ -489,6 +551,7 @@ def _build_train_entries_from_csv(
     data_dir: str,
     target_datasets: set[str],
     max_sequences: int = 0,
+    output_layout: str = "dataset",
 ) -> dict[str, dict]:
     """
     Build inference entries from training dataframe CSV rows.
@@ -520,7 +583,12 @@ def _build_train_entries_from_csv(
                 suffix += 1
                 key = f"{base_key}_{suffix:03d}"
 
-            output_rel_path = os.path.join(dataset_name, f"{key}.mp4")
+            output_rel_path = _output_rel_path(
+                dataset=dataset_name,
+                video_name=key,
+                video_file=f"{key}.mp4",
+                output_layout=output_layout,
+            )
             entries[key] = {
                 "dataset": dataset_name,
                 "video_path": seq_path,
@@ -832,12 +900,12 @@ def main():
          The format is a single line: x, y, width, height (top-left corner + size).
       b) Call run_inference(), which opens the video, initialises the tracker
          on frame 0 using the given bbox, then tracks the target through every
-         subsequent frame, writing predictions to a bboxes/ sub-folder next to
-         the video output path.
+         subsequent frame, writing the per-frame bbox predictions to a .txt
+         file right beside the video inside its own <video_name>/ folder.
 
     Step 6 — Compile the submission CSV
     ------------------------------------
-    After all videos are processed, we walk through every video's bboxes .txt
+    After all videos are processed, we walk through every video's bbox .txt
     file and flatten the per-frame predictions into a single DataFrame with
     columns: id, x, y, w, h. The "id" column is "<video_key>_<frame_index>",
     which is the format the competition scorer expects. We then save this as
@@ -958,6 +1026,7 @@ def main():
             manifest=manifest,
             target_datasets=target_datasets,
             split_name=args.run_split,
+            output_layout=args.output_layout,
         )
     elif args.run_split == "all":
         with open(args.manifest_path, "r", encoding="utf-8") as f:
@@ -969,8 +1038,8 @@ def main():
                 manifest=manifest,
                 target_datasets=target_datasets,
                 split_name="train",
+                output_layout=args.output_layout,
                 key_prefix="train/",
-                output_prefix="train",
             )
         )
         run_entries.update(
@@ -978,8 +1047,8 @@ def main():
                 manifest=manifest,
                 target_datasets=target_datasets,
                 split_name="public_lb",
+                output_layout=args.output_layout,
                 key_prefix="test/",
-                output_prefix="test",
             )
         )
     else:  # train_csv
@@ -992,7 +1061,19 @@ def main():
             data_dir=args.data_dir,
             target_datasets=target_datasets,
             max_sequences=int(args.max_sequences),
+            output_layout=args.output_layout,
         )
+
+    # Process the videos grouped dataset-by-dataset (then by key within each
+    # dataset) so a full dataset is finished before the next one begins and the
+    # console/output ordering is predictable — especially for --run_split all,
+    # which would otherwise interleave the train and public_lb maps.
+    run_entries = dict(
+        sorted(
+            run_entries.items(),
+            key=lambda item: (str(item[1].get("dataset", "")), item[0]),
+        )
+    )
 
     run_entries = _filter_run_entries_by_video_key(
         run_entries=run_entries,
@@ -1044,7 +1125,8 @@ def main():
     #  Stitch all per-video bbox files into one submission CSV.
     #
     # run_inference() writes a text file at:
-    #   <outputs_dir>/<video_path_stem>/bboxes/<video_id>.txt
+    #   <outputs_dir>/<dataset>/<video_name>/<video_name>.txt
+    #   (or <outputs_dir>/<video_name>/<video_name>.txt for --output_layout video)
     #
     # Each line in that file is one frame's prediction: "x y w h".
     # We assign each line an id of "<video_key>_<frame_index>" and collect
@@ -1055,7 +1137,7 @@ def main():
 
     for key, value in run_entries.items():
         head, tail = os.path.split(os.path.join(args.outputs_dir, value["output_rel_path"]))
-        bbox_file = os.path.join(head, "bboxes", os.path.splitext(tail)[0] + ".txt")
+        bbox_file = os.path.join(head, os.path.splitext(tail)[0] + ".txt")
 
         if os.path.exists(bbox_file):
             with open(bbox_file, "r") as f:

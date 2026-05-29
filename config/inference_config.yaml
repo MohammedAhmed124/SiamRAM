@@ -77,6 +77,21 @@ ram_tracker:
   # If true, use compiled YOLO backend (when available).
   copile_yolo: False
 
+  # Adaptive YOLO-detectability probe (class-agnostic). Early in healthy
+  # tracking, probe YOLO on the tracker's search ROI a few times to learn if
+  # the target is YOLO-detectable. Detectable -> rely on YOLO+DRM during
+  # occlusion (no SiamABC-alone phase-0 commit). Not detectable -> rely solely
+  # on phase=siam. Disabled here by default; behavior is unchanged when off.
+  yolo_detectability_enabled: false
+  # N: number of YOLO probe attempts during early tracking.
+  yolo_detectability_probe_attempts: 6
+  # Frames between probe attempts (probe spans ~ attempts x stride frames).
+  yolo_detectability_probe_stride: 3
+  # Hits needed to declare the target YOLO-detectable.
+  yolo_detectability_min_hits: 1
+  # IoU with the tracked box for a YOLO detection to count as a hit.
+  yolo_detectability_iou_thr: 0.3
+
   # Descriptor backend selector. Supported: "osnet".
   descriptor_backend: "osnet"
   # OSNet model name from torchreid (examples: osnet_x1_0, osnet_x0_75, osnet_ain_x1_0).

@@ -462,9 +462,9 @@ def run_inference(
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     head, tail = os.path.split(output_path)
-    bbox_dir = os.path.join(head, "bboxes")
-    os.makedirs(bbox_dir, exist_ok=True)
-    bbox_file = os.path.join(bbox_dir, os.path.splitext(tail)[0] + ".txt")
+    # Write the bbox predictions right next to the (optional) annotated video,
+    # inside the same per-video folder — no separate bboxes/ sub-directory.
+    bbox_file = os.path.join(head, os.path.splitext(tail)[0] + ".txt")
 
     cap = None
     frame_paths: list[str] = []

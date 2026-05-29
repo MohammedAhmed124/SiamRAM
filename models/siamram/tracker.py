@@ -251,6 +251,11 @@ class SiamRAMExperimentTracker:
         vel_dir_hard_gate: float = 0.5,
         yolo_filter_class: bool = False,
         yolo_class_detect_frames: int = 5,
+        yolo_detectability_enabled: bool = False,
+        yolo_detectability_probe_attempts: int = 6,
+        yolo_detectability_probe_stride: int = 3,
+        yolo_detectability_min_hits: int = 1,
+        yolo_detectability_iou_thr: float = 0.3,
         jump_reject_enabled: bool = True,
         jump_reject_min_frames: int = 3,
         jump_reject_min_score: float = 0.50,
@@ -757,6 +762,23 @@ class SiamRAMExperimentTracker:
         self._target_class_id: Optional[int] = None
         self._class_warmup_done: bool = False
         self._class_votes: dict[int, int] = {}
+
+        # --- Adaptive YOLO-detectability probe -----------------------------
+        # During the first frames of healthy tracking we run YOLO on the
+        # tracker's own search ROI a few times. If YOLO ever lands a box on the
+        # target, the object is "YOLO-detectable" and occlusion recovery leans
+        # on YOLO+DRM (the SiamABC-alone phase-0 commit is shut off). If YOLO
+        # never finds it, we keep relying solely on phase=siam during occlusion.
+        # See _maybe_run_detectability_probe / _occ_phase_siam.
+        self._yolo_detectability_enabled = bool(yolo_detectability_enabled)
+        self._yolo_detectability_probe_attempts = max(1, int(yolo_detectability_probe_attempts))
+        self._yolo_detectability_probe_stride = max(1, int(yolo_detectability_probe_stride))
+        self._yolo_detectability_min_hits = max(1, int(yolo_detectability_min_hits))
+        self._yolo_detectability_iou_thr = float(yolo_detectability_iou_thr)
+        self._yolo_detectable: bool = False
+        self._detectability_probe_done: bool = False
+        self._detectability_runs: int = 0
+        self._detectability_hits: int = 0
         self._jump_reject_enabled = bool(jump_reject_enabled)
         self._jump_reject_min_frames = max(0, int(jump_reject_min_frames))
         self._jump_reject_min_score = float(jump_reject_min_score)
@@ -1101,6 +1123,10 @@ class SiamRAMExperimentTracker:
 
         self._target_class_id = None
         self._class_warmup_done = False
+        self._yolo_detectable = False
+        self._detectability_probe_done = False
+        self._detectability_runs = 0
+        self._detectability_hits = 0
         self._clear_jump_watch_state()
         self._jump_watch_last_step_norm = 0.0
         self._spike_debug_speed_norm = float("nan")
@@ -2236,6 +2262,7 @@ class SiamRAMExperimentTracker:
         pred_bbox = np.array(pred_bbox, dtype=int)
 
         self._maybe_run_class_warmup(frame)
+        self._maybe_run_detectability_probe(frame)
 
         effective_threshold = self._compute_effective_threshold(frame)
 
@@ -4159,6 +4186,107 @@ class SiamRAMExperimentTracker:
                     f"[class filter] target class locked: {best_cls}  "
                     f"(votes={votes})"
                 )
+
+    def _tracker_search_roi(
+        self,
+        frame: np.ndarray,
+        bbox: np.ndarray,
+    ) -> Tuple[int, int, int, int]:
+        """
+        Build the YOLO probe ROI from the tracker's own search region: the bbox
+        padded on every side by the SiamABC `search_context` ratio, mirroring how
+        the tracker crops its search window (see SiamABC_Tracker.run_track_candidate).
+        Clamped to the frame.
+        """
+        ctx = float(self.tracker.tracking_config["search_context"])
+        x, y, w, h = (float(v) for v in bbox)
+        pad_w = w * ctx
+        pad_h = h * ctx
+        h_fr, w_fr = frame.shape[:2]
+        x1 = max(0, int(x - pad_w))
+        y1 = max(0, int(y - pad_h))
+        x2 = min(w_fr, int(x + w + pad_w))
+        y2 = min(h_fr, int(y + h + pad_h))
+        return x1, y1, max(1, x2 - x1), max(1, y2 - y1)
+
+    def _maybe_run_detectability_probe(
+        self,
+        frame: np.ndarray,
+    ) -> None:
+        """
+        Class-agnostic YOLO-detectability probe.
+
+        For the first `yolo_detectability_probe_attempts` strided frames (one
+        attempt every `yolo_detectability_probe_stride` frames), run YOLO on the
+        tracker's search ROI and count it as a "hit" when any detection overlaps
+        the current bbox by at least `yolo_detectability_iou_thr` IoU. As soon as
+        the hit count reaches `yolo_detectability_min_hits` we lock
+        `_yolo_detectable = True` and stop. If the attempts are exhausted without
+        enough hits, we lock `_yolo_detectable = False`.
+
+        The resulting flag drives the occlusion-recovery policy in _occ_phase_siam.
+        Does nothing unless `yolo_detectability_enabled` is set.
+        """
+        if not self._yolo_detectability_enabled or self._detectability_probe_done:
+            return
+        if self.frame_idx <= 0 or self.frame_idx % self._yolo_detectability_probe_stride != 0:
+            return
+        if self.current_bbox is None:
+            return
+
+        roi = self._tracker_search_roi(frame, self.current_bbox)
+        detections = self._yolo_detect_in_roi(frame, roi)
+        self._detectability_runs += 1
+
+        if detections:
+            ious = self._iou_many_to_one(
+                np.asarray(detections, dtype=np.float64), self.current_bbox
+            )
+            if float(np.max(ious)) >= self._yolo_detectability_iou_thr:
+                self._detectability_hits += 1
+
+        if self._detectability_hits >= self._yolo_detectability_min_hits:
+            self._yolo_detectable = True
+            self._detectability_probe_done = True
+            if self.debug:
+                print(
+                    f"[detectability] YOLO-detectable=True after {self._detectability_runs} "
+                    f"probe(s), hits={self._detectability_hits} (frame {self.frame_idx})"
+                )
+            return
+
+        if self._detectability_runs >= self._yolo_detectability_probe_attempts:
+            self._yolo_detectable = False
+            self._detectability_probe_done = True
+            if self.debug:
+                print(
+                    f"[detectability] YOLO-detectable=False after {self._detectability_runs} "
+                    f"probe(s), hits={self._detectability_hits} (frame {self.frame_idx})"
+                )
+
+    def _detectability_policy_active(
+        self,
+    ) -> bool:
+        """
+        The adaptive occlusion policy only kicks in once the probe has finished
+        and produced a verdict. Until then (or when disabled) recovery behaves
+        exactly as before.
+        """
+        return self._yolo_detectability_enabled and self._detectability_probe_done
+
+    def _phase_after_failed_siam(
+        self,
+    ) -> int:
+        """
+        Occlusion phase to advance to after a failed phase=siam attempt.
+
+        Normally → 1 (begin YOLO candidate collection). But when the policy is
+        active and the target was found NOT YOLO-detectable, YOLO collection is
+        futile, so stay at phase 0 and keep retrying SiamABC every frame.
+        """
+        if self._detectability_policy_active() and not self._yolo_detectable:
+            return 0
+        return 1
 
     def _is_near_exit_edge(
         self,

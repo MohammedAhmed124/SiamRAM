@@ -105,7 +105,12 @@ def main() -> int:
     rows = _build_video_id_map(DEFAULT_MANIFEST, DEFAULT_ID_MAP)
     video_key = _resolve_video_key(args.video_ref, rows)
     key_slug = _slugify_video_key(video_key)
-    outputs_dir = BASE_DIR / "outputs" / f"{key_slug}_exp"
+
+    # Everything for single-video runs lands under one fixed, tidy folder:
+    #   outputs/run_one_video/<video_name>/   ← annotated video + bbox .txt
+    # The "video" output layout drops the dataset folder so the result is easy
+    # to reach without clicking through nested dataset/split directories.
+    outputs_dir = BASE_DIR / "outputs" / "run_one_video"
     submission_csv = outputs_dir / f"submission_{key_slug}.csv"
 
     outputs_dir.mkdir(parents=True, exist_ok=True)
@@ -122,6 +127,8 @@ def main() -> int:
         "--output_video",
         "--outputs_dir",
         str(outputs_dir),
+        "--output_layout",
+        "video",
         "--submission_csv",
         str(submission_csv),
     ]

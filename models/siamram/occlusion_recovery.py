@@ -212,7 +212,22 @@ class OcclusionRecoverySubsystem:
     """
         held_box = self._host.held_box
         assert held_box is not None
-    
+
+        # Adaptive YOLO-detectability policy: if the target was found to be
+        # YOLO-detectable, do NOT let SiamABC reacquire on its own. Skip the
+        # phase-0 seed+commit entirely and fall straight through to YOLO
+        # candidate collection + DRM ranking (phase 1).
+        if self._host._detectability_policy_active() and self._host._yolo_detectable:
+            if self._host.debug:
+                print(
+                    f"[occ frame {self._host._occ_frames}] phase=siam  "
+                    f"SKIP (YOLO-detectable → rely on YOLO+DRM)"
+                )
+            self._host._cand_frames = []
+            self._host._occ_cam_vels = []
+            self._host._occ_phase = 1
+            return self._host.held_box, 0.0
+
         rx, ry, rw, rh = self._host._get_yolo_search_roi(frame=frame)
     
         obj_w, obj_h = self._host._get_median_size()
@@ -249,7 +264,7 @@ class OcclusionRecoverySubsystem:
                 self._host.tracker.tracking_state.bbox = held_box.copy()
                 self._host._cand_frames = []
                 self._host._occ_cam_vels = []
-                self._host._occ_phase = 1
+                self._host._occ_phase = self._host._phase_after_failed_siam()
                 return self._host.held_box, score
             pred_desc = _extract_descriptor(frame, pred_bbox)
 
@@ -311,7 +326,7 @@ class OcclusionRecoverySubsystem:
 
         self._host._cand_frames = []
         self._host._occ_cam_vels = []
-        self._host._occ_phase = 1
+        self._host._occ_phase = self._host._phase_after_failed_siam()
         return self._host.held_box, score
 
 

@@ -274,21 +274,21 @@ class OcclusionRecoverySubsystem:
                 search_cx=self._host._search_cx,
                 search_cy=self._host._search_cy,
                 dist_sigma=self._host._effective_dist_sigma(frame),
-                lam_iou=self._host._drm_kwargs["lam_iou"],
-                lam_app=self._host._drm_kwargs["lam_app"],
-                lam_mot=self._host._drm_kwargs["lam_mot"],
-                lam_time=self._host._drm_kwargs["lam_time"],
-                alpha=self._host._drm_kwargs["alpha"],
-                gamma=self._host._drm_kwargs["gamma"],
-                top_k=self._host._drm_kwargs["top_k"],
-                skip_threshold=self._host._drm_kwargs["skip_threshold"],
-                lam_dist=self._host._drm_kwargs["lam_dist"],
-                lam_cand_dir=self._host._drm_kwargs["lam_cand_dir"],
+                lam_iou=self._host._active_drm_kwargs["lam_iou"],
+                lam_app=self._host._active_drm_kwargs["lam_app"],
+                lam_mot=self._host._active_drm_kwargs["lam_mot"],
+                lam_time=self._host._active_drm_kwargs["lam_time"],
+                alpha=self._host._active_drm_kwargs["alpha"],
+                gamma=self._host._active_drm_kwargs["gamma"],
+                top_k=self._host._active_drm_kwargs["top_k"],
+                skip_threshold=self._host._active_drm_kwargs["skip_threshold"],
+                lam_dist=self._host._active_drm_kwargs["lam_dist"],
+                lam_cand_dir=self._host._active_drm_kwargs["lam_cand_dir"],
             )
 
             drm_score = occ_match_results[0][1] if occ_match_results else -1.0
 
-            lam_dir = self._host._drm_lam_cand_dir
+            lam_dir = self._host._active_drm_lam_cand_dir
             if lam_dir > 0 and cand_vel_phase0 is not None:
                 dir_score = self._host._compute_velocity_score(cand_vel_phase0, self._host.velocity)
                 drm_score += lam_dir * (2.0 * dir_score - 1.0)
@@ -556,20 +556,20 @@ class OcclusionRecoverySubsystem:
             candidates=fully_tracked_bboxes,
             ref_bbox=self._host.held_box,
             velocity=self._host.velocity,
-            margin=self._host._drm_kwargs["margin"],
+            margin=self._host._active_drm_kwargs["margin"],
             search_cx=self._host._search_cx,
             search_cy=self._host._search_cy,
             dist_sigma=dist_sigma,
-            lam_iou=self._host._drm_kwargs["lam_iou"],
-            lam_app=self._host._drm_kwargs["lam_app"],
-            lam_mot=self._host._drm_kwargs["lam_mot"],
-            lam_time=self._host._drm_kwargs["lam_time"],
-            alpha=self._host._drm_kwargs["alpha"],
-            gamma=self._host._drm_kwargs["gamma"],
-            top_k=self._host._drm_kwargs["top_k"],
-            skip_threshold=self._host._drm_kwargs["skip_threshold"],
-            lam_dist=self._host._drm_kwargs["lam_dist"],
-            lam_cand_dir=self._host._drm_kwargs["lam_cand_dir"],
+            lam_iou=self._host._active_drm_kwargs["lam_iou"],
+            lam_app=self._host._active_drm_kwargs["lam_app"],
+            lam_mot=self._host._active_drm_kwargs["lam_mot"],
+            lam_time=self._host._active_drm_kwargs["lam_time"],
+            alpha=self._host._active_drm_kwargs["alpha"],
+            gamma=self._host._active_drm_kwargs["gamma"],
+            top_k=self._host._active_drm_kwargs["top_k"],
+            skip_threshold=self._host._active_drm_kwargs["skip_threshold"],
+            lam_dist=self._host._active_drm_kwargs["lam_dist"],
+            lam_cand_dir=self._host._active_drm_kwargs["lam_cand_dir"],
         )
 
         if self._host.debug:
@@ -587,7 +587,7 @@ class OcclusionRecoverySubsystem:
             _reset()
             return self._host.held_box, 0.0
 
-        lam_dir = self._host._drm_lam_cand_dir
+        lam_dir = self._host._active_drm_lam_cand_dir
         if self._host._out_of_frame:
             lam_dir = 0.0
         elif self._host._is_long_distance(frame):
@@ -626,7 +626,7 @@ class OcclusionRecoverySubsystem:
 
         vx = float(self._host.velocity[0])
         vy = float(self._host.velocity[1])
-        top_k = self._host._drm_kwargs.get("top_k", 3)
+        top_k = self._host._active_drm_kwargs.get("top_k", 3)
 
         for match_bbox, match_score, vel_score in final_scored[:top_k]:
             adjusted = match_bbox.astype(float).copy()
@@ -700,6 +700,7 @@ class OcclusionRecoverySubsystem:
         self._host.velocity = ekf.get_velocity()
     
         self._host.in_occlusion = False
+        self._host._distractor_occlusion_active = False
         self._host._out_of_frame = False
         self._host._exit_edge = None
         self._host._occ_frames = 0
@@ -816,7 +817,7 @@ class OcclusionRecoverySubsystem:
             float: sigma in pixels to pass as dist_sigma to drm_match
     """
         obj_w, obj_h = self._host._get_median_size()
-        size_sigma = self._host._drm_dist_sigma_factor * float(max(obj_w, obj_h))
+        size_sigma = self._host._active_drm_dist_sigma_factor * float(max(obj_w, obj_h))
         ekf = self._host.ekf
         assert ekf is not None
         ekf_sigma = ekf.get_uncertainty() * 1.5

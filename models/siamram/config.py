@@ -108,6 +108,8 @@ class DistractorModeConfig:
     mahalanobis_meas_var: float = 25.0
     switch_margin: float = 0.08
     ambiguity_hold_frames: int = 2
+    selected_below_gate_hold_frames: int = 0
+    selected_below_gate_force_occlusion: bool = False
     reentry_cooldown_frames: int = 12
     post_exit_memory_freeze_frames: int = 8
     post_exit_template_freeze_frames: int = 8
@@ -383,6 +385,12 @@ def flatten_subsystem_overrides(config: Any) -> tuple[dict[str, Any], dict[str, 
                 "distractor_mode_switch_margin": float(dis.switch_margin),
                 "distractor_mode_ambiguity_hold_frames": int(
                     dis.ambiguity_hold_frames
+                ),
+                "distractor_mode_selected_below_gate_hold_frames": int(
+                    dis.selected_below_gate_hold_frames
+                ),
+                "distractor_mode_selected_below_gate_force_occlusion": bool(
+                    dis.selected_below_gate_force_occlusion
                 ),
                 "distractor_mode_reentry_cooldown_frames": int(
                     dis.reentry_cooldown_frames

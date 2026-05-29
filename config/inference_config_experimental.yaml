@@ -1,10 +1,16 @@
 # Path to the trained SiamABC checkpoint loaded at startup.
 weights_path: "/home/moha/SiamRAM/checkpoints/inference_checkpoint.pth"
 
+# Build and run a TensorRT engine instead of plain PyTorch (GPU-only).
+make_trt_engine: False
 
-# -----------------------------------------------------------------------------
+# Which SiamRAM implementation to use ("experiment" enables jump-rejection logic).
+ram_tracker_impl: "experiment"
+
+
+# =============================================================================
 # model: how the SiamABC neural network itself is built.
-# -----------------------------------------------------------------------------
+# =============================================================================
 model:
   # Python import path of the model class Hydra should instantiate.
   _target_: models.SiamABC.model.SiamABC.SiamABCNet
@@ -42,9 +48,9 @@ model:
   build_iou_head: true
 
 
-# -----------------------------------------------------------------------------
+# =============================================================================
 # tracker: per-frame SiamABC tracking hyperparameters.
-# -----------------------------------------------------------------------------
+# =============================================================================
 tracker:
   _target_: models.SiamABC.tracker.SiamABC_Tracker.SiamABCTracker
   # Penalty strength on scale / aspect changes — higher = more conservative.
@@ -80,9 +86,9 @@ tracker:
   # Pixel size of the template crop.
   template_size: 128
   # Length of the rolling template-memory window.
-  memory_window_size: 60
+  memory_window_size: 30
   # Confidence required to admit a new dynamic-template update.
-  dynamic_update_threshold: 0.85
+  dynamic_update_threshold: 0.80
   # Lower clamp on the running-confidence smoother.
   running_confidence_floor_value: 0.50
   # IoU required for continuity / quality checks.
@@ -111,237 +117,9 @@ tracker:
   iou_gate_fail_closed: false
 
 
-# Build and run a TensorRT engine instead of plain PyTorch (GPU-only).
-make_trt_engine: False
-
-
-# Which SiamRAM implementation to use ("experiment" enables jump-rejection logic).
-ram_tracker_impl: "experiment"
-
-
-# -----------------------------------------------------------------------------
-# ram_tracker_experiment: parameters consumed only by the experimental tracker
-# (spike rejection, distractor mode, jump handling).
-# -----------------------------------------------------------------------------
-ram_tracker_experiment:
-  # Master switch for the spike / hard-jump rejection workflow.
-  spike_reject_enabled: True
-  # Do not run spike checks during the first N tracked frames.
-  spike_reject_min_frames: 3
-  # Only run spike checks when current tracker score is at least this.
-  spike_reject_min_score: 0.0
-  # How many past frames to use as the motion baseline.
-  spike_reject_history_window: 40
-  # Minimum number of history samples needed before spike checks fire.
-  spike_reject_min_history: 5
-
-  # A frame is a "spike" when its motion exceeds ratio × baseline.
-  spike_reject_ratio: 2.5
-  # Plus motion must be at least this absolute normalised amount.
-  spike_reject_abs_norm_min: 0.0
-
-  # Motion must drop below this fraction of baseline to count as "settled".
-  spike_reject_settle_ratio: 0.7
-  # Absolute normalised motion cap during settle validation.
-  spike_reject_settle_abs_norm_max: 0.30
-  # Consecutive settled frames required before committing the new pick.
-  spike_reject_settle_frames: 1
-  # Give up the spike-watch after this many frames if no settle happens.
-  spike_reject_watch_max_frames: 8
-  # Required fractional drop from the spike peak to call it settled.
-  spike_reject_settle_from_spike_frac: 0.55
-
-  # Also gate spike decisions on appearance similarity (slower but more reliable).
-  spike_reject_use_appearance: false
-  # If appearance similarity is above this, treat as still-our-target (no spike).
-  spike_reject_max_sim: 0.65
-
-  # Frames to keep distractor mode active after a jump commit.
-  jump_reject_distractor_mode_frames: 12
-  # Penalise candidates that look like known distractors.
-  jump_reject_distractor_penalty_enabled: true
-  # Max score reduction the penalty can apply.
-  jump_reject_distractor_penalty_weight: 0.25
-  # Only apply the penalty when similarity to a distractor is above this floor.
-  jump_reject_distractor_penalty_sim_floor: 0.55
-  # Only compare against the last K distractor entries.
-  jump_reject_distractor_penalty_bank_topk: 5
-  # Stay in distractor mode while top similarity remains above this.
-  distractor_mode_min_similarity: 0.70
-  # Minimum similarity the chosen target must hit during distractor mode.
-  distractor_mode_selected_min_similarity: 0.7
-  # Max number of YOLO detections scored per frame (0 = all).
-  distractor_mode_yolo_topk: 8
-  # Max stored target descriptors used for ROI similarity scoring.
-  distractor_mode_history_limit: 80
-  # Reuse the tracker's crop/mapping size when building the distractor ROI.
-  distractor_mode_use_tracker_mapping: true
-  # Multiplicative expansion of the YOLO search ROI in distractor mode.
-  distractor_mode_roi_expand: 1.20
-  # Minimum ROI side length in pixels (prevents tiny crops).
-  distractor_mode_roi_min_side: 32
-
-  # DRM ranking weights (distractor mode only).
-  # Appearance similarity weight.
-  distractor_drm_lam_app: 1.00
-  # IoU with expected focus-box weight.
-  distractor_drm_lam_iou: 0.25
-  # Distance-from-focus penalty weight.
-  distractor_drm_lam_dist: 1
-  # Weight on the negative-bank (distractor) penalty.
-  distractor_drm_gamma: 2
-  # Controls how quickly the distance penalty rises with offset.
-  distractor_drm_dist_sigma_factor: 2.5
-  # Only use the last K distractors when computing the negative penalty.
-  distractor_drm_bank_topk: 5
-  # Distractor ranking strategy: "ram" = appearance only, "drm" = composite.
-  distractor_compare_mode: "ram"
-
-  # Keep admitting to memory while in distractor mode (risk of contamination).
-  distractor_mode_update_memory: false
-  # Re-init the dynamic template when exiting distractor mode.
-  distractor_mode_exit_reinit_enabled: true
-  # Consecutive stable frames required to leave distractor mode.
-  distractor_mode_exit_stable_frames: 6
-  # IoU between consecutive matches needed to call the situation "stable".
-  distractor_mode_exit_same_iou: 0.60
-
-  # Maintain a Kalman filter anchor while in distractor mode (motion prior).
-  distractor_mode_anchor_ekf_enabled: true
-  # Scale extra ROI padding by EKF position uncertainty (0 = disabled).
-  distractor_mode_anchor_uncertainty_roi_scale: 0.0
-  # Cap on uncertainty-driven extra ROI padding (px).
-  distractor_mode_anchor_uncertainty_roi_cap: 96.0
-
-  # Reject candidates motion-inconsistent with the EKF (Mahalanobis gate).
-  distractor_mode_mahalanobis_gate_enabled: true
-  # Chi-squared threshold for the gate — lower = stricter.
-  distractor_mode_mahalanobis_threshold: 9.21
-  # Extra measurement variance term (px^2) to soften the gate.
-  distractor_mode_mahalanobis_meas_var: 25.0
-
-  # Minimum top1 − top2 score margin needed to switch identity.
-  distractor_mode_switch_margin: 0.08
-  # Stick with the current pick during this many ambiguous frames.
-  distractor_mode_ambiguity_hold_frames: 2
-  # Forbid re-entering distractor mode for this many frames after exit.
-  distractor_mode_reentry_cooldown_frames: 12
-  # Pause memory admissions for this many frames after exiting distractor mode.
-  distractor_mode_post_exit_memory_freeze_frames: 8
-  # Pause dynamic-template updates for this many frames after exiting.
-  distractor_mode_post_exit_template_freeze_frames: 8
-  # Behaviour preset for distractor handling ("standard" or alternatives).
-  distractor_mode_behavior_mode: "standard"
-
-  # Engage a motion-only lock when the chosen candidate overlaps a distractor heavily.
-  distractor_mode_overlap_motion_lock_enabled: true
-  # Overlap IoU at which the lock engages.
-  distractor_mode_overlap_iou_enter: 0.35
-  # Overlap IoU below which the lock is allowed to release.
-  distractor_mode_overlap_iou_exit: 0.15
-  # Consecutive clear-overlap frames needed before releasing the lock.
-  distractor_mode_overlap_clear_frames: 3
-  # Hard maximum number of frames the lock can stay engaged.
-  distractor_mode_overlap_lock_max_frames: 24
-
-  # Penalise candidates far from the current target focus.
-  distractor_focus_dist_penalty_enabled: true
-  # Max score reduction the focus-distance penalty can apply.
-  distractor_focus_dist_penalty_weight: 0.35
-  # Inside this normalised radius the penalty is zero.
-  distractor_focus_dist_soft_radius: 0.60
-  # Beyond this normalised radius the penalty is fully applied.
-  distractor_focus_dist_hard_radius: 2.00
-
-  # If true, enter occlusion mode immediately after a jump commit instead of distractor mode.
-  jump_reject_force_occlusion: false
-
-
-# -----------------------------------------------------------------------------
-# ram_tracker_subsystems: nested config layout (preferred for new keys).
-# Both this nested layout and the flat ram_tracker block below are honoured.
-# -----------------------------------------------------------------------------
-ram_tracker_subsystems:
-  # Appearance descriptor backend used for re-identification.
-  descriptor:
-    # Which descriptor model to use: "osnet" or "siamese".
-    backend: "osnet"
-    # OSNet variant name (only used when backend == "osnet").
-    osnet_model_name: "osnet_x1_0"
-    # Which OSNet pretrained weights to load.
-    osnet_pretrained_checkpoint: "reid_market1501"
-    # Optional path to a local OSNet checkpoint (overrides the preset above).
-    osnet_model_path: ""
-    # Device used by OSNet — "auto" picks CUDA when available.
-    osnet_device: "auto"
-    # Max candidates passed into the descriptor model per call (0 = unlimited).
-    osnet_max_candidate_batch: 5
-
-  # Reacquisition (exiting occlusion) thresholds.
-  reacquisition:
-    # Confidence required to accept a reacquisition.
-    threshold: 0.75
-    # Consecutive frames over threshold needed to confirm reacquisition.
-    confirm_frames: 5
-    # Stricter Siam-branch threshold used during occlusion recovery.
-    occ_siam_threshold: 0.8
-
-  # Spike rejection (nested mirror of ram_tracker_experiment values).
-  spike_reject:
-    # Master switch for spike rejection.
-    enabled: true
-    # Don't run spike checks during the first N tracked frames.
-    min_frames: 3
-    # Only check spikes when score is at least this.
-    min_score: 0.0
-    # Frames of motion history used as baseline.
-    history_window: 40
-    # Minimum history samples needed before spike checks fire.
-    min_history: 5
-    # A frame is a spike when motion > ratio × baseline.
-    ratio: 2.5
-    # Also require this minimum absolute normalised motion.
-    abs_norm_min: 0.0
-    # Also gate on appearance similarity, not only motion.
-    use_appearance: false
-    # Above this similarity, treat as still-our-target (no spike).
-    max_sim: 0.65
-    # Watch for at most this many frames before giving up the spike workflow.
-    watch_max_frames: 8
-    # Settle thresholds — when motion drops, how do we call it stabilized?
-    settle:
-      # Motion must drop below this fraction of baseline.
-      ratio: 0.7
-      # Absolute normalised motion cap during settle.
-      abs_norm_max: 0.30
-      # Consecutive settled frames required to commit.
-      frames: 1
-      # Required fractional drop from the spike peak.
-      from_spike_frac: 0.55
-
-  # GMC (Global Motion Compensation) prior — warps last bbox with camera motion before search.
-  gmc_prior:
-    # Turn the prior on.
-    enabled: true
-    # Only apply when the homography is reliable.
-    require_reliable_h: true
-    # Skip the prior while in distractor mode.
-    skip_in_distractor_mode: true
-    # Max translation as a fraction of frame size (sanity bound).
-    max_translation_frac: 0.25
-    # Minimum scale bound for an accepted prior.
-    min_scale: 0.70
-    # Maximum scale bound for an accepted prior.
-    max_scale: 1.40
-    # Maximum rotation (degrees) before the prior is rejected.
-    max_rotation_deg: 25.0
-    # Max per-corner displacement as fraction of frame size.
-    max_corner_displacement_frac: 0.25
-
-
-# -----------------------------------------------------------------------------
+# =============================================================================
 # trt_engine: TensorRT-only options (used when make_trt_engine == True).
-# -----------------------------------------------------------------------------
+# =============================================================================
 trt_engine:
   # Test-time-augmentation blend factor inside the TRT wrapper.
   lambda_tta: 0.1
@@ -351,246 +129,497 @@ trt_engine:
   cuda_id: 0
 
 
-# -----------------------------------------------------------------------------
-# ram_tracker: legacy flat layout — most knobs live here.
-# These are the live values consumed by SiamRAMExperimentTracker.
-# -----------------------------------------------------------------------------
+# =============================================================================
+# ram_tracker: SiamRAM config (grouped, single source of truth).
+# All experimental knobs now live here; no duplicate subsystem blocks.
+# Leaf key names intentionally match tracker kwargs for compatibility.
+# =============================================================================
 ram_tracker:
-  # Path to the YOLO weights file used for detection / re-detection.
-  yolo_weights: "checkpoints/yolo11n.pt"
-  # Minimum YOLO detection confidence to keep.
-  yolo_conf: 0.3
-  # Restrict YOLO outputs to the inferred target class.
-  yolo_filter_class: false
-  # Number of frames used during YOLO class-vote warmup.
-  yolo_class_detect_frames: 5
-  # Enable compiled YOLO execution path (faster if available).
-  copile_yolo: False
 
-  # Appearance descriptor backend: "osnet" or "siamese".
-  descriptor_backend: "osnet"
-  # Only used for the siamese backend — pick SiamABC layer: "neck" (~256-d) or "encoder" (~1024-d).
-  siamese_feature_source: "neck"
-  # Only used for the siamese backend — comparison style: "xcorr" (2D cross-correlation) or "pooled" (cosine).
-  siamese_comparison_mode: "xcorr"
-  # OSNet variant name (torchreid model registry).
-  osnet_model_name: "osnet_x1_0"
-  # OSNet pretrained weights preset to load.
-  osnet_pretrained_checkpoint: "reid_market1501"
-  # Optional local OSNet weights path (overrides preset above).
-  osnet_model_path: ""
-  # Device used by OSNet — "auto" picks CUDA when available.
-  osnet_device: "auto"
-  # Max candidates passed to OSNet per call (0 = unlimited).
-  osnet_max_candidate_batch: 5
+  # ---------------------------------------------------------------------------
+  # runtime: general-purpose switches.
+  # ---------------------------------------------------------------------------
+  runtime:
+    # Print verbose diagnostics from the tracker (useful when debugging).
+    debug: false
+    # Downscale every input frame so its long edge is at most this many px (keeps things fast on big videos).
+    max_proc_long_edge: 1280
 
-  # Tracker confidence considered reliable for normal updates.
-  conf_threshold: 0.50
-  # Confidence required to accept detector-driven reacquisition.
-  reacq_threshold: 0.75
-  # Consecutive frames above reacq_threshold needed to confirm.
-  reacq_confirm_frames: 5
-  # Stricter Siam-branch threshold to exit occlusion.
-  occ_siam_reacq_threshold: 0.8
-  # Minimum appearance match needed to accept an identity (1.0 disables this gate).
-  app_match_threshold: 1
-  # Required margin between top candidates during occlusion handling.
-  occ_siam_margin: 0.8
-  # Blend factor for small corrective nudges to predicted state (0 = disabled).
-  nudge_alpha: 0.0
-  # Consecutive low-confidence frames before declaring occlusion entry.
-  entry_patience: 1
-  # Auto-enter occlusion mode on target loss.
-  enter_occlusion_on_loss: True
-  # Block entering distractor mode under heavy camera motion.
-  block_distractor_mode_on_camera_motion: True
-  # Block entering occlusion mode under heavy camera motion.
-  block_occlusion_on_camera_motion: True
-  # Pixel displacement threshold classifying camera motion as "heavy".
-  camera_motion_heavy_disp_threshold: 15.0
-  # Resolution-normalised displacement threshold for heavy camera motion.
-  camera_motion_heavy_norm_threshold: 0.35
-  # Force early-occlusion behaviour when entry occurs before this frame index (-1 = disabled).
-  early_occlusion_entry_n_frames: -1
-  # Legacy frame-duration flag for early-occlusion behaviour (-1 = disabled).
-  early_occlusion_max_frames: -1
-  # Use RAM matching until the DRM bank is full, then switch to DRM.
-  occlusion_use_ram_until_drm_full: False
-  # Warmup frames using a centered ROI (0 = disabled).
-  yolo_warmup_frames: 0
-  # Center-crop scale during YOLO warmup.
-  yolo_warmup_center_scale: 0.4
-  # Cap on the long edge of processed frames (px).
-  max_proc_long_edge: 1280
+  # ---------------------------------------------------------------------------
+  # yolo: re-detector used for occlusion recovery and distractor mode.
+  # ---------------------------------------------------------------------------
+  yolo:
+    # Which YOLO checkpoint to load for re-detection.
+    yolo_weights: "checkpoints/yolo12n.pt"
+    # Drop any YOLO box whose confidence is below this (lower = more candidates, more noise).
+    yolo_conf: 0.60
+    # Side length YOLO downsamples each crop to (bigger = better on tiny targets, slower).
+    yolo_imgsz: 320
+    # Run YOLO with test-time augmentation (flips + multi-scale). Higher recall, ~3-4× slower.
+    yolo_augment: false
+    # After class-vote warmup, keep only detections matching the inferred target class.
+    yolo_filter_class: false
+    # How many of the first frames are used to vote on what class the target is.
+    yolo_class_detect_frames: 5
+    # Use the compiled (TensorRT) YOLO engine if available.
+    copile_yolo: false
+    # For this many initial frames, run YOLO on a centered crop instead of the regular ROI (0 = off).
+    yolo_warmup_frames: 0
+    # How big that centered warmup crop is, as a fraction of the frame.
+    yolo_warmup_center_scale: 0.4
+    # Base padding (px) added around the predicted box before running YOLO.
+    yolo_search_expand: 100
 
-  # How many frames of YOLO candidates to collect before final DRM scoring.
-  cand_collection_frames: 1
-  # Similarity threshold for DRM admission / promotion.
-  drm_tau_sim: 0.6
-  # Minimum support count required to promote a DRM memory entry.
-  drm_mmin: 3
-  # Maximum entries stored in the DRM bank.
-  drm_capacity: 50
-  # Required margin for accepting the DRM winner.
-  drm_margin: 0.8
-  # Skip DRM updates when quality score is above this (likely uninformative).
-  drm_skip_threshold: 23
-  # Number of top candidates evaluated per DRM step.
-  drm_top_k: 3
-  # Global suppressor weight in DRM scoring (0 = disabled).
-  drm_gamma: 0
+  # ---------------------------------------------------------------------------
+  # descriptor: which appearance model is used for re-ID & DRM ranking.
+  # ---------------------------------------------------------------------------
+  descriptor:
+    # Which appearance model: "osnet" (strong person re-ID) or "siamese" (reuse SiamABC features, faster).
+    descriptor_backend: "osnet"
+    # If siamese: which layer to pool the embedding from ("neck" ~256-d, "encoder" ~1024-d).
+    siamese_feature_source: "neck"
+    # If siamese: how to compare embeddings ("xcorr" = 2D cross-correlation, "pooled" = cosine).
+    siamese_comparison_mode: "xcorr"
+    # Which OSNet variant to use.
+    osnet_model_name: "osnet_x1_0"
+    # Which OSNet pretrained weights preset to load ("" = use default).
+    osnet_pretrained_checkpoint: ""
+    # Optional local OSNet weights file (overrides the preset above).
+    osnet_model_path: ""
+    # Where OSNet runs ("auto" picks CUDA if available, otherwise CPU).
+    osnet_device: "auto"
+    # Cap on candidates passed into OSNet per call (0 = no cap).
+    osnet_max_candidate_batch: 5
+    # Minimum appearance similarity needed to accept an identity (1.0 effectively disables this gate).
+    app_match_threshold: 1
 
-  # DRM composite ranking weights (each weight scales one score component).
-  # Appearance similarity weight.
-  drm_lam_app: 1
-  # Candidate-velocity consistency weight.
-  drm_lam_cand_vel: 0.0
-  # Spatial distance penalty weight.
-  drm_lam_dist: 0.0
-  # Candidate direction consistency weight.
-  drm_lam_cand_dir: 0.0
-  # Temporal recency weight — favours fresher observations.
-  drm_lam_time: 0.3
-  # IoU overlap weight in the composite score.
-  drm_lam_iou: 0.0
-  # Motion-model agreement weight in DRM scoring.
-  drm_lam_mot: 0.0
+  # ---------------------------------------------------------------------------
+  # tracking_state: thresholds & hysteresis for the normal-tracking state machine.
+  # ---------------------------------------------------------------------------
+  tracking_state:
+    # SiamABC score below this means the target is probably lost.
+    conf_threshold: 0.5
+    # How many consecutive low-score frames before declaring occlusion entry.
+    entry_patience: 1
+    # Should we even go into occlusion mode when SiamABC reports loss.
+    enter_occlusion_on_loss: true
+    # Small corrective blend toward the predicted state when drifting (0 = off).
+    nudge_alpha: 0.0
 
-  # Minimum speed below which velocity-based scores are not trusted.
-  vel_score_min_speed: 0.5
-  # Hard direction-mismatch threshold (reject candidates with worse alignment).
-  vel_dir_hard_gate: 0.4
-  # Window length for averaged velocity estimation.
-  velocity_window_average: 200
+  # ---------------------------------------------------------------------------
+  # camera_motion: estimating and reacting to the camera moving between frames.
+  # ---------------------------------------------------------------------------
+  camera_motion:
+    core:
+      # Which estimator: "classic" (fast), "accurate" (slower), or "botsort" (BoT-SORT-inspired).
+      homography_mode: "classic"
+      # Hard-off switch for all camera-motion estimation (debug only).
+      disable_camera_motion: false
 
-  # Capacity of the RAM appearance memory bank.
-  mem_capacity: 50
-  # Exponential decay applied to older historical confidences.
-  history_decay: 0.1
-  # Rolling length of the confidence history buffer.
-  conf_history_len: 200
-  # Rolling length of the bbox-size history buffer.
-  size_history_len: 200
-  # Number of most-recent history points excluded from certain checks (avoids transient bias).
-  history_skip_last: 8
-  # Maximum lookback for shrinkage analysis.
-  shrinkage_max_lookback: 30
+    # BoT-SORT options — only consulted when homography_mode == "botsort".
+    botsort:
+      # Transform family: "partial_affine", "full_affine", or "homography".
+      botsort_motion_model: "partial_affine"
+      # Downscale factor before feature tracking (lower = faster, less detail).
+      botsort_motion_work_scale: 0.65
+      # Padding fraction around the target bbox when building the dynamic exclusion mask.
+      botsort_motion_bbox_pad: 0.5
+      # Grid rows used to distribute corner detection across the frame.
+      botsort_motion_grid_rows: 5
+      # Grid columns for corner-detection distribution.
+      botsort_motion_grid_cols: 7
+      # Max corners detected per grid cell.
+      botsort_motion_max_corners_per_cell: 16
+      # Shi-Tomasi corner-quality cutoff (lower = more corners, noisier).
+      botsort_motion_quality_level: 0.01
+      # Minimum spacing (px) between detected corners.
+      botsort_motion_min_distance: 7
+      # Neighbourhood block size used for corner-quality scoring.
+      botsort_motion_block_size: 7
+      # Lucas-Kanade optical-flow window size (px).
+      botsort_motion_lk_win_size: 17
+      # Pyramid depth — higher tolerates larger frame-to-frame motion.
+      botsort_motion_lk_max_level: 2
+      # Forward-backward consistency error threshold to filter bad matches.
+      botsort_motion_fb_max_error: 1.5
+      # RANSAC reprojection error threshold (px).
+      botsort_motion_ransac_reproj_threshold: 3.0
+      # RANSAC target confidence level.
+      botsort_motion_ransac_confidence: 0.99
+      # Max RANSAC iterations per transform estimate.
+      botsort_motion_ransac_max_iters: 1500
+      # Minimum number of inliers required to accept the fit.
+      botsort_motion_min_inliers: 24
+      # Minimum inlier ratio required to accept the fit.
+      botsort_motion_min_inlier_ratio: 0.35
+      # Max median residual allowed for an accepted transform.
+      botsort_motion_max_median_residual: 4.0
+      # Minimum number of grid cells with inliers (forces spatial spread).
+      botsort_motion_min_coverage_cells: 5
+      # Reject the fit if implied translation exceeds this fraction of the frame.
+      botsort_motion_max_translation_frac: 0.25
+      # Reject if implied camera zoom-out is below this factor.
+      botsort_motion_min_scale: 0.7
+      # Reject if implied camera zoom-in is above this factor.
+      botsort_motion_max_scale: 1.4
+      # Reject if implied rotation exceeds this many degrees.
+      botsort_motion_max_rotation_deg: 25.0
+      # MAD multiplier used in residual-based outlier rejection.
+      botsort_motion_residual_mad_multiplier: 4.0
+      # Floor for residual rejection threshold (prevents over-tight cuts on quiet frames).
+      botsort_motion_residual_min_threshold: 18
+      # Max fraction of frame flagged as high-residual before bailing out.
+      botsort_motion_residual_max_fraction: 0.22
+      # Minimum contour area (px) considered in residual-mask processing.
+      botsort_motion_residual_min_area: 12
+      # Dilation size (px) applied to the dynamic residual mask.
+      botsort_motion_dynamic_dilate: 7
+      # How many frames between fresh corner-detection passes.
+      botsort_motion_feature_detect_interval: 2
+      # Re-detect features when active points drop below this count.
+      botsort_motion_min_points_to_redetect: 96
+      # Hard cap on the number of active feature points.
+      botsort_motion_max_track_points: 260
+      # Enable dynamic residual masking inside motion estimation.
+      botsort_motion_enable_dynamic_mask: true
+      # Frame interval between residual-mask updates.
+      botsort_motion_residual_update_interval: 2
+      # When the fit fails, fall back to the previous (or identity) transform.
+      botsort_motion_use_fallback_transform: true
 
-  # Initial ROI padding (px) around the predicted box during YOLO search.
-  roi_start_expand: 20
-  # Base expansion (px) of the YOLO search crop.
-  yolo_search_expand: 100
-  # Multiplicative growth factor when ROI keeps missing.
-  search_expand_growth_factor: 1.4
-  # Number of misses between consecutive ROI growth steps.
-  search_expand_growth_every: 150
-  # Hard maximum ROI expansion (px) to keep things bounded.
-  search_expand_max: 500.0
+    # When the camera is shaking a lot, optionally skip distractor/occlusion entry
+    # to avoid false triggers caused by the camera moving rather than the target.
+    gating:
+      # Block distractor-mode entry when camera motion is heavy (avoids false jumps from shake).
+      block_distractor_mode_on_camera_motion: False
+      # Block occlusion entry when camera motion is heavy (avoids fake target-loss from shake).
+      block_occlusion_on_camera_motion: true
+      # Camera moved more than this many px in one frame = "heavy".
+      camera_motion_heavy_disp_threshold: 15.0
+      # Camera moved more than this fraction of bbox diagonal = "heavy" (matters for tiny targets).
+      camera_motion_heavy_norm_threshold: 0.35
 
-  # Box-area fraction below which target is treated as "tiny / long-distance".
-  long_distance_area_fraction: 0.030
-  # Initial ROI expansion for tiny-target recovery (px).
-  tiny_roi_start_expand: 8.0
-  # Base YOLO expansion for tiny-target mode (px).
-  tiny_yolo_search_expand: 20.0
-  # Growth factor for tiny-target ROI expansion.
-  tiny_search_expand_growth_factor: 1.3
-  # Frames between tiny-target growth steps.
-  tiny_search_expand_growth_every: 50
-  # Maximum tiny-mode ROI expansion (px).
-  tiny_search_expand_max: 40.0
+  # ---------------------------------------------------------------------------
+  # gmc_prior: warp the previous bbox forward by camera motion so SiamABC
+  # searches from the right starting point when only the camera moved.
+  # ---------------------------------------------------------------------------
+  gmc_prior:
+    # Use the camera-motion warp as a search prior at all.
+    gmc_prior_enabled: true
+    # Only apply when the homography passed reliability checks.
+    gmc_prior_require_reliable_h: true
+    # Skip the prior while in distractor mode (keeps that logic camera-motion-independent).
+    gmc_prior_skip_in_distractor_mode: true
+    # Reject the prior if it implies more than this fraction of frame translation.
+    gmc_prior_max_translation_frac: 0.25
+    # Reject if implied camera zoom-out is below this factor.
+    gmc_prior_min_scale: 0.7
+    # Reject if implied camera zoom-in is above this factor.
+    gmc_prior_max_scale: 1.4
+    # Reject if implied rotation exceeds this many degrees.
+    gmc_prior_max_rotation_deg: 25.0
+    # Reject if any frame corner moves more than this fraction of the frame.
+    gmc_prior_max_corner_displacement_frac: 0.25
 
-  # Camera-motion estimator: "classic" (fast) | "accurate" | "botsort" (BoT-SORT-inspired).
-  homography_mode: "classic"
-  # BoT-SORT motion transform family: "partial_affine" | "full_affine" | "homography".
-  botsort_motion_model: "partial_affine"
-  # Downscale factor before feature tracking (lower = faster, less detail).
-  botsort_motion_work_scale: 0.65
-  # Padding fraction around bbox for building dynamic exclusion masks.
-  botsort_motion_bbox_pad: 0.50
-  # Grid rows for distributing corner detection across the frame.
-  botsort_motion_grid_rows: 5
-  # Grid columns for corner-detection distribution.
-  botsort_motion_grid_cols: 7
-  # Maximum corners per grid cell.
-  botsort_motion_max_corners_per_cell: 16
-  # Shi-Tomasi corner-quality cutoff.
-  botsort_motion_quality_level: 0.01
-  # Minimum spacing (px) between detected corners.
-  botsort_motion_min_distance: 7
-  # Neighbourhood block size used for corner-quality computation.
-  botsort_motion_block_size: 7
-  # Lucas-Kanade optical-flow window size (px).
-  botsort_motion_lk_win_size: 17
-  # Optical-flow pyramid depth (higher = larger motion handled).
-  botsort_motion_lk_max_level: 2
-  # Forward-backward error threshold for filtering noisy point matches.
-  botsort_motion_fb_max_error: 1.5
-  # RANSAC reprojection error threshold (px).
-  botsort_motion_ransac_reproj_threshold: 3.0
-  # RANSAC target confidence level.
-  botsort_motion_ransac_confidence: 0.99
-  # Maximum RANSAC iterations per transform estimate.
-  botsort_motion_ransac_max_iters: 1500
-  # Minimum number of inliers required to accept the fit.
-  botsort_motion_min_inliers: 24
-  # Minimum inlier ratio required to accept the fit.
-  botsort_motion_min_inlier_ratio: 0.35
-  # Maximum median residual allowed for accepted transforms.
-  botsort_motion_max_median_residual: 4.0
-  # Minimum number of grid cells with inliers (forces spatial spread).
-  botsort_motion_min_coverage_cells: 5
-  # Maximum global translation as fraction of frame size (sanity bound).
-  botsort_motion_max_translation_frac: 0.25
-  # Minimum allowed scale factor for accepted transforms.
-  botsort_motion_min_scale: 0.70
-  # Maximum allowed scale factor for accepted transforms.
-  botsort_motion_max_scale: 1.40
-  # Maximum allowed rotation (degrees) for accepted transforms.
-  botsort_motion_max_rotation_deg: 25.0
-  # MAD-multiplier used in residual-based outlier rejection.
-  botsort_motion_residual_mad_multiplier: 4.0
-  # Floor for residual-rejection threshold (prevents over-tight rejection on noise).
-  botsort_motion_residual_min_threshold: 18
-  # Max fraction of the frame that can be flagged as high-residual.
-  botsort_motion_residual_max_fraction: 0.22
-  # Minimum contour area (px) for residual-mask processing.
-  botsort_motion_residual_min_area: 12
-  # Dilation size (px) applied to dynamic residual masks.
-  botsort_motion_dynamic_dilate: 7
-  # Frame interval between fresh corner-detection passes.
-  botsort_motion_feature_detect_interval: 2
-  # Minimum tracked points before forcing a feature re-detection.
-  botsort_motion_min_points_to_redetect: 96
-  # Hard cap on the number of active feature points.
-  botsort_motion_max_track_points: 260
-  # Enable dynamic residual masking inside motion estimation.
-  botsort_motion_enable_dynamic_mask: true
-  # Frame interval between residual-mask updates.
-  botsort_motion_residual_update_interval: 2
-  # Allow falling back to the previous / identity transform on failure.
-  botsort_motion_use_fallback_transform: true
+  # ---------------------------------------------------------------------------
+  # roi_search: where YOLO looks for re-detection candidates.
+  # ---------------------------------------------------------------------------
+  roi_search:
+    # Standard-size targets.
+    normal:
+      # Initial padding (px) added around the predicted box when starting the search.
+      roi_start_expand: 20
+      # Each time YOLO keeps missing, multiply the ROI by this factor.
+      search_expand_growth_factor: 1.4
+      # How many misses between consecutive ROI growth steps.
+      search_expand_growth_every: 150
+      # Hard cap on the ROI padding (prevents unbounded growth).
+      search_expand_max: 500.0
 
-  # GMC prior — warps the last reliable box with camera motion before tracker search.
-  # Master switch for the GMC prior.
-  gmc_prior_enabled: true
-  # Only apply the prior when the homography passed reliability gates.
-  gmc_prior_require_reliable_h: true
-  # Skip the prior while in distractor mode (keeps that logic camera-motion-independent).
-  gmc_prior_skip_in_distractor_mode: true
-  # Max translation as frame fraction allowed in the prior.
-  gmc_prior_max_translation_frac: 0.25
-  # Minimum scale bound for accepted prior transforms.
-  gmc_prior_min_scale: 0.70
-  # Maximum scale bound for accepted prior transforms.
-  gmc_prior_max_scale: 1.40
-  # Maximum rotation (degrees) for accepted prior transforms.
-  gmc_prior_max_rotation_deg: 25.0
-  # Max per-corner displacement fraction for the prior to remain valid.
-  gmc_prior_max_corner_displacement_frac: 0.25
+    # Tiny / long-distance targets (different params because small targets need tighter ROIs).
+    tiny:
+      # If the bbox is smaller than this fraction of the frame, treat as "tiny".
+      long_distance_area_fraction: 0.03
+      # Initial ROI padding (px) for tiny-target recovery.
+      tiny_roi_start_expand: 8.0
+      # Base YOLO expansion (px) for tiny mode.
+      tiny_yolo_search_expand: 20.0
+      # Growth factor for tiny-target ROI expansion.
+      tiny_search_expand_growth_factor: 1.3
+      # How many misses between tiny-target growth steps.
+      tiny_search_expand_growth_every: 150
+      # Hard cap on tiny-mode ROI expansion (px).
+      tiny_search_expand_max: 40.0
 
-  # Globally disable camera-motion estimation and compensation (debug switch).
-  disable_camera_motion: False
+    # When the target has left the frame entirely.
+    out_of_frame:
+      # Pin the ROI to the edge the target exited from, instead of centering on prediction.
+      out_of_frame_roi_edge_pin_enabled: true
+      # Use the tiny-target ROI params even after the target leaves (off = always use normal).
+      out_of_frame_roi_use_tiny_params: false
+      # Stop searching once predicted centre is this many object-widths past the edge.
+      out_of_frame_roi_skip_when_past_edge_mult: 2.0
+      # Out-of-frame overrides for the four expansion knobs (each <= 0 = fall back to normal/tiny).
+      out_of_frame_roi_start_expand: -1.0
+      out_of_frame_yolo_search_expand: -1.0
+      out_of_frame_search_expand_growth_factor: -1.0
+      out_of_frame_search_expand_growth_every: -1
 
-  # Print verbose diagnostics from the tracker internals.
-  debug: false
+  # ---------------------------------------------------------------------------
+  # memory_history: rolling buffers used by occlusion recovery & analysis.
+  # ---------------------------------------------------------------------------
+  memory_history:
+    # Max stored target appearance descriptors (the "RAM" memory bank).
+    mem_capacity: 50
+    # How fast older confidence values fade.
+    history_decay: 0.1
+    # Length of the rolling confidence history.
+    conf_history_len: 200
+    # Length of the rolling bbox-size history.
+    size_history_len: 200
+    # Skip the N most-recent samples when doing certain checks (avoids transient bias).
+    history_skip_last: 8
+    # Max frames back we look when checking if the target is shrinking.
+    shrinkage_max_lookback: 30
+
+  # ---------------------------------------------------------------------------
+  # occlusion: behaviour when the target is lost and we're trying to find it again.
+  # ---------------------------------------------------------------------------
+  occlusion:
+    # Thresholds for confirming a successful reacquisition.
+    reacquisition:
+      # SiamABC score needed to accept "yes, I found the target again".
+      reacq_threshold: 0.75
+      # How many consecutive frames must clear that threshold before committing.
+      reacq_confirm_frames: 1
+      # Stricter SiamABC-only threshold for exiting occlusion via SiamABC alone.
+      occ_siam_reacq_threshold: 0.8
+      # Required margin between top-1 and top-2 candidates during occlusion.
+      occ_siam_margin: 0.8
+
+    # Higher-level occlusion policy.
+    policy:
+      # If occlusion starts before this frame index, use a special "early" recovery mode (-1 = off).
+      early_occlusion_entry_n_frames: -1
+      # Legacy duration cap on early-occlusion mode (-1 = off).
+      early_occlusion_max_frames: -1
+      # Stick with appearance-only matching until the DRM bank fills up.
+      occlusion_use_ram_until_drm_full: false
+      # Collect YOLO candidates across this many frames before final scoring.
+      cand_collection_frames: 1
+
+    # DRM (composite candidate ranking) used during occlusion recovery.
+    drm:
+      # Appearance similarity needed to admit a candidate into the DRM bank.
+      drm_tau_sim: 0.8
+      # Minimum support count required to promote a bank entry.
+      drm_mmin: 3
+      # Max entries in the DRM bank.
+      drm_capacity: 50
+      # Required margin between the DRM winner and runner-up.
+      drm_margin: 0.5
+      # Skip the DRM update if quality score is already this high.
+      drm_skip_threshold: 23
+      # Number of top candidates evaluated per DRM step.
+      drm_top_k: 3
+      # Global suppressor weight (0 = off).
+      drm_gamma: 0
+      # Weight on appearance similarity in the composite score.
+      drm_lam_app: 1
+      # Weight on candidate-velocity consistency.
+      drm_lam_cand_vel: 0.0
+      # Weight on spatial distance penalty.
+      drm_lam_dist: 0.0
+      # Weight on candidate-direction consistency.
+      drm_lam_cand_dir: 0.0
+      # Weight on temporal recency (newer = better).
+      drm_lam_time: 0.0
+      # Weight on IoU overlap.
+      drm_lam_iou: 0.0
+      # Weight on motion-model agreement.
+      drm_lam_mot: 0.0
+
+    # Velocity-based scoring that feeds the DRM cand_vel / cand_dir terms above.
+    velocity:
+      # Below this speed, don't trust velocity-based scoring.
+      vel_score_min_speed: 0.5
+      # Hard direction-mismatch cutoff (above = reject candidate).
+      vel_dir_hard_gate: 0.4
+      # How many frames are averaged when estimating velocity.
+      velocity_window_average: 200
+
+  # ---------------------------------------------------------------------------
+  # spike_reject: detect "the tracker just jumped to a distractor" — one-frame
+  # large displacement compared to the recent baseline.
+  # ---------------------------------------------------------------------------
+  spike_reject:
+    # Master switch for the spike / hard-jump rejection workflow.
+    spike_reject_enabled: true
+    # Don't run spike detection in the first N frames (startup noise).
+    spike_reject_min_frames: 3
+    # Only run when current tracker score is at least this.
+    spike_reject_min_score: 0.0
+    # How many past frames define the "normal" motion baseline.
+    spike_reject_history_window: 40
+    # Need at least this many baseline samples before spike detection fires.
+    spike_reject_min_history: 5
+    # A frame counts as a spike when its motion is at least this × the baseline.
+    spike_reject_ratio: 2.5
+    # Plus the motion must reach this absolute (bbox-diagonal-normalised) amount.
+    spike_reject_abs_norm_min: 0.0
+    # After a spike, motion must drop below this × baseline to count as "settled".
+    spike_reject_settle_ratio: 0.7
+    # Absolute cap on motion during the settle phase.
+    spike_reject_settle_abs_norm_max: 0.3
+    # How many consecutive settled frames before committing to distractor mode.
+    spike_reject_settle_frames: 1
+    # Give up the spike-watch after this many frames if it never settles.
+    spike_reject_watch_max_frames: 8
+    # During settle, motion must drop to at least this fraction of the spike peak.
+    spike_reject_settle_from_spike_frac: 0.55
+    # Also check appearance similarity when deciding if the spike is a real switch.
+    spike_reject_use_appearance: false
+    # If appearance similarity is above this, treat as still-our-target (no spike).
+    spike_reject_max_sim: 0.65
+    # Require this many consecutive spike-triggering frames before starting the watch
+    # (1 = react immediately; >1 suppresses single-frame jitter but blocks real one-frame jumps).
+    spike_reject_confirm_frames: 1
+    # Stricter absolute floor when target is tiny — kills false positives caused
+    # by tiny bbox diagonals amplifying small camera residuals into huge step-norms.
+    spike_reject_long_distance_abs_norm_min: 0.1
+    # Treat the apparent jump as ego-motion noise when the residual is smaller than
+    # this × the raw camera motion at the target point (0 = off).
+    spike_reject_camera_residual_min_ratio: 0
+    # Hard-disable spike detection whenever the target is in tiny / long-distance mode.
+    spike_reject_disable_in_tiny_mode: false
+
+  # ---------------------------------------------------------------------------
+  # distractor_mode: state we enter after a confirmed spike commit; tries to
+  # tell the real target from look-alike distractors using YOLO + appearance.
+  # ---------------------------------------------------------------------------
+  distractor_mode:
+
+    # Entry behaviour: how aggressive the per-frame penalty against known distractors is.
+    entry:
+      # Stay in distractor mode for at least this many frames after committing.
+      jump_reject_distractor_mode_frames: 12
+      # Apply a per-frame score penalty against candidates matching known distractors.
+      jump_reject_distractor_penalty_enabled: true
+      # Max score reduction the distractor penalty can apply.
+      jump_reject_distractor_penalty_weight: 0.25
+      # Only apply the penalty when similarity to a stored distractor exceeds this.
+      jump_reject_distractor_penalty_sim_floor: 0.55
+      # Only compare against the last K stored distractor descriptors.
+      jump_reject_distractor_penalty_bank_topk: 5
+      # Skip distractor mode and go straight to occlusion mode after a jump commit.
+      jump_reject_force_occlusion: false
+
+    # While in distractor mode, how we pick the real target out of YOLO candidates.
+    selection:
+      # If the best candidate's similarity is below this, give up on this frame (and exit distractor mode).
+      # Restored to the a098fde baseline (0.70) — 0.55-0.60 was too loose and let the wrong object win.
+      distractor_mode_min_similarity: 0.0
+      # Required similarity for the winning candidate to be accepted this frame.
+      # If below this, tracker stays in distractor mode and holds the previous focus.
+      distractor_mode_selected_min_similarity: 1
+      # Hard spatial leash: the selected candidate's centre must be within this many
+      # focus-bbox diagonals of the held focus point. Prevents the system from
+      # teleporting to a far-away object during distractor mode and on recovery.
+      # 1.0 ≈ within one bbox-diagonal of the held box. <= 0 disables the gate.
+      distractor_mode_selected_max_focus_dist_frac: 1.1
+      # Max YOLO detections considered per frame (0 = all).
+      distractor_mode_yolo_topk: 8
+      # Max target descriptors stored for ROI similarity scoring.
+      distractor_mode_history_limit: 80
+      # Reuse the tracker's crop/mapping sizes when building the distractor ROI.
+      distractor_mode_use_tracker_mapping: true
+      # Multiplicative expansion of the YOLO search ROI while in distractor mode.
+      distractor_mode_roi_expand: 1.2
+      # Minimum ROI side length (px) — prevents absurdly small crops.
+      distractor_mode_roi_min_side: 32
+      # How to rank candidates. Both modes now sort by the same composite score
+      # (appearance + IoU + distance penalty + distractor-bank suppression — none
+      # of the weights below are ignored). The label is kept for visual/log
+      # disambiguation and downstream behaviour hooks.
+      distractor_compare_mode: "ram"
+      # Required top1 - top2 margin to actually switch identity.
+      distractor_mode_switch_margin: 0.08
+      # Stick with the current pick for this many ambiguous frames.
+      distractor_mode_ambiguity_hold_frames: 2
+      # Behaviour preset for distractor handling ("standard" or alternatives).
+      distractor_mode_behavior_mode: "standard"
+
+    # Composite-score weights used by distractor-mode ranking — applied in
+    # BOTH "ram" and "drm" compare modes (the historical "DRM only" gating has
+    # been removed so IoU / distance / negative-bank penalties always count).
+    drm:
+      # Weight on appearance similarity.
+      distractor_drm_lam_app: 1.0
+      # Weight on IoU with the expected focus box.
+      distractor_drm_lam_iou: 0.5
+      # Weight on the distance-from-focus penalty (penalises candidates far from focus).
+      distractor_drm_lam_dist: 0.3
+      # Weight on the negative-bank (known-distractor) penalty (EdgeDAM-style suppressor).
+      distractor_drm_gamma: 0.25
+      # Controls how quickly the distance penalty grows with offset (must be > 0).
+      distractor_drm_dist_sigma_factor: 2.5
+      # Only use the last K stored distractors in the negative-bank penalty.
+      distractor_drm_bank_topk: 5
+
+    # Penalty applied when a candidate is far from the current focus point.
+    focus_distance_penalty:
+      # Penalise candidates that are far from the focus point.
+      distractor_focus_dist_penalty_enabled: true
+      # Max score reduction the focus-distance penalty can apply.
+      distractor_focus_dist_penalty_weight: 0.35
+      # No penalty within this normalised radius of focus.
+      distractor_focus_dist_soft_radius: 0.6
+      # Full penalty beyond this normalised radius of focus.
+      distractor_focus_dist_hard_radius: 2.0
+
+    # Motion-based gating for candidates while in distractor mode.
+    motion_gate:
+      # Run a Kalman filter "anchor" while in distractor mode (motion prior).
+      distractor_mode_anchor_ekf_enabled: True
+      # Scale extra ROI padding by EKF position uncertainty (0 = off).
+      distractor_mode_anchor_uncertainty_roi_scale: 0.0
+      # Cap on uncertainty-driven extra ROI padding (px).
+      distractor_mode_anchor_uncertainty_roi_cap: 96.0
+      # Reject candidates that are motion-inconsistent with the EKF (Mahalanobis test).
+      distractor_mode_mahalanobis_gate_enabled: true
+      # Chi-squared threshold for the gate — lower = stricter.
+      distractor_mode_mahalanobis_threshold: 9.21
+      # Extra measurement variance term (px²) used to soften the gate.
+      distractor_mode_mahalanobis_meas_var: 25.0
+
+    # If our pick heavily overlaps a known distractor, briefly lock onto motion only.
+    overlap_lock:
+      # Engage a motion-only lock when the winning candidate overlaps a distractor heavily.
+      # Restored to the a098fde baseline (true) — provides a safety net so the system holds
+      # the EKF-predicted bbox instead of flicker-switching identity when two candidates compete.
+      distractor_mode_overlap_motion_lock_enabled: True
+      # Overlap IoU at which the lock engages.
+      distractor_mode_overlap_iou_enter: 0.35
+      # Overlap IoU below which the lock is allowed to release.
+      distractor_mode_overlap_iou_exit: 0.15
+      # Consecutive clear-overlap frames needed before releasing the lock.
+      distractor_mode_overlap_clear_frames: 3
+      # Hard maximum number of frames the lock can stay engaged.
+      distractor_mode_overlap_lock_max_frames: 24
+
+    # When and how distractor mode ends, plus post-exit cooldowns to avoid contamination.
+    exit:
+      # Keep adding to appearance memory while in distractor mode (risky — can contaminate).
+      distractor_mode_update_memory: false
+      # Re-init the dynamic SiamABC template when exiting distractor mode.
+      distractor_mode_exit_reinit_enabled: True
+      # Need this many "stable" frames before exiting distractor mode.
+      distractor_mode_exit_stable_frames: 500
+      # IoU between consecutive matches needed to count a frame as "stable".
+      distractor_mode_exit_same_iou: 0.6
+      # Forbid re-entering distractor mode for this many frames after exit.
+      distractor_mode_reentry_cooldown_frames: 12
+      # Pause memory admissions for this many frames after exit.
+      distractor_mode_post_exit_memory_freeze_frames: 8
+      # Pause dynamic-template updates for this many frames after exit.
+      distractor_mode_post_exit_template_freeze_frames: 8

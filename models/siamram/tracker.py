@@ -103,6 +103,8 @@ class SiamRAMExperimentTracker:
         reacq_confirm_frames: int = 1,
         yolo_conf: float = 0.30,
         yolo_iou: float = 0.45,
+        yolo_imgsz: int = 320,
+        yolo_augment: bool = False,
         app_match_threshold: float = 0.72,
         occ_siam_margin=0.2,
         nudge_alpha: float = 0.30,
@@ -204,6 +206,13 @@ class SiamRAMExperimentTracker:
         tiny_search_expand_growth_factor: float = 1.3,
         tiny_search_expand_growth_every: int = 5,
         tiny_search_expand_max: float = 40.0,
+        out_of_frame_roi_edge_pin_enabled: bool = True,
+        out_of_frame_roi_use_tiny_params: bool = False,
+        out_of_frame_roi_skip_when_past_edge_mult: float = 2.0,
+        out_of_frame_roi_start_expand: float = -1.0,
+        out_of_frame_yolo_search_expand: float = -1.0,
+        out_of_frame_search_expand_growth_factor: float = -1.0,
+        out_of_frame_search_expand_growth_every: int = -1,
         max_proc_long_edge: int = 1280,
         entry_patience: int = 3,
         cand_collection_frames: int = 3,
@@ -237,6 +246,7 @@ class SiamRAMExperimentTracker:
         distractor_focus_dist_hard_radius: float = 2.00,
         distractor_mode_min_similarity: float = 0.50,
         distractor_mode_selected_min_similarity: float = 0.0,
+        distractor_mode_selected_max_focus_dist_frac: float = -1.0,
         distractor_mode_yolo_topk: int = 2,
         distractor_mode_history_limit: int = 80,
         distractor_mode_use_tracker_mapping: bool = True,
@@ -287,6 +297,10 @@ class SiamRAMExperimentTracker:
         spike_reject_settle_from_spike_frac: float = 0.45,
         spike_reject_use_appearance: bool = True,
         spike_reject_max_sim: float = 0.65,
+        spike_reject_confirm_frames: int = 1,
+        spike_reject_long_distance_abs_norm_min: float = 0.0,
+        spike_reject_camera_residual_min_ratio: float = 0.0,
+        spike_reject_disable_in_tiny_mode: bool = False,
         copile_yolo=False,
         debug=True,
         disable_camera_motion: bool = False,
@@ -404,6 +418,8 @@ class SiamRAMExperimentTracker:
         self.reacq_threshold = reacq_threshold
         self.yolo_conf = yolo_conf
         self.yolo_iou_thr = yolo_iou
+        self.yolo_imgsz = max(32, int(yolo_imgsz))
+        self.yolo_augment = bool(yolo_augment)
         self.app_match_threshold = app_match_threshold
         self.nudge_alpha = nudge_alpha
         self.tau_occ = tau_occ
@@ -560,6 +576,19 @@ class SiamRAMExperimentTracker:
         self.tiny_search_expand_growth_factor = tiny_search_expand_growth_factor
         self.tiny_search_expand_growth_every = tiny_search_expand_growth_every
         self.tiny_search_expand_max = tiny_search_expand_max
+        self._out_of_frame_roi_edge_pin_enabled = bool(out_of_frame_roi_edge_pin_enabled)
+        self._out_of_frame_roi_use_tiny_params = bool(out_of_frame_roi_use_tiny_params)
+        self._out_of_frame_roi_skip_when_past_edge_mult = max(
+            0.0, float(out_of_frame_roi_skip_when_past_edge_mult)
+        )
+        self._out_of_frame_roi_start_expand = float(out_of_frame_roi_start_expand)
+        self._out_of_frame_yolo_search_expand = float(out_of_frame_yolo_search_expand)
+        self._out_of_frame_search_expand_growth_factor = float(
+            out_of_frame_search_expand_growth_factor
+        )
+        self._out_of_frame_search_expand_growth_every = int(
+            out_of_frame_search_expand_growth_every
+        )
         self._max_proc_long_edge = max(1, int(max_proc_long_edge))
         self._osnet_max_candidate_batch = max(0, int(osnet_max_candidate_batch))
         self._yolo_warmup_frames = max(0, int(yolo_warmup_frames))
@@ -600,6 +629,10 @@ class SiamRAMExperimentTracker:
         self.held_box: Optional[np.ndarray] = None
         self.in_occlusion: bool = False
         self.frame_idx: int = 0
+        # Snapshot of the most recent successful recovery (set by occlusion exit
+        # and by distractor-mode resolved exit). Consumed by the visualiser.
+        self._last_recovery_patch: Optional[np.ndarray] = None
+        self._last_recovery_info: Optional[dict] = None
         self.velocity: np.ndarray = np.zeros(2)
         self.prev_gray: Optional[np.ndarray] = None
         self.init_frame: Optional[np.ndarray] = None
@@ -688,6 +721,9 @@ class SiamRAMExperimentTracker:
         )
         self._distractor_mode_selected_min_similarity = float(
             np.clip(distractor_mode_selected_min_similarity, 0.0, 1.0)
+        )
+        self._distractor_mode_selected_max_focus_dist_frac = float(
+            distractor_mode_selected_max_focus_dist_frac
         )
         # 0 means "use all ROI detections" (bounded by osnet_max_candidate_batch if set).
         self._distractor_mode_yolo_topk = max(0, int(distractor_mode_yolo_topk))
@@ -797,6 +833,16 @@ class SiamRAMExperimentTracker:
         )
         self._spike_reject_use_appearance = bool(spike_reject_use_appearance)
         self._spike_reject_max_sim = float(spike_reject_max_sim)
+        self._spike_reject_confirm_frames = max(1, int(spike_reject_confirm_frames))
+        self._spike_reject_long_distance_abs_norm_min = max(
+            0.0, float(spike_reject_long_distance_abs_norm_min)
+        )
+        self._spike_reject_camera_residual_min_ratio = max(
+            0.0, float(spike_reject_camera_residual_min_ratio)
+        )
+        self._spike_reject_disable_in_tiny_mode = bool(
+            spike_reject_disable_in_tiny_mode
+        )
 
         self._jump_watch_active: bool = False
         self._jump_watch_anchor_bbox: Optional[np.ndarray] = None
@@ -809,6 +855,7 @@ class SiamRAMExperimentTracker:
         self._jump_watch_last_sim: Optional[float] = None
         self._jump_reject_distractor_timer: int = 0
         self._jump_watch_last_step_norm: float = 0.0
+        self._spike_confirm_streak: int = 0
         self._spike_debug_speed_norm: float = float("nan")
         self._spike_debug_baseline_norm: float = float("nan")
         self._spike_debug_ratio: float = float("nan")
@@ -1291,7 +1338,8 @@ class SiamRAMExperimentTracker:
             conf=self.yolo_conf,
             iou=self.yolo_iou_thr,
             verbose=False,
-            imgsz=320,
+            imgsz=self.yolo_imgsz,
+            augment=self.yolo_augment,
         )
         boxes: List[np.ndarray] = []
         if results and results[0].boxes is not None and len(results[0].boxes) > 0:
@@ -2388,6 +2436,61 @@ class SiamRAMExperimentTracker:
             score=score,
         )
 
+    def _record_recovery(
+        self,
+        mode: str,
+        frame: np.ndarray,
+        bbox: np.ndarray,
+        score: float,
+        sim: Optional[float] = None,
+        iou: Optional[float] = None,
+        desc: Optional[np.ndarray] = None,
+    ) -> None:
+        """
+        Snapshot the patch + stats of the latest successful recovery so the
+        visualiser can render what we recovered onto. Called from the
+        occlusion-recovery commit and the distractor-mode resolved exit.
+        """
+        bb = np.asarray(bbox, dtype=int).reshape(-1)
+        if bb.size < 4:
+            self._last_recovery_patch = None
+            self._last_recovery_info = None
+            return
+        x, y, bw, bh = int(bb[0]), int(bb[1]), int(bb[2]), int(bb[3])
+        h_fr, w_fr = frame.shape[:2]
+        x1 = max(0, x)
+        y1 = max(0, y)
+        x2 = min(w_fr, x + bw)
+        y2 = min(h_fr, y + bh)
+        if x2 > x1 and y2 > y1:
+            self._last_recovery_patch = frame[y1:y2, x1:x2].copy()
+        else:
+            self._last_recovery_patch = None
+
+        iou_held = float(iou) if iou is not None else float("nan")
+        if not np.isfinite(iou_held) and self.held_box is not None:
+            iou_held = float(_iou(self.held_box, bbox))
+
+        sim_val = float(sim) if sim is not None else float("nan")
+        if not np.isfinite(sim_val) and desc is not None:
+            best = self.memory.best_descriptor()
+            if best is not None:
+                sim_val = float(_cos_sim(desc, best))
+
+        self._last_recovery_info = {
+            "mode": str(mode),
+            "bbox": np.asarray(bbox, dtype=int).copy(),
+            "score": float(score),
+            "sim": sim_val,
+            "iou_held": iou_held,
+            "frame_idx": int(self.frame_idx),
+            "thresholds": {
+                "reacq": float(self.reacq_threshold),
+                "min_sim": float(self._distractor_mode_min_similarity),
+                "sel_min_sim": float(self._distractor_mode_selected_min_similarity),
+            },
+        }
+
     def _get_median_size(
         self,
     ) -> Tuple[int, int]:
@@ -2866,7 +2969,11 @@ class SiamRAMExperimentTracker:
             y = (h_fr - bh) // 2
             return x, y, bw, bh
 
-        is_tiny = (not self._out_of_frame) and self._is_long_distance(frame)
+        tiny_now = self._is_long_distance(frame)
+        if self._out_of_frame:
+            is_tiny = self._out_of_frame_roi_use_tiny_params and tiny_now
+        else:
+            is_tiny = tiny_now
         if is_tiny:
             _roi_start_expand = self.tiny_roi_start_expand
             _yolo_search_expand = self.tiny_yolo_search_expand
@@ -2878,6 +2985,16 @@ class SiamRAMExperimentTracker:
             _search_expand_growth_factor = self.search_expand_growth_factor
             _search_expand_growth_every = self.search_expand_growth_every
 
+        if self._out_of_frame:
+            if self._out_of_frame_roi_start_expand > 0.0:
+                _roi_start_expand = self._out_of_frame_roi_start_expand
+            if self._out_of_frame_yolo_search_expand > 0.0:
+                _yolo_search_expand = self._out_of_frame_yolo_search_expand
+            if self._out_of_frame_search_expand_growth_factor > 0.0:
+                _search_expand_growth_factor = self._out_of_frame_search_expand_growth_factor
+            if self._out_of_frame_search_expand_growth_every > 0:
+                _search_expand_growth_every = self._out_of_frame_search_expand_growth_every
+
         obj_w, obj_h = self._get_median_size()
         obj_size = (obj_w + obj_h) // 2
 
@@ -2885,11 +3002,15 @@ class SiamRAMExperimentTracker:
         time_expand = float(_search_expand_growth_factor ** steps)
         effective_expand = min(_roi_start_expand * time_expand, _yolo_search_expand)
 
-        if self._out_of_frame and self._exit_edge is not None:
+        if (
+            self._out_of_frame
+            and self._exit_edge is not None
+            and self._out_of_frame_roi_edge_pin_enabled
+        ):
             side = max(1, int(obj_size * effective_expand))
 
             if self._exit_edge == "right":
-                if (self._search_cx - w_fr) > obj_w * 2:
+                if (self._search_cx - w_fr) > obj_w * self._out_of_frame_roi_skip_when_past_edge_mult:
                     return 0, 0, 0, 0
                 scy = float(np.clip(self._search_cy, side // 2, h_fr - side // 2))
                 x1, y1 = w_fr - side, int(scy - side // 2)
@@ -2934,17 +3055,17 @@ class SiamRAMExperimentTracker:
     ) -> List[np.ndarray]:
         """
         Calls _get_yolo_search_roi to get the search crop, runs YOLO predict
-                    on that crop at imgsz=320, then translates all resulting bounding
-                    boxes back to full-frame coordinates. Optionally filters detections
-                    to _target_class_id when yolo_filter_class=True and the class has
-                    been committed. Stores results in _yolo_cache so _yolo_detect_cached
-                    can skip a redundant call within the same frame.
+                    on that crop at imgsz=self.yolo_imgsz, then translates all resulting
+                    bounding boxes back to full-frame coordinates. Optionally filters
+                    detections to _target_class_id when yolo_filter_class=True and the
+                    class has been committed. Stores results in _yolo_cache so
+                    _yolo_detect_cached can skip a redundant call within the same frame.
 
         The only place in the system that runs YOLO. Called during candidate
                     collection (phases 1…N) and referenced by the phase 0 ROI logic.
                     Keeping detection isolated here means the ROI logic, class filtering,
-                    and coordinate translation all live in one place. The 320px imgsz
-                    keeps YOLO inference fast enough to run on embedded/edge hardware.
+                    and coordinate translation all live in one place. The configurable
+                    imgsz lets callers trade detection accuracy for speed.
         Args:
             frame (any): current video frame as a numpy BGR array
         Returns:
@@ -2957,7 +3078,12 @@ class SiamRAMExperimentTracker:
             self._yolo_cache = []
             return []
         results = self.yolo.predict(
-            crop, conf=self.yolo_conf, iou=self.yolo_iou_thr, verbose=False, imgsz=320
+            crop,
+            conf=self.yolo_conf,
+            iou=self.yolo_iou_thr,
+            verbose=False,
+            imgsz=self.yolo_imgsz,
+            augment=self.yolo_augment,
         )
         boxes = []
         if results and results[0].boxes is not None and len(results[0].boxes) > 0:
@@ -3735,7 +3861,12 @@ class SiamRAMExperimentTracker:
             return
 
         results = self.yolo.predict(
-            crop, conf=self.yolo_conf, iou=self.yolo_iou_thr, verbose=False, imgsz=320
+            crop,
+            conf=self.yolo_conf,
+            iou=self.yolo_iou_thr,
+            verbose=False,
+            imgsz=self.yolo_imgsz,
+            augment=self.yolo_augment,
         )
         if not results or results[0].boxes is None or len(results[0].boxes) == 0:
             return
@@ -3845,12 +3976,13 @@ class SiamRAMExperimentTracker:
 
         if not os.path.exists(engine_path) or force_recompile:
             print(
-                "Compiling YOLO model using TensorRT at 320x320 (may take a minute)..."
+                f"Compiling YOLO model using TensorRT at "
+                f"{self.yolo_imgsz}x{self.yolo_imgsz} (may take a minute)..."
             )
 
             model = YOLO(weights_path)
 
-            model.export(format="engine", half=False, device=0, imgsz=320)
+            model.export(format="engine", half=False, device=0, imgsz=self.yolo_imgsz)
 
         return YOLO(engine_path)
 

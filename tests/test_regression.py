@@ -136,7 +136,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from omegaconf import OmegaConf
 
 from models.SiamABC.tracker.tracker_setup import get_tracker
-from models.siamram.config import flatten_subsystem_overrides
+from models.siamram.config import flatten_ram_tracker_config
 from models.siamram.tracker import SiamRAMExperimentTracker
 
 CONFIG_PATH = REPO_ROOT / "config" / "inference_config_experimental.yaml"
@@ -170,7 +170,7 @@ def _set_deterministic_seeds() -> None:
 def _build_tracker() -> SiamRAMExperimentTracker:
     config = OmegaConf.load(str(CONFIG_PATH))
     weights_path = str(REPO_ROOT / "checkpoints" / "inference_checkpoint.pth")
-    config.ram_tracker.yolo_weights = str(
+    config.ram_tracker.yolo.yolo_weights = str(
         REPO_ROOT / "checkpoints" / "yolo11n.pt"
     )
 
@@ -179,8 +179,8 @@ def _build_tracker() -> SiamRAMExperimentTracker:
     # disposable test hosts. Same OSNet between record and validate runs is
     # what matters for behavior preservation — the absolute weights only need
     # to be deterministic, not "production".
-    config.ram_tracker.osnet_pretrained_checkpoint = "imagenet"
-    config.ram_tracker.osnet_model_path = ""
+    config.ram_tracker.descriptor.osnet_pretrained_checkpoint = "imagenet"
+    config.ram_tracker.descriptor.osnet_model_path = ""
 
     wrapped = get_tracker(
         config=config,
@@ -189,15 +189,7 @@ def _build_tracker() -> SiamRAMExperimentTracker:
         continuous=False,
     )
 
-    ram_kwargs = dict(OmegaConf.to_container(config.ram_tracker, resolve=True))
-    exp_cfg = OmegaConf.to_container(
-        getattr(config, "ram_tracker_experiment", {}), resolve=True
-    )
-    if isinstance(exp_cfg, dict):
-        ram_kwargs.update(exp_cfg)
-    sub_ram, sub_exp = flatten_subsystem_overrides(config)
-    ram_kwargs.update(sub_ram)
-    ram_kwargs.update(sub_exp)
+    ram_kwargs = flatten_ram_tracker_config(config)
     ram_kwargs["osnet_pretrained_checkpoint"] = "imagenet"
     ram_kwargs["osnet_model_path"] = ""
 

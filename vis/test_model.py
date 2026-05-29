@@ -122,6 +122,64 @@ def _resize_into(
     np.copyto(dst, cv2.resize(src, (dst.shape[1], dst.shape[0])))
 
 
+def _refresh_recovery_panel(
+    tracker,
+    panel: np.ndarray,
+) -> None:
+    """
+    Renders the last successful recovery (occlusion or distractor) into the
+    panel: a resized crop of the recovered patch up top, then sim/iou/score
+    stats and the thresholds that gated the decision. Reads
+    `tracker._last_recovery_patch` and `tracker._last_recovery_info` which are
+    populated by the tracker's `_record_recovery` helper.
+    """
+    panel.fill(0)
+    patch = getattr(tracker, "_last_recovery_patch", None)
+    info = getattr(tracker, "_last_recovery_info", None)
+    if patch is None or info is None:
+        _stamp_panel(panel, "RECOVERY  -", updated=False)
+        return
+
+    header_h = 22
+    footer_h = 80
+    img_h = panel.shape[0] - header_h - footer_h
+    img_w = panel.shape[1]
+    if img_h > 10 and patch.size > 0:
+        img_panel = panel[header_h: header_h + img_h, :img_w]
+        np.copyto(img_panel, cv2.resize(patch, (img_w, img_h)))
+
+    mode = str(info.get("mode", "")).upper()
+    _stamp_panel(panel, f"REC {mode}  F:{info.get('frame_idx', 0)}", updated=True)
+
+    sim = float(info.get("sim", float("nan")))
+    iou = float(info.get("iou_held", float("nan")))
+    score = float(info.get("score", float("nan")))
+    thr = info.get("thresholds", {})
+
+    def _fmt(v: float) -> str:
+        return "n/a" if not np.isfinite(v) else f"{v:.2f}"
+
+    lines = [
+        f"sim={_fmt(sim)}  iou={_fmt(iou)}",
+        f"score={_fmt(score)}",
+        f"sel>={float(thr.get('sel_min_sim', 0.0)):.2f}  "
+        f"min>={float(thr.get('min_sim', 0.0)):.2f}",
+        f"reacq>={float(thr.get('reacq', 0.0)):.2f}",
+    ]
+    y0 = panel.shape[0] - footer_h + 16
+    for i, line in enumerate(lines):
+        cv2.putText(
+            panel,
+            line,
+            (5, y0 + i * 16),
+            FONT,
+            0.40,
+            (220, 220, 220),
+            1,
+            cv2.LINE_AA,
+        )
+
+
 def _draw_legend(
     canvas: np.ndarray,
     x: int,
@@ -554,7 +612,7 @@ def run_inference(
         actual_speed_hist = deque(maxlen=320)
         distractor_mode_hist = deque(maxlen=320)
 
-        top_h = max(h, PANEL_W * 2 + GAP)
+        top_h = max(h, PANEL_W * 3 + GAP * 2)
         extra_h = (vel_strip_gap + vel_strip_h) if show_velocity_overlay else 0
         canvas_h = top_h + extra_h
         total_w = w + PANEL_W
@@ -563,8 +621,13 @@ def run_inference(
         canvas = np.zeros((canvas_h, total_w, 3), dtype=np.uint8)
         panel_template = np.zeros((PANEL_W, PANEL_W, 3), dtype=np.uint8)
         panel_search = np.zeros((PANEL_W, PANEL_W, 3), dtype=np.uint8)
+        panel_recovery = np.zeros((PANEL_W, PANEL_W, 3), dtype=np.uint8)
         row_tmpl = np.s_[0:PANEL_W, w:total_w]
         row_search = np.s_[PANEL_W + GAP: PANEL_W * 2 + GAP, w:total_w]
+        row_recovery = np.s_[
+            PANEL_W * 2 + GAP * 2: PANEL_W * 3 + GAP * 2,
+            w: total_w,
+        ]
         vel_plot_x = 8
         vel_plot_y = top_h + vel_strip_gap
         vel_plot_w = max(40, total_w - 16)
@@ -657,6 +720,8 @@ def run_inference(
         canvas[y_off: y_off + h, :w] = first_bgr
         canvas[row_tmpl] = panel_template
         canvas[row_search] = panel_search
+        _refresh_recovery_panel(tracker, panel_recovery)
+        canvas[row_recovery] = panel_recovery
         bx, by, bw, bh = map(int, initial_bbox)
         cv2.rectangle(canvas, (bx, by + y_off), (bx + bw, by + bh + y_off), C_GT, 2)
         _draw_status_pill(canvas, mode="tracking")
@@ -776,6 +841,8 @@ def run_inference(
                 canvas[y_off: y_off + h, :w] = frame
                 canvas[row_tmpl] = panel_template
                 canvas[row_search] = panel_search
+                _refresh_recovery_panel(tracker, panel_recovery)
+                canvas[row_recovery] = panel_recovery
 
                 frame_scale = float(getattr(tracker, "_frame_scale", 1.0))
                 if not np.isfinite(frame_scale) or frame_scale <= 1e-8:

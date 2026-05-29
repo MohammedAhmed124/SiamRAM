@@ -58,6 +58,7 @@ import csv
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import warnings
@@ -70,7 +71,7 @@ from omegaconf import OmegaConf
 from models.SiamABC.tracker.tracker_setup import get_tracker
 from models.siamram.config import (
     OSNET_CHECKPOINT_CHOICES,
-    flatten_subsystem_overrides,
+    flatten_ram_tracker_config,
 )
 from models.siamram.tracker import SiamRAMExperimentTracker
 from vis.test_model import run_inference
@@ -638,35 +639,139 @@ def _ensure_required_checkpoints(weights_path: Path, yolo_path: Path) -> tuple[P
         If the downloader script is missing, or if files are still missing
         after the download completes (which would indicate a download failure).
     """
-    invalid_or_missing = [
-        p for p in (weights_path, yolo_path) if not _is_valid_checkpoint_file(p)
-    ]
-    if not invalid_or_missing:
+    def _looks_like_ultralytics_yolo_asset(path: Path) -> bool:
+        name = path.name.strip().lower()
+        return name.startswith("yolo") and name.endswith(".pt")
+
+    def _download_ultralytics_yolo_asset(destination: Path) -> Path:
+        from ultralytics.utils.downloads import (
+            attempt_download_asset,
+            get_github_assets,
+            safe_download,
+        )
+
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        name = destination.name
+        errors: list[str] = []
+
+        # Primary path: let ultralytics pick its default release behavior.
+        try:
+            downloaded = Path(
+                attempt_download_asset(
+                    file=str(destination),
+                    repo="ultralytics/assets",
+                )
+            )
+            if downloaded.exists():
+                return downloaded.expanduser().resolve()
+        except Exception as exc:
+            errors.append(f"attempt_download_asset(default): {exc}")
+
+        # Fallback: resolve the concrete latest tag then download directly.
+        try:
+            tag, assets = get_github_assets(
+                repo="ultralytics/assets",
+                version="latest",
+                retry=True,
+            )
+            if tag and name in assets:
+                safe_download(
+                    url=(
+                        f"https://github.com/ultralytics/assets/"
+                        f"releases/download/{tag}/{name}"
+                    ),
+                    file=str(destination),
+                    min_bytes=1e5,
+                    unzip=False,
+                )
+                if destination.exists():
+                    return destination.expanduser().resolve()
+            errors.append(
+                f"latest-tag lookup did not include '{name}' "
+                f"(tag='{tag}', assets={len(assets)})"
+            )
+        except Exception as exc:
+            errors.append(f"latest-tag direct download: {exc}")
+
+        raise RuntimeError("; ".join(errors))
+
+    def _try_download_missing_yolo_checkpoint(path: Path) -> Path:
+        if _is_valid_checkpoint_file(path):
+            return path
+        if not _looks_like_ultralytics_yolo_asset(path):
+            return path
+
+        print(
+            f"Missing YOLO weights '{path.name}'. "
+            "Attempting auto-download from ultralytics/assets..."
+        )
+        try:
+            downloaded = _download_ultralytics_yolo_asset(path)
+        except Exception as exc:
+            print(f"[checkpoints] YOLO auto-download failed for {path.name}: {exc}")
+            return path
+
+        if downloaded != path and _is_valid_checkpoint_file(downloaded):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(downloaded, path)
+
+        if _is_valid_checkpoint_file(path):
+            print(f"[checkpoints] YOLO weights ready at {path}")
+            return path
+        if _is_valid_checkpoint_file(downloaded):
+            return downloaded
+        return path
+
+    yolo_path = _try_download_missing_yolo_checkpoint(yolo_path)
+
+    missing_weights = not _is_valid_checkpoint_file(weights_path)
+    missing_yolo = not _is_valid_checkpoint_file(yolo_path)
+    if not (missing_weights or missing_yolo):
         # Both files look good — nothing to do.
         return weights_path, yolo_path
 
-    if not CHECKPOINT_DOWNLOADER.exists():
-        missing_str = ", ".join(str(p) for p in invalid_or_missing)
-        raise FileNotFoundError(
-            f"Missing checkpoints: {missing_str}. Also missing downloader script: {CHECKPOINT_DOWNLOADER}"
+    # The bundled downloader currently manages the SiamABC checkpoint and
+    # the default YOLO weight file (yolo11n.pt). Other YOLO variants are
+    # handled via the ultralytics/assets path above.
+    needs_bundle_downloader = missing_weights or yolo_path.name.lower() == "yolo11n.pt"
+    resolved_weights = weights_path
+    resolved_yolo = yolo_path
+    if needs_bundle_downloader:
+        if not CHECKPOINT_DOWNLOADER.exists():
+            missing_now: list[Path] = []
+            if missing_weights:
+                missing_now.append(weights_path)
+            if missing_yolo:
+                missing_now.append(yolo_path)
+            missing_str = ", ".join(str(p) for p in missing_now)
+            raise FileNotFoundError(
+                f"Missing checkpoints: {missing_str}. "
+                f"Also missing downloader script: {CHECKPOINT_DOWNLOADER}"
+            )
+
+        print("Missing or invalid checkpoints detected. Downloading required models...")
+        subprocess.run(
+            [sys.executable, str(CHECKPOINT_DOWNLOADER), "--force"],
+            check=True,
+            cwd=str(BASE_DIR),
         )
 
-    print("Missing or invalid checkpoints detected. Downloading required models...")
-    subprocess.run(
-        [sys.executable, str(CHECKPOINT_DOWNLOADER), "--force"],
-        check=True,
-        cwd=str(BASE_DIR),
-    )
+        # Re-resolve after download in case paths shifted slightly.
+        resolved_weights = _resolve_weights_path(str(weights_path))
+        resolved_yolo = _resolve_weights_path(str(yolo_path))
 
-    # Re-resolve after download in case paths shifted slightly.
-    resolved_weights = _resolve_weights_path(str(weights_path))
-    resolved_yolo = _resolve_weights_path(str(yolo_path))
+    resolved_yolo = _try_download_missing_yolo_checkpoint(resolved_yolo)
+
     still_missing = [
-        p for p in (resolved_weights, resolved_yolo) if not _is_valid_checkpoint_file(p)
+        p
+        for p in (resolved_weights, resolved_yolo)
+        if not _is_valid_checkpoint_file(p)
     ]
     if still_missing:
         missing_str = ", ".join(str(p) for p in still_missing)
-        raise FileNotFoundError(f"Checkpoint download finished, but files are still missing: {missing_str}")
+        raise FileNotFoundError(
+            f"Checkpoint download finished, but files are still missing: {missing_str}"
+        )
 
     return resolved_weights, resolved_yolo
 
@@ -759,15 +864,20 @@ def main():
     #         if anything is missing or corrupted.
     # ------------------------------------------------------------------
     config = OmegaConf.load(args.yaml_config_path)
+    ram_tracker_kwargs = flatten_ram_tracker_config(config)
+
     resolved_weights_path = _resolve_weights_path(args.weights_path)
-    resolved_yolo_path = _resolve_weights_path(str(config.ram_tracker.yolo_weights))
+    yolo_weights_cfg = str(
+        ram_tracker_kwargs.get("yolo_weights", CHECKPOINTS_DIR / "yolo11n.pt")
+    )
+    resolved_yolo_path = _resolve_weights_path(yolo_weights_cfg)
     resolved_weights_path, resolved_yolo_path = _ensure_required_checkpoints(
         resolved_weights_path, resolved_yolo_path
     )
 
     # Write the resolved paths back so the rest of the code uses them.
     args.weights_path = str(resolved_weights_path)
-    config.ram_tracker.yolo_weights = str(resolved_yolo_path)
+    ram_tracker_kwargs["yolo_weights"] = str(resolved_yolo_path)
     config.model.model_size = args.model_size
 
     # ------------------------------------------------------------------
@@ -808,22 +918,6 @@ def main():
             "base tracker has been removed; falling back to the experimental tracker."
         )
     tracker_cls = SiamRAMExperimentTracker
-
-    ram_tracker_kwargs_obj = OmegaConf.to_container(config.ram_tracker, resolve=True)
-    assert isinstance(ram_tracker_kwargs_obj, dict)
-    ram_tracker_kwargs = dict(ram_tracker_kwargs_obj)
-    subsystem_ram_overrides, subsystem_exp_overrides = flatten_subsystem_overrides(
-        config
-    )
-    ram_tracker_kwargs.update(subsystem_ram_overrides)
-
-    if tracker_cls is SiamRAMExperimentTracker:
-        exp_cfg_obj = OmegaConf.to_container(
-            getattr(config, "ram_tracker_experiment", {}), resolve=True
-        )
-        if isinstance(exp_cfg_obj, dict):
-            ram_tracker_kwargs.update(exp_cfg_obj)
-        ram_tracker_kwargs.update(subsystem_exp_overrides)
 
     osnet_ckpt = str(
         ram_tracker_kwargs.get("osnet_pretrained_checkpoint", "imagenet")

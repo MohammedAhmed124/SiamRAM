@@ -32,6 +32,7 @@ class SpikeWatcher:
         t._jump_watch_last_speed_norm = 0.0
         t._jump_watch_last_ratio = 1.0
         t._jump_watch_last_sim = None
+        t._spike_confirm_streak = 0
 
     def start_watch(
         self,
@@ -108,10 +109,30 @@ class SpikeWatcher:
         t._spike_debug_baseline_norm = float(baseline_norm)
         t._spike_debug_ratio = float(ratio)
 
-        if speed_norm < t._spike_reject_abs_norm_min:
+        abs_norm_min_eff = t._spike_reject_abs_norm_min
+        if (
+            t._spike_reject_long_distance_abs_norm_min > 0.0
+            and t._is_long_distance(frame)
+        ):
+            abs_norm_min_eff = max(
+                abs_norm_min_eff,
+                t._spike_reject_long_distance_abs_norm_min,
+            )
+
+        if speed_norm < abs_norm_min_eff:
             return False, None, speed_norm, baseline_norm, ratio, None
         if ratio < t._spike_reject_ratio:
             return False, None, speed_norm, baseline_norm, ratio, None
+
+        if t._spike_reject_camera_residual_min_ratio > 0.0 and h_curr is not None:
+            p0x = float(prev_bbox[0] + prev_bbox[2] / 2.0)
+            p0y = float(prev_bbox[1] + prev_bbox[3] / 2.0)
+            cam_delta = t._camera_displacement_from_h_at_point(h_curr, p0x, p0y)
+            if cam_delta is not None:
+                diag = float(np.hypot(prev_bbox[2], prev_bbox[3])) + 1e-8
+                cam_norm = float(np.hypot(cam_delta[0], cam_delta[1])) / diag
+                if speed_norm < t._spike_reject_camera_residual_min_ratio * cam_norm:
+                    return False, None, speed_norm, baseline_norm, ratio, None
 
         cand_desc = _extract_descriptor(frame, pred_bbox)
         if t._spike_reject_use_appearance:
@@ -207,6 +228,19 @@ class SpikeWatcher:
             score = t._apply_distractor_mode_penalty(frame, pred_bbox, score)
             return pred_bbox, float(score)
 
+        if (
+            t._spike_reject_disable_in_tiny_mode
+            and t._is_long_distance(frame)
+        ):
+            if t._jump_watch_active:
+                self.clear_watch_state()
+            if t.debug:
+                print(
+                    f"[distractor guard] frame={t.frame_idx} blocked by tiny-object mode"
+                )
+            score = t._apply_distractor_mode_penalty(frame, pred_bbox, score)
+            return pred_bbox, float(score)
+
         spike_trigger, cand_desc, speed_norm, baseline_norm, speed_ratio, sim = (
             self.evaluate_hard_jump_candidate(
                 frame=frame,
@@ -214,9 +248,16 @@ class SpikeWatcher:
                 score=score,
             )
         )
+        if not t._jump_watch_active:
+            if spike_trigger:
+                t._spike_confirm_streak += 1
+            else:
+                t._spike_confirm_streak = 0
+
         if (
             spike_trigger
             and not t._jump_watch_active
+            and t._spike_confirm_streak >= t._spike_reject_confirm_frames
         ):
             anchor_bbox = self.select_pre_spike_anchor_bbox()
             if anchor_bbox is None:
@@ -228,6 +269,7 @@ class SpikeWatcher:
             if anchor_bbox is None:
                 score = t._apply_distractor_mode_penalty(frame, pred_bbox, score)
                 return pred_bbox, float(score)
+            t._spike_confirm_streak = 0
             self.start_watch(
                 prev_bbox=anchor_bbox,
                 first_switched_bbox=pred_bbox,
@@ -329,6 +371,17 @@ class SpikeWatcher:
                 t._distractor_mode_visual_reals = [snap_bbox.copy()]
                 t._distractor_mode_visual_distractors = (
                     [np.array(pred_bbox, dtype=int).copy()]
+                )
+                snap_desc = _extract_descriptor(frame, snap_bbox)
+                t._record_recovery(
+                    mode="distractor",
+                    frame=frame,
+                    bbox=snap_bbox,
+                    score=float(score),
+                    sim=(float(t._jump_watch_last_sim)
+                         if t._jump_watch_last_sim is not None
+                         else float("nan")),
+                    desc=snap_desc,
                 )
                 self.clear_watch_state()
 

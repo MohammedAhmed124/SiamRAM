@@ -1,8 +1,10 @@
 """
-Typed config schema and compatibility flattening for SiamRAM tracker options.
+Typed config helpers for SiamRAM tracker options.
 
-This keeps legacy flat config keys working while enabling a nested
-`ram_tracker_subsystems` layout grouped by subsystem.
+This module supports three config layouts:
+1) Modern nested groups under `ram_tracker` (preferred).
+2) Legacy flat `ram_tracker` keys.
+3) Compatibility blocks (`ram_tracker_subsystems`, `ram_tracker_experiment`).
 """
 
 from __future__ import annotations
@@ -179,6 +181,91 @@ def _validate_osnet_checkpoint(name: str) -> None:
             "Unsupported osnet_pretrained_checkpoint="
             f"'{name}'. Expected one of: {options}."
         )
+
+
+def _flatten_nested_mapping(
+    raw: Mapping[str, Any],
+    *,
+    scope: str,
+    conflict_mode: str = "error",
+) -> dict[str, Any]:
+    """
+    Flatten nested mapping leaves to a single dict keyed by leaf names.
+
+    Example:
+        {"descriptor": {"backend": "siamese"}} -> {"backend": "siamese"}
+
+    Notes:
+        - Keys beginning with "_" are ignored (reserved metadata/comments).
+        - If two leaves produce the same key, conflict behavior is controlled by
+          `conflict_mode`:
+            * "error" -> raise ValueError with both source paths.
+            * "last"  -> keep the later value.
+    """
+    out: dict[str, Any] = {}
+    origins: dict[str, tuple[str, ...]] = {}
+
+    def _walk(node: Mapping[str, Any], path: tuple[str, ...]) -> None:
+        for key, value in node.items():
+            if str(key).startswith("_"):
+                continue
+
+            key_str = str(key)
+            child_path = (*path, key_str)
+            if isinstance(value, (Mapping, DictConfig)):
+                child_map = _to_mapping(value)
+                _walk(child_map, child_path)
+                continue
+
+            if key_str in out and conflict_mode == "error":
+                prev = ".".join(origins[key_str])
+                curr = ".".join(child_path)
+                raise ValueError(
+                    f"Duplicate ram_tracker leaf key '{key_str}' while flattening "
+                    f"{scope}: '{prev}' and '{curr}'. Keep only one."
+                )
+
+            out[key_str] = value
+            origins[key_str] = child_path
+
+    _walk(raw, ())
+    return out
+
+
+def flatten_ram_tracker_config(config: Any) -> dict[str, Any]:
+    """
+    Produce one flat kwargs dict for SiamRAMExperimentTracker.
+
+    Merge order (last writer wins for compatibility blocks):
+        1) `ram_tracker` (nested or flat; duplicates inside this block error)
+        2) legacy `ram_tracker_subsystems`
+        3) legacy `ram_tracker_experiment`
+    """
+    ram_tracker_raw = _to_mapping(getattr(config, "ram_tracker", None))
+    ram_kwargs = _flatten_nested_mapping(
+        ram_tracker_raw,
+        scope="ram_tracker",
+        conflict_mode="error",
+    )
+
+    legacy_ram, legacy_exp = flatten_subsystem_overrides(config)
+    ram_kwargs.update(legacy_ram)
+    ram_kwargs.update(legacy_exp)
+
+    legacy_exp_raw = _to_mapping(getattr(config, "ram_tracker_experiment", None))
+    if legacy_exp_raw:
+        legacy_flat = _flatten_nested_mapping(
+            legacy_exp_raw,
+            scope="ram_tracker_experiment",
+            conflict_mode="last",
+        )
+        ram_kwargs.update(legacy_flat)
+
+    osnet_ckpt = str(ram_kwargs.get("osnet_pretrained_checkpoint", "")).strip()
+    if osnet_ckpt:
+        _validate_osnet_checkpoint(osnet_ckpt)
+
+    return ram_kwargs
 
 
 def flatten_subsystem_overrides(config: Any) -> tuple[dict[str, Any], dict[str, Any]]:

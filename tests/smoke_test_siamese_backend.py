@@ -33,6 +33,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from omegaconf import OmegaConf  # noqa: E402
 
 from models.SiamABC.tracker.tracker_setup import get_tracker  # noqa: E402
+from models.siamram.config import flatten_ram_tracker_config  # noqa: E402
 from models.siamram.tracker import SiamRAMExperimentTracker  # noqa: E402
 from tests.test_regression import (  # noqa: E402
     REPO_ROOT as REGRESSION_REPO_ROOT,
@@ -56,10 +57,10 @@ def _build_tracker_with_siamese() -> SiamRAMExperimentTracker:
     weights_path = str(
         REGRESSION_REPO_ROOT / "checkpoints" / "inference_checkpoint.pth"
     )
-    config.ram_tracker.yolo_weights = str(
+    config.ram_tracker.yolo.yolo_weights = str(
         REGRESSION_REPO_ROOT / "checkpoints" / "yolo11n.pt"
     )
-    config.ram_tracker.descriptor_backend = "siamese"
+    config.ram_tracker.descriptor.descriptor_backend = "siamese"
 
     wrapped = get_tracker(
         config=config,
@@ -68,12 +69,7 @@ def _build_tracker_with_siamese() -> SiamRAMExperimentTracker:
         continuous=False,
     )
 
-    ram_kwargs = dict(OmegaConf.to_container(config.ram_tracker, resolve=True))
-    exp_cfg = OmegaConf.to_container(
-        getattr(config, "ram_tracker_experiment", {}), resolve=True
-    )
-    if isinstance(exp_cfg, dict):
-        ram_kwargs.update(exp_cfg)
+    ram_kwargs = flatten_ram_tracker_config(config)
     ram_kwargs["descriptor_backend"] = "siamese"
 
     return SiamRAMExperimentTracker(siam_tracker=wrapped, **ram_kwargs)

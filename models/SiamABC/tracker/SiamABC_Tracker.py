@@ -506,24 +506,24 @@ class SiamABCTracker(Tracker):
         self,
     ) -> None:
         """
-        Refresh the dynamic template and dynamic search features from the best memory frame.
+        Refresh dynamic features from the newest memory frame above update threshold.
 
         This is the core of the online template update mechanism described in
-        Section 2.2 of the paper. The idea is simple but powerful: instead of always
-        tracking against the first-frame template (which can become stale as the
-        target changes appearance), we periodically find the highest-confidence frame
-        we've seen recently and re-extract fresh template and search features from it.
+        Section 2.2 of the paper. Instead of always tracking against the first-frame
+        template (which can become stale as the target changes appearance), we
+        periodically pick the newest stored frame whose confidence clears the
+        update threshold and refresh dynamic template/search features from it.
 
         This method is called every N frames from `update()` (N is set in the config,
         default 10). When called, it:
 
-        1. Checks that there's actually something in memory and that the best stored
-           score clears the `dynamic_update_threshold` (τu = 0.87 in the paper).
-           If the best we've seen is mediocre, we don't update — better to keep the
-           last good template than replace it with a shaky one.
+        1. Checks that there's actually something in memory, then scans from newest
+           to oldest for the first score >= `dynamic_update_threshold` (τu = 0.87
+           in the paper). If no stored frame clears the threshold, we keep the
+           previous dynamic template.
 
-        2. Retrieves the best (image, bbox) pair from `all_memory_imgs` using the
-           precomputed `_best_idx`.
+        2. Retrieves that newest qualifying (image, bbox) pair from
+           `all_memory_imgs`.
 
         3. Re-extracts both `dynamic_template_features` and `dynamic_search_features`
            from that frame by calling `get_template_features()` and
@@ -540,10 +540,20 @@ class SiamABCTracker(Tracker):
         """
         if not self.classification_scores:
             return
-        if self._best_score < self.dynamic_update_threshold:
+
+        latest_idx = None
+        for idx in range(len(self.classification_scores) - 1, -1, -1):
+            if float(self.classification_scores[idx]) >= self.dynamic_update_threshold:
+                latest_idx = idx
+                break
+        if latest_idx is None:
             return
-        best_img, best_bbox = self.all_memory_imgs[self._best_idx]
-        self.dynamic_template_features = self.get_template_features(best_img, best_bbox)
+
+        best_img, best_bbox = self.all_memory_imgs[latest_idx]
+        self.dynamic_template_features = self.get_template_features(
+            best_img,
+            best_bbox,
+        )
         self.dynamic_search_features, _, _ = self.get_search_features(
             best_img, best_bbox
         )
@@ -586,7 +596,8 @@ class SiamABCTracker(Tracker):
            full capacity and the best-index is computed fresh over the whole window.
 
         5. Every N frames, `select_representatives()` is called to refresh the
-           dynamic template from the best stored frame (Section 2.2).
+           dynamic template from the newest stored frame above
+           `dynamic_update_threshold` (Section 2.2).
 
         6. The running confidence EMA is updated and clamped at a floor value, so
            the threshold adapts to the sequence difficulty without collapsing.

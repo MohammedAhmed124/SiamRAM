@@ -192,3 +192,6 @@ yolo11n.onnx
 data_imgs/
 training/checkpoints
 
+# expirements
+experiments/motion_decoupled_imm_pdaf/
+research

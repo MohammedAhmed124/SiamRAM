@@ -142,9 +142,7 @@ def _dynamic_template_refreshed(snapshot: dict[str, Any]) -> bool:
 
 class TinyObjectTracker:
     """Wrap a black-box SOT tracker with hyperbolic foveated frames and boxes.
-
-    The underlying tracker only sees foveated frames and foveated boxes. Public
-    outputs and metrics remain in the original Euclidean image coordinates.
+    Includes Dynamic Foveal Widening for occlusion/distractor recovery.
     """
 
     def __init__(
@@ -160,8 +158,15 @@ class TinyObjectTracker:
         self.radius_ema_alpha = float(np.clip(radius_ema_alpha, 0.0, 1.0))
         self.min_update_score = float(min_update_score)
         self.ema_radius_norm: Optional[float] = None
+
         self.prev_euclidean_box: Optional[np.ndarray] = None
         self.frame_idx = 0
+
+        # Occlusion Recovery states
+        self.consecutive_failures = 0
+        self.base_radius_beta = self.foveator.config.radius_beta
+        self.current_radius_beta = self.base_radius_beta
+
         self.records: list[TinyObjectRecord] = []
         self.last_state = None
         self.last_foveated_frame: Optional[np.ndarray] = None
@@ -188,17 +193,25 @@ class TinyObjectTracker:
     def initialize(self, frame: np.ndarray, bbox: Any) -> None:
         init_bbox = clip_bbox_to_frame(bbox, frame.shape[:2], as_int=False)
         self.ema_radius_norm = None
+        self.consecutive_failures = 0
+        self.current_radius_beta = self.base_radius_beta
+        self.foveator.config.radius_beta = self.base_radius_beta
+
         state = self.foveator.state_from_bbox(init_bbox, frame.shape[:2])
         state, _ = self._apply_radius_ema(state, frame.shape[:2])
         foveated_frame = self.foveator.warp_image(frame, state)
+
+        # SOT initialization requires integers
         foveated_bbox_int = clip_bbox_to_frame(self.foveator.warp_bbox(init_bbox, state), frame.shape[:2], as_int=True)
         self.tracker.initialize(foveated_frame, foveated_bbox_int)
+
         self.prev_euclidean_box = init_bbox.copy()
         self.frame_idx = 0
         self.records.clear()
         self.last_state = state
         self.last_foveated_frame = foveated_frame
         self.last_focus_bbox = init_bbox.copy()
+
         foveated_bbox_float = clip_bbox_to_frame(self.foveator.warp_bbox(init_bbox, state), frame.shape[:2], as_int=False)
         self.last_foveated_prior = foveated_bbox_float.copy()
         self.last_foveated_pred = foveated_bbox_float.copy()
@@ -210,14 +223,28 @@ class TinyObjectTracker:
 
         start = time.perf_counter()
         self.frame_idx += 1
+
+        # 1. DYNAMIC FOVEAL WIDENING ON UNCERTAINTY
+        # If the tracker lost confidence last frame, smoothly expand the foveal sweet-spot
+        # so the SOT can see a broader, uncompressed context to re-acquire the target.
+        target_radius_beta = self.base_radius_beta * (1.0 + 0.35 * min(self.consecutive_failures, 10))
+        self.current_radius_beta = 0.8 * self.current_radius_beta + 0.2 * target_radius_beta
+        self.foveator.config.radius_beta = self.current_radius_beta
+
+        # Focus is ALWAYS exactly where the tracker last predicted. We never freeze it.
         focus_bbox = self.prev_euclidean_box.copy()
         self.last_focus_bbox = focus_bbox.copy()
+        current_center = bbox_center_xy(focus_bbox)
 
+        # 2. FOVEATE
         state = self.foveator.state_from_bbox(focus_bbox, frame.shape[:2])
         state, raw_radius_norm = self._apply_radius_ema(state, frame.shape[:2])
         foveated_frame = self.foveator.warp_image(frame, state)
+
         foveated_prior = clip_bbox_to_frame(self.foveator.warp_bbox(focus_bbox, state), frame.shape[:2], as_int=False)
         prior_set = _set_search_prior(self.tracker, foveated_prior)
+
+        # 3. TRACKER EXECUTION
         result = self.tracker.update(foveated_frame)
         dynamic_template = _dynamic_template_snapshot(self.tracker)
         dynamic_refreshed = _dynamic_template_refreshed(dynamic_template)
@@ -231,7 +258,10 @@ class TinyObjectTracker:
             or raw_pred[2] <= 0.0
             or raw_pred[3] <= 0.0
         )
+
+        # 4. RESOLVE PREDICTION
         if raw_pred_invalid:
+            # If SOT outputs garbage, trust its internal memory/coasting state
             state_box = getattr(self.tracker, "held_box", None)
             if state_box is None:
                 state_box = getattr(self.tracker, "current_bbox", None)
@@ -243,21 +273,35 @@ class TinyObjectTracker:
             )
         else:
             foveated_pred = clip_bbox_to_frame(raw_pred, frame.shape[:2], as_int=False)
+
+        # 5. UNWARP TO EUCLIDEAN
         euclidean_pred = clip_bbox_to_frame(self.foveator.unwarp_bbox(foveated_pred, state), frame.shape[:2], as_int=False)
 
+        # 6. UPDATE STATES
+        # WE ALWAYS FOLLOW THE TRACKER. If it coasts internally, we coast. 
+        # If it tracks, we track. This preserves geometric synchronization.
+        self.prev_euclidean_box = euclidean_pred.copy()
+        
+        # If confidence is low, trigger Foveal Widening for the NEXT frame.
         update_accepted = (not raw_pred_invalid) and (not tracker_in_occlusion) and score >= self.min_update_score
-        self.prev_euclidean_box = euclidean_pred.copy() if update_accepted else focus_bbox.copy()
+        
+        if update_accepted:
+            self.consecutive_failures = 0
+        else:
+            self.consecutive_failures += 1
+
         self.last_state = state
         self.last_foveated_frame = foveated_frame
         self.last_foveated_prior = foveated_prior.copy()
         self.last_foveated_pred = foveated_pred.copy()
         self.last_dynamic_template = dynamic_template
 
+        # Log construction
         original_diag = max(float(np.hypot(focus_bbox[2], focus_bbox[3])), 1.0)
         foveated_diag = float(np.hypot(foveated_prior[2], foveated_prior[3]))
-        center = bbox_center_xy(focus_bbox)
-        roundtrip_error = self.foveator.roundtrip_error_px(center.reshape(1, 2), state)
+        roundtrip_error = self.foveator.roundtrip_error_px(current_center.reshape(1, 2), state)
         runtime_ms = (time.perf_counter() - start) * 1000.0
+
         self.records.append(
             TinyObjectRecord(
                 frame=self.frame_idx,

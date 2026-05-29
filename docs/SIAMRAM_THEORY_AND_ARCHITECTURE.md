@@ -479,7 +479,9 @@ flowchart TB
   subgraph B["STRATEGY B · NOT YOLO-detectable → SiamABC alone"]
     direction TB
     S0["Phase 0 · SIAM<br/>seed SiamABC in the ROI<br/>Gate A: score ≥ occ_siam_reacq_threshold<br/>Gate B: DRM ≥ app_match_threshold"]:::step
-    S0 -->|"gates fail → retry next frame<br/>(YOLO collection is skipped)"| S0
+    SRETRY(["retry next frame<br/>YOLO collection stays off"]):::hold
+    S0 -->|"gates fail"| SRETRY
+    SRETRY -.->|"new frame"| S0
   end
 
   STRAT -->|"YES"| P1
@@ -616,7 +618,7 @@ For `jump_reject_distractor_mode_frames` after a jump, even in normal tracking, 
 
 ### 8.7 Distractor mode — Mermaid
 
-Same legend as §7.8. The graph is read in three lanes: **(1) look around the focus**, **(2) refuse to switch on weak evidence** (the hold/lock guards), **(3) resolve or bail out**.
+Same legend as §7.8. Two lanes do the work — **Step 1** looks around the focus and scores candidates, **Step 2** runs the three "should I really switch?" checks. Every "not yet" outcome funnels into a **single hold → re-scan hub** (instead of separate back-edges), and the three endings (resolve / force-occlusion / exit) sit together at the bottom.
 
 ```mermaid
 flowchart TB
@@ -630,50 +632,53 @@ flowchart TB
   N(["Normal tracking"]):::boundary
   N -->|"spike watcher confirms a jump-switch,<br/>snaps back to the pre-spike anchor"| ENTER
   ENTER["ENTER DISTRACTOR MODE<br/>focus = anchor · spin up anchor EKF<br/>(reseeded from main EKF velocity)"]:::step
+  ENTER --> SCAN
 
-  subgraph DET["STEP 1 · look around the focus point"]
+  subgraph DET["STEP 1 · look + score candidates around the focus"]
     direction TB
-    SCAN["advance anchor EKF → focus center + uncertainty pad<br/>build ROI · run YOLO · OSNet descriptors"]:::step
-    HAS{"any detections<br/>AND target references?"}:::choice
-    SCORE["score every candidate:<br/>+ appearance similarity<br/>+ IoU with focus box<br/>− distance from focus<br/>− known-distractor penalty<br/>(Mahalanobis motion gate drops implausible ones)"]:::step
+    SCAN["advance anchor EKF → focus + uncertainty pad<br/>build ROI · run YOLO · OSNet descriptors"]:::step
+    HAS{"detections AND<br/>target references?"}:::choice
+    SCORE["score each candidate:<br/>+ appearance  + IoU(focus)<br/>− distance  − distractor penalty<br/>(Mahalanobis motion gate)"]:::step
+    MIN{"best appearance<br/>≥ min_similarity?"}:::choice
     SCAN --> HAS
     HAS -->|"yes"| SCORE
+    SCORE --> MIN
   end
 
-  ENTER --> SCAN
-  HAS -->|"no"| EXIT
-  SCORE --> MIN{"best appearance<br/>≥ min_similarity?"}:::choice
-  MIN -->|"no"| EXIT
-
-  subgraph GUARD["STEP 2 · refuse to switch identity on weak evidence"]
+  subgraph GUARD["STEP 2 · accept the winner only if the evidence is strong"]
     direction TB
-    GATE{"best ≥ selected_min_similarity?<br/>(the accept gate)"}:::choice
-    HOLD["BELOW-GATE HOLD<br/>ride the EKF/anchor motion,<br/>wait for appearance to recover"]:::hold
-    OV{"does the winner overlap a<br/>known distractor heavily?"}:::choice
-    LOCK["OVERLAP MOTION-LOCK<br/>hold the EKF box until<br/>the overlap clears"]:::hold
-    AMB{"top-1 vs top-2 margin<br/>too small to be sure?"}:::choice
-    AH["AMBIGUITY HOLD<br/>keep the current pick"]:::hold
-    GATE -->|"no"| HOLD
+    GATE{"best ≥<br/>selected_min_similarity?"}:::choice
+    OV{"overlaps a known<br/>distractor heavily?"}:::choice
+    AMB{"top-1 vs top-2<br/>margin big enough?"}:::choice
     GATE -->|"yes"| OV
-    OV -->|"yes"| LOCK
     OV -->|"no"| AMB
   end
-
   MIN -->|"yes"| GATE
-  HOLD -->|"budget remains → re-scan"| SCAN
-  LOCK -->|"re-scan"| SCAN
-  AH -->|"re-scan"| SCAN
 
-  HOLD -->|"budget exhausted<br/>AND force_occlusion on"| FORCE["FORCE OCCLUSION ENTRY<br/>tagged distractor-origin →<br/>recovery uses distractor_occ_drm weights"]:::danger
-  HOLD -->|"budget exhausted"| EXIT
-  FORCE --> OCC(["Occlusion recovery"]):::boundary
+  BG["BELOW-GATE HOLD<br/>ride the EKF/anchor motion,<br/>wait for appearance to recover"]:::hold
+  GATE -->|"no"| BG
 
-  AMB -->|"no, confident"| COMMIT["COMMIT winner as the real target<br/>label the rest distractors → negative bank"]:::step
-  COMMIT --> STABLE{"agrees with focus for<br/>exit_stable_frames in a row?"}:::choice
-  STABLE -->|"no → keep arbitrating"| SCAN
-  STABLE -->|"yes"| RESOLVE(["✔ RESOLVE<br/>reinit dynamic template only ·<br/>exit with re-entry cooldown +<br/>memory/template freezes"]):::done
+  WAIT(["⟳ hold this frame —<br/>re-scan next frame"]):::hold
+  BG  -->|"budget remains"| WAIT
+  OV  -->|"yes · overlap motion-lock"| WAIT
+  AMB -->|"no · ambiguity hold"| WAIT
+  STABLE -->|"no"| WAIT
+  WAIT -.-> SCAN
+
+  AMB -->|"yes"| COMMIT["COMMIT winner as the real target<br/>others → distractor bank"]:::step
+  COMMIT --> STABLE{"stable vs focus for<br/>exit_stable_frames?"}:::choice
+
+  BG -.->|"budget exhausted"| GIVEUP{"force occlusion?"}:::choice
+
+  HAS -->|"no"| EXIT
+  MIN -->|"no"| EXIT
+  GIVEUP -->|"no"| EXIT
+
+  STABLE -->|"yes"| RESOLVE(["✔ RESOLVE · reinit dynamic template ·<br/>exit + cooldown + memory/template freeze"]):::done
   RESOLVE --> N
-  EXIT(["Exit distractor mode →<br/>back to normal tracking"]):::done
+  GIVEUP -->|"yes"| FORCE(["FORCE OCCLUSION ENTRY · distractor-origin<br/>→ uses distractor_occ_drm weights"]):::danger
+  FORCE --> OCC(["Occlusion recovery"]):::boundary
+  EXIT(["Exit distractor mode →<br/>normal tracking"]):::done
 ```
 
 ---
@@ -748,7 +753,7 @@ The config is grouped by subsystem, with the occlusion block grouped by **phase*
 ram_tracker:
   runtime            → debug, max_proc_long_edge
   yolo               → weights, conf, imgsz, augment, search_expand, class-vote
-  descriptor         → backend (osnet/siamese), osnet_*, app_match_threshold        §5
+  descriptor         → backend (osnet/siamese), osnet_*                              §5
   camera_motion      → core (homography_mode), botsort.*, gating.*, template_adapt.*  §4
   gmc_prior          → search-prior plausibility gates                                §4.2
   roi_search         → normal / tiny / out_of_frame ROI growth                        §7.3
@@ -773,7 +778,7 @@ ram_tracker:
 
 **Phase 1/2 (`phase1_collect`, `phase2_final_drm`)** — `cand_collection_frames`; DRM weights `drm_lam_{app,iou,mot,time,dist,cand_dir}`, `drm_gamma`, `drm_margin`, `drm_skip_threshold`, `drm_top_k`; the parallel `distractor_occ_drm_*` set for distractor-origin episodes; velocity `vel_score_min_speed`, `vel_dir_hard_gate`.
 
-**Reacquire (`reacquire_confirm`)** — `reacq_threshold`, `reacq_confirm_frames`. **Accept gate** `app_match_threshold` lives under `descriptor`.
+**Reacquire (`reacquire_confirm`)** — `reacq_threshold`, `reacq_confirm_frames`. (Phase 0's Gate B `app_match_threshold` lives under `occlusion.phase0_siam` — it is read only by `occ_phase_siam`.)
 
 **Distractor selection (`distractor_mode.selection`)** — `min_similarity` (give-up floor), `selected_min_similarity` (accept gate), `selected_below_gate_hold_frames`, `selected_below_gate_force_occlusion`, `switch_margin`, `ambiguity_hold_frames`, `yolo_topk`, `roi_expand`. **DRM weights** under `distractor_mode.drm`; **motion gate** under `motion_gate` (Mahalanobis); **overlap lock** under `overlap_lock`; **exit** under `exit`.
 

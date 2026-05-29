@@ -191,8 +191,6 @@ ram_tracker:
     osnet_device: "auto"
     # Cap on candidates passed into OSNet per call (0 = no cap).
     osnet_max_candidate_batch: 5
-    # Minimum appearance similarity needed to accept an identity (1.0 effectively disables this gate).
-    app_match_threshold: 0
 
   # NOTE: normal-tracking loss-detection knobs (conf_threshold, entry_patience,
   # entry_patience_high_motion, enter_occlusion_on_loss, nudge_alpha) now live
@@ -452,13 +450,17 @@ ram_tracker:
       yolo_detectability_iou_thr: 0.3
 
     # === PHASE 0 — SIAM: the cheap fast path. Seed SiamABC in the search ROI and,
-    # if it clears these gates (plus the shared DRM accept threshold
-    # app_match_threshold under descriptor:), reacquire immediately. ===
+    # if it clears Gate A (occ_siam_reacq_threshold) AND Gate B (the DRM accept
+    # threshold app_match_threshold), reacquire immediately. All three knobs
+    # below are read ONLY by occ_phase_siam. ===
     phase0_siam:
-      # Stricter SiamABC-only threshold for exiting occlusion via SiamABC alone.
-      occ_siam_reacq_threshold: 0.5
+      # Gate A — SiamABC score needed to attempt a phase-0 reacquisition.
+      occ_siam_reacq_threshold: 0.8
       # Required margin between top-1 and top-2 candidates during occlusion.
       occ_siam_margin: 0.5
+      # Gate B — minimum DRM composite score to accept the phase-0 reacquisition.
+      # Higher tightens the appearance check; 0 effectively disables this gate.
+      app_match_threshold: 0.6
 
     # === PHASE 1 — COLLECT: gather YOLO candidates (+ appearance descriptors)
     # across consecutive frames so per-candidate velocity becomes measurable. ===

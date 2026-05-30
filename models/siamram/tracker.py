@@ -131,13 +131,23 @@ class SiamRAMExperimentTracker:
         drm_lam_time: float = 0.10,
         drm_alpha: float = 0.05,
         drm_gamma: float = 0.30,
-        drm_margin: float = 0.35,
+        drm_margin: "float | str" = 0.35,
         drm_top_k: int = 3,
         drm_skip_threshold: float = 0.80,
         drm_lam_dist: float = 0.15,
         drm_dist_sigma_factor: float = 2.5,
         drm_lam_cand_dir: float = 0.15,
         drm_lam_cand_vel: float = 0.20,
+        # Adaptive DRM acceptance margin, active only when drm_margin == "auto".
+        # All defaults reproduce a fixed margin until enough samples accrue, and
+        # a numeric drm_margin ignores every one of these knobs.
+        drm_margin_auto_min: float = 0.55,
+        drm_margin_auto_max: float = 0.80,
+        drm_margin_auto_delta: float = 0.10,
+        drm_margin_auto_ema_alpha: float = 0.2,
+        drm_margin_auto_n_frames: int = 10,
+        drm_margin_auto_warmup: float = 0.70,
+        drm_margin_auto_min_samples: int = 5,
         # Separate occlusion-recovery DRM weights used only when occlusion was
         # entered via the distractor below-gate force path. Defaults mirror the
         # normal occlusion DRM params, so an unset block reproduces old behavior.
@@ -622,6 +632,26 @@ class SiamRAMExperimentTracker:
             "lam_dist": drm_lam_dist,
             "lam_cand_dir": drm_lam_cand_dir,
         }
+
+        # Adaptive DRM acceptance margin (drm_margin == "auto"). A numeric
+        # drm_margin leaves this None, so _active_drm_kwargs and the per-frame
+        # estimator hook below are both no-ops and legacy behaviour is identical.
+        self._drm_margin_auto = None
+        if isinstance(drm_margin, str) and drm_margin.strip().lower() == "auto":
+            from .auto_margin import AutoDrmMargin
+
+            self._drm_margin_auto = AutoDrmMargin(
+                min_margin=drm_margin_auto_min,
+                max_margin=drm_margin_auto_max,
+                delta=drm_margin_auto_delta,
+                ema_alpha=drm_margin_auto_ema_alpha,
+                n_frames=drm_margin_auto_n_frames,
+                warmup=drm_margin_auto_warmup,
+                min_samples=drm_margin_auto_min_samples,
+            )
+            # Seed the stored dict with a concrete float so any reader touching
+            # _drm_kwargs["margin"] directly still gets a number, not "auto".
+            self._drm_kwargs["margin"] = self._drm_margin_auto.value
 
         self._drm_lam_cand_dir = drm_lam_cand_dir
 
@@ -2452,6 +2482,32 @@ class SiamRAMExperimentTracker:
             desc = _extract_descriptor(frame, pred_bbox)
             if desc is not None:
                 self.memory.try_admit(pred_bbox, desc, self.current_bbox)
+                # Adaptive drm_margin: on confident frames, sample how well the
+                # genuine target scores against its own DRM anchors and feed the
+                # estimator. No-op unless drm_margin == "auto".
+                if (
+                    self._drm_margin_auto is not None
+                    and self._drm_margin_auto.due(self.frame_idx)
+                ):
+                    self_score = self.memory.score_target_against_drm(
+                        target_bbox=pred_bbox,
+                        target_desc=desc,
+                        ref_bbox=self.current_bbox,
+                        velocity=self.velocity,
+                        distractor_bank=(
+                            self._get_active_distractor_bank()
+                            if self._use_distractor_bank
+                            else ()
+                        ),
+                        lam_iou=self._drm_kwargs["lam_iou"],
+                        lam_app=self._drm_kwargs["lam_app"],
+                        lam_mot=self._drm_kwargs["lam_mot"],
+                        lam_time=self._drm_kwargs["lam_time"],
+                        alpha=self._drm_kwargs["alpha"],
+                        gamma=self._drm_kwargs["gamma"],
+                    )
+                    if self_score is not None:
+                        self._drm_margin_auto.observe(self_score, self.frame_idx)
 
         self._maybe_update_stable_anchor(pred_bbox)
 
@@ -2812,6 +2868,12 @@ class SiamRAMExperimentTracker:
         """Occlusion-DRM ranking weights for the current episode (distractor-origin → separate set)."""
         if self._distractor_occlusion_active:
             return self._distractor_occ_drm_kwargs
+        if self._drm_margin_auto is not None:
+            # Inject the learned margin at read time. A shallow copy keeps the
+            # stored dict (and its seeded numeric margin) unmutated.
+            active = dict(self._drm_kwargs)
+            active["margin"] = self._drm_margin_auto.value
+            return active  # type: ignore[return-value]
         return self._drm_kwargs
 
     @property

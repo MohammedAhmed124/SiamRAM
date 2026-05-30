@@ -377,6 +377,73 @@ class AppearanceMemory:
 
         return scored[:top_k]
 
+    def score_target_against_drm(
+        self,
+        target_bbox,
+        target_desc: Optional[np.ndarray],
+        ref_bbox,
+        velocity,
+        distractor_bank=(),
+        lam_iou: float = 0.40,
+        lam_app: float = 0.30,
+        lam_mot: float = 0.20,
+        lam_time: float = 0.10,
+        alpha: float = 0.05,
+        gamma: float = 0.30,
+    ) -> Optional[float]:
+        """
+        Score the *current genuine target* as if it were a re-acquisition
+        candidate, using the same composite formula as ``drm_match`` so the
+        result is on the same scale as ``margin``.
+
+        This exists purely to feed the adaptive ``drm_margin="auto"`` estimator
+        (see ``auto_margin.AutoDrmMargin``); ``drm_match`` is left untouched.
+        Mirrors the per-candidate scoring of ``drm_match`` (max over DRM anchors
+        of IoU + appearance + motion/time, minus the distractor penalty); the
+        spatial-distance penalty and direction term are skipped because for the
+        live target the search centre coincides with the target (penalty ~0) and
+        the candidate/ref displacement is degenerate.
+
+        Returns the composite score, or ``None`` when there are no DRM anchors
+        yet (in which case the matcher would fall back to the pure-cosine path).
+        """
+        if target_desc is None or not self._drm:
+            return None
+
+        ref_cx = ref_bbox[0] + ref_bbox[2] / 2.0
+        ref_cy = ref_bbox[1] + ref_bbox[3] / 2.0
+        vel = np.asarray(velocity, dtype=np.float64)
+        vel_norm = float(np.linalg.norm(vel)) + 1e-8
+
+        distractor_arr = (
+            np.asarray(list(distractor_bank), dtype=np.float64)
+            if gamma > 0.0 and distractor_bank
+            else None
+        )
+        cand_desc = np.asarray(target_desc, dtype=np.float64)
+
+        best = -np.inf
+        for dk_bbox, dk_desc, rho_k in list(self._drm):
+            dk_cx = dk_bbox[0] + dk_bbox[2] / 2.0
+            dk_cy = dk_bbox[1] + dk_bbox[3] / 2.0
+            motion_vec = np.array([dk_cx - ref_cx, dk_cy - ref_cy])
+            mot_norm = float(np.linalg.norm(motion_vec)) + 1e-8
+            pi_t = max(0.0, float(np.dot(vel, motion_vec) / (vel_norm * mot_norm)))
+            age = max(0, self._t - rho_k)
+            s_mot_time = lam_mot * pi_t + lam_time * float(np.exp(-alpha * age))
+            if distractor_arr is not None:
+                pen = float(np.max(self._cos_sim_many_to_one(distractor_arr, dk_desc)))
+                s_mot_time -= gamma * pen
+            s_iou = lam_iou * _iou(dk_bbox, target_bbox)
+            s_app = lam_app * _cos_sim(dk_desc, cand_desc)
+            raw = s_iou + s_app + s_mot_time
+            if raw > best:
+                best = raw
+
+        if best == -np.inf:
+            return None
+        return float(best)
+
     def drm_size(
         self,
     ) -> int:

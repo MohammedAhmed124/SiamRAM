@@ -16,16 +16,8 @@ model:
   _target_: models.SiamABC.model.SiamABC.SiamABCNet
   # Backbone family for the shared feature extractor.
   backbone: custom_fbnet
-  # Width multiplier on backbone channels — bigger = more capacity, slower.
-  growth_factor: 1.2
-  # Upsampling strategy used inside the head/decoder.
-  upsample: pixel_shuffle
   # Start from ImageNet pretrained weights for backbone layers that support it.
   pretrained: true
-  # Output classes from the prediction head (1 = single-target tracking).
-  num_classes: 1
-  # Base channel count used by head conv stacks.
-  num_filters: 32
   # Input image channels (3 = RGB).
   num_channels: 3
   # Enable an internal feature alignment correction step.
@@ -42,8 +34,6 @@ model:
   model_size: M
   # How many backbone stages to keep — caps depth of feature extraction.
   max_layer: 4
-  # Crop template features before fusion (restricts context around target).
-  crop_template_features: false
   # Build the auxiliary IoU prediction head on top.
   build_iou_head: true
 
@@ -74,8 +64,6 @@ tracker:
   stride: 2
   # Apply extra temporal smoothing on the predicted trajectory.
   smooth: false
-  # How strongly the bbox aspect ratio is preserved during updates.
-  bbox_ratio: 0.5
   # Offset factor when extracting the template crop around the target centre.
   template_bbox_offset: 0.2
   # Multiplier deciding how much context around target is included in search crop.
@@ -86,6 +74,9 @@ tracker:
   template_size: 128
   # Number of proposals scored per update.
   N: 40
+  # Dynamic-template refresh cadence during warm-up frames.
+  # Set equal to N to keep the same cadence throughout the sequence.
+  warm_up_n: 6
   # Length of the rolling template-memory window.
   memory_window_size: 30
   # Confidence required to admit a new dynamic-template update.
@@ -96,7 +87,8 @@ tracker:
   iou_threshold: 0.6
   # First N frames treated as warmup (relaxed gating).
   warmup_frames: 35
-  # Window length used by warmup-specific statistics.
+  # During warm-up cadence ticks (`warm_up_n`), only the latest
+  # `warmup_window_size` memory entries are considered for template refresh.
   warmup_window_size: 8
   # Multiply candidate scores by predicted IoU quality.
   use_iou_score: false
@@ -179,10 +171,14 @@ ram_tracker:
     descriptor_backend: "osnet"
     # If siamese: which layer to pool the embedding from ("neck" ~256-d, "encoder" ~1024-d).
     siamese_feature_source: "neck"
-    # If siamese: how to compare embeddings ("xcorr" = 2D cross-correlation, "pooled" = cosine).
+    # If siamese: how to compare embeddings.
+    #   "xcorr"      = 2D cross-correlation peak (translation-tolerant; SiamABC-native).
+    #   "pooled"     = global-avg-pool to a vector, then cosine (spatial info discarded).
+    #   "similarity" = flatten the whole feature map to a vector, then cosine
+    #                  (keeps spatial detail, but no translation tolerance).
     siamese_comparison_mode: "xcorr"
     # Which OSNet variant to use.
-    osnet_model_name: "osnet_x1_0"
+    osnet_model_name: "osnet_x0_75"
     # Which OSNet pretrained weights preset to load ("" = use default).
     osnet_pretrained_checkpoint: ""
     # Optional local OSNet weights file (overrides the preset above).
@@ -285,9 +281,9 @@ ram_tracker:
       # Block occlusion entry when camera motion is heavy (avoids fake target-loss from shake).
       block_occlusion_on_camera_motion: false
       # Camera moved more than this many px in one frame = "heavy".
-      camera_motion_heavy_disp_threshold: 15.0
+      camera_motion_heavy_disp_threshold: 20.0
       # Camera moved more than this fraction of bbox diagonal = "heavy" (matters for tiny targets).
-      camera_motion_heavy_norm_threshold: 0.2
+      camera_motion_heavy_norm_threshold: 0.3
 
     # While camera motion is heavy, optionally swap the SiamABC dynamic-template
     # update params (re-selection cadence N + memory window length) and revert
@@ -423,9 +419,14 @@ ram_tracker:
       # occlusion). -1 = disabled (always use entry_patience). NOTE: only takes
       # effect if block_occlusion_on_camera_motion is False — with blocking ON the
       # entry streak is reset every heavy frame, so it never reaches any patience.
-      entry_patience_high_motion: 3
+      entry_patience_high_motion: 1
       # Should we even go into occlusion mode when SiamABC reports loss.
       enter_occlusion_on_loss: True
+      # Grace period: never enter occlusion during the first N frames (warm-up).
+      # Low scores while the dynamic template is still settling are ignored, and
+      # the entry streak is held at 0 so it cannot fire the instant the window
+      # ends. 0 = no restriction.
+      no_occlusion_first_n_frames: 18
       # Small corrective blend toward the predicted state when drifting (0 = off).
       nudge_alpha: 0.0
 
@@ -475,13 +476,13 @@ ram_tracker:
       # DRM (composite candidate ranking) used during occlusion recovery.
       drm:
         # Appearance similarity needed to admit a candidate into the DRM bank.
-        drm_tau_sim: 0.65
+        drm_tau_sim: 0.85
         # Minimum support count required to promote a bank entry.
         drm_mmin: 3
         # Max entries in the DRM bank.
         drm_capacity: 20
         # Required margin between the DRM winner and runner-up.
-        drm_margin: 0.6
+        drm_margin: 0.58
         # Skip the DRM update if quality score is already this high.
         drm_skip_threshold: 23
         # Number of top candidates evaluated per DRM step.
@@ -490,8 +491,6 @@ ram_tracker:
         drm_gamma: 0
         # Weight on appearance similarity in the composite score.
         drm_lam_app: 1
-        # Weight on candidate-velocity consistency.
-        drm_lam_cand_vel: 0.0
         # Weight on spatial distance penalty.
         drm_lam_dist: 0.0
         # Weight on candidate-direction consistency.
@@ -551,7 +550,7 @@ ram_tracker:
     # consecutive confident frames before committing the exit from occlusion. ===
     reacquire_confirm:
       # SiamABC score needed to accept "yes, I found the target again".
-      reacq_threshold: 0.5
+      reacq_threshold: 0.7
       # How many consecutive frames must clear that threshold before committing.
       reacq_confirm_frames: 1
 

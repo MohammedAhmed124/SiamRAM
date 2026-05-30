@@ -107,6 +107,10 @@ class _SiameseDescriptorExtractor:
         "pooled" — global average pool to a (C,) vector then L2-normalize.
                    Comparisons fall back to vector cosine. Cheaper but
                    discards the spatial info SiamABC actually uses.
+        "similarity" — flatten the whole (C, H, W) map to one vector and
+                   L2-normalize, then compare by plain cosine. Keeps spatial
+                   detail (unlike "pooled") but, unlike "xcorr", has no
+                   translation tolerance — every cell must line up.
 
     Both feature_source options were trained for Siamese cross-correlation,
     not pooled-vector ReID, so the "pooled" mode handicaps them. Default is
@@ -117,7 +121,7 @@ class _SiameseDescriptorExtractor:
     _IMAGENET_STD: Tuple[float, float, float] = (0.229, 0.224, 0.225)
     _CROP_SIZE: int = 128
     _ALLOWED_SOURCES: Tuple[str, ...] = ("neck", "encoder")
-    _ALLOWED_COMPARISONS: Tuple[str, ...] = ("xcorr", "pooled")
+    _ALLOWED_COMPARISONS: Tuple[str, ...] = ("xcorr", "pooled", "similarity")
 
     def __init__(
         self,
@@ -204,6 +208,16 @@ class _SiameseDescriptorExtractor:
             # bounded in [-1, 1] per cell. The caller / _cos_sim dispatches
             # on the 3D shape to do the conv2d-based comparison.
             normalized = torch.nn.functional.normalize(features, p=2, dim=1)
+            return normalized.detach().cpu().numpy().astype(np.float32)
+
+        if self._comparison_mode == "similarity":
+            # Whole-map cosine: flatten the full (C, H, W) feature map into one
+            # long vector and L2-normalize it, so the standard 1D cosine path
+            # compares the entire spatial layout at once. Keeps spatial detail
+            # (unlike "pooled", which averages it away) but has NO translation
+            # tolerance (unlike "xcorr", which slides and takes the peak).
+            flat = features.flatten(start_dim=1)
+            normalized = torch.nn.functional.normalize(flat, p=2, dim=1)
             return normalized.detach().cpu().numpy().astype(np.float32)
 
         # comparison_mode == "pooled": global avg pool then L2-normalize the
@@ -358,6 +372,9 @@ def configure_descriptor_backend(
                    Default.
         "pooled" — global-avg-pool to (C,) and compare via cosine. Cheaper but
                    throws away the spatial structure SiamABC was trained on.
+        "similarity" — flatten the whole (C, H, W) map to one vector and compare
+                   via cosine. Keeps spatial detail (unlike "pooled") but has no
+                   translation tolerance (unlike "xcorr").
     """
     global _OSNET_EXTRACTOR, _SIAMESE_EXTRACTOR, _SIAM_TRACKER_REF
     global _SIAMESE_FEATURE_SOURCE, _SIAMESE_COMPARISON_MODE

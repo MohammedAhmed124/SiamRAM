@@ -141,7 +141,8 @@ class SiamABCTracker(Tracker):
         Concretely, this method:
 
         - Reads all the relevant thresholds and flags from the config (memory
-          window size N, dynamic update on/off, similarity score mode, etc.)
+          window size N, optional warm_up_n cadence, dynamic update on/off,
+          similarity score mode, etc.)
         - Clamps the given bounding box so it can't spill outside the image frame.
         - Extracts the static template features from the initial crop — these
           features are kept frozen for the entire sequence and represent the
@@ -170,7 +171,13 @@ class SiamABCTracker(Tracker):
 
         self.smooth_pred = self.tracking_config["smooth"]
         self._prev_bbox = rect.copy()
-        self.N = self.tracking_config["N"]
+        self.N = max(1, int(self.tracking_config["N"]))
+        raw_warm_up_n = self.tracking_config.get("warm_up_n", self.N)
+        self.warm_up_n = max(1, int(raw_warm_up_n))
+        raw_warmup_window_size = self.tracking_config.get(
+            "warmup_window_size", self.memory_window_size
+        )
+        self.warmup_window_size = max(1, int(raw_warmup_window_size))
         self.dynamic_update = self.tracking_config["dynamic_update"]
         self.similarity_score = self.tracking_config["similarity_score"]
         self.dynamic_update_threshold = self.tracking_config["dynamic_update_threshold"]
@@ -249,6 +256,34 @@ class SiamABCTracker(Tracker):
         self._best_idx = 0
         self._best_score = 0.5
         self._is_full = False
+
+    def _in_warmup_phase(self) -> bool:
+        """True while update() is still inside the warm-up frame budget."""
+        return self.warmup_frames > 0 and self.idx < self.warmup_frames
+
+    def _current_template_update_period(self) -> int:
+        """
+        Return the current select_representatives() cadence.
+
+        During the initial warm-up region, we can use a dedicated cadence
+        (`warm_up_n`) to refresh dynamic templates faster/slower than the
+        steady-state cadence (`N`). Outside warm-up we always use `N`.
+        """
+        if self._in_warmup_phase():
+            return self.warm_up_n
+        return self.N
+
+    def _current_template_selection_window(self) -> int:
+        """
+        Return how many recent memory entries may be considered for template refresh.
+
+        During warm-up, selection is restricted to the latest
+        `warmup_window_size` entries to encourage fast adaptation to recent
+        appearance. After warm-up, the full memory window is eligible.
+        """
+        if self._in_warmup_phase():
+            return max(1, min(int(self.warmup_window_size), int(self.memory_window_size)))
+        return max(1, int(self.memory_window_size))
 
     @torch.no_grad()
     def get_template_features(
@@ -410,7 +445,8 @@ class SiamABCTracker(Tracker):
         The memory window (`all_memory_imgs`) is a fixed-size deque. As new frames
         are pushed in, old ones fall off the left end. The tracker needs to always
         know which slot holds the best frame — because that's the one it will use
-        to refresh the dynamic template every N frames (see `select_representatives()`
+        to refresh the dynamic template on the configured cadence
+        (warm-up `warm_up_n`, then steady-state `N`; see `select_representatives()`
         and Section 2.2 of the paper).
 
         Recomputing `argmax` over the full deque every frame would be wasteful.
@@ -504,6 +540,7 @@ class SiamABCTracker(Tracker):
 
     def select_representatives(
         self,
+        window_size: Optional[int] = None,
     ) -> None:
         """
         Refresh dynamic features from the newest memory frame above update threshold.
@@ -514,13 +551,14 @@ class SiamABCTracker(Tracker):
         periodically pick the newest stored frame whose confidence clears the
         update threshold and refresh dynamic template/search features from it.
 
-        This method is called every N frames from `update()` (N is set in the config,
-        default 10). When called, it:
+        This method is called on the cadence chosen in `update()`:
+        `warm_up_n` during warm-up, then `N` afterward (default 10). When called, it:
 
         1. Checks that there's actually something in memory, then scans from newest
            to oldest for the first score >= `dynamic_update_threshold` (τu = 0.87
-           in the paper). If no stored frame clears the threshold, we keep the
-           previous dynamic template.
+           in the paper). If `window_size` is set, the scan is restricted to the
+           latest `window_size` entries. If no stored frame clears the threshold,
+           we keep the previous dynamic template.
 
         2. Retrieves that newest qualifying (image, bbox) pair from
            `all_memory_imgs`.
@@ -541,8 +579,15 @@ class SiamABCTracker(Tracker):
         if not self.classification_scores:
             return
 
+        total = len(self.classification_scores)
+        if window_size is None:
+            first_idx = 0
+        else:
+            window = max(1, int(window_size))
+            first_idx = max(0, total - window)
+
         latest_idx = None
-        for idx in range(len(self.classification_scores) - 1, -1, -1):
+        for idx in range(total - 1, first_idx - 1, -1):
             if float(self.classification_scores[idx]) >= self.dynamic_update_threshold:
                 latest_idx = idx
                 break
@@ -595,9 +640,10 @@ class SiamABCTracker(Tracker):
         4. After the warmup period (if configured), the memory deque is sealed at
            full capacity and the best-index is computed fresh over the whole window.
 
-        5. Every N frames, `select_representatives()` is called to refresh the
-           dynamic template from the newest stored frame above
-           `dynamic_update_threshold` (Section 2.2).
+        5. On each configured cadence tick (`warm_up_n` during warm-up, otherwise `N`),
+           `select_representatives()` is called to refresh the dynamic template
+           from the newest stored frame above `dynamic_update_threshold`
+           (Section 2.2).
 
         6. The running confidence EMA is updated and clamped at a floor value, so
            the threshold adapts to the sequence difficulty without collapsing.
@@ -662,8 +708,10 @@ class SiamABCTracker(Tracker):
 
             self.idx += 1
 
-            if self.idx % self.N == 0:
-                self.select_representatives()
+            period = self._current_template_update_period()
+            if self.idx % period == 0:
+                window = self._current_template_selection_window()
+                self.select_representatives(window_size=window)
 
             self.running_confidence = (
                 self.update_lambda * pred_score
@@ -748,7 +796,7 @@ class SiamABCTracker(Tracker):
         - Static template features (always `self._template_features` from frame 0,
           held frozen — passed from `self` not as an argument here).
         - Dynamic template features (the freshest high-confidence template, updated
-          every N frames by `select_representatives()`).
+          on the configured cadence by `select_representatives()`).
         - Current search features (extracted from the live frame by `run_track()`).
         - Dynamic search features (from the best historical frame, same source as
           dynamic template features).

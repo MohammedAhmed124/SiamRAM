@@ -318,7 +318,9 @@ class OcclusionRecoverySubsystem:
 
             if drm_ok:
                 self._host._set_recovered_early_occlusion_flag()
-                return self._host._commit_reacquisition(frame, pred_bbox, pred_desc, score)
+                return self._host._commit_reacquisition(
+                    frame, pred_bbox, pred_desc, score, drm_score=drm_score
+                )
 
             held_box = self._host.held_box
             assert held_box is not None
@@ -669,7 +671,7 @@ class OcclusionRecoverySubsystem:
                     self._host._cand_frames = []
                     self._host._occ_cam_vels = []
                     return self._host._commit_reacquisition(
-                        frame, verify_bbox, desc, verify_score
+                        frame, verify_bbox, desc, verify_score, drm_score=match_score
                     )
                 return self._host._begin_reacq_confirmation(frame, verify_bbox, verify_score)
 
@@ -683,6 +685,7 @@ class OcclusionRecoverySubsystem:
         bbox: np.ndarray,
         desc: Optional[np.ndarray],
         score: float,
+        drm_score: Optional[float] = None,
     ) -> Tuple[np.ndarray, float]:
         """
         Shared exit point for all three recovery phases. Updates the EKF
@@ -752,6 +755,7 @@ class OcclusionRecoverySubsystem:
             bbox=ekf_bbox,
             score=score,
             desc=desc,
+            drm_score=drm_score,
         )
 
         if desc is not None:

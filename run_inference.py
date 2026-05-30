@@ -1121,6 +1121,29 @@ def main():
             output_video=args.output_video,
         )
 
+        # Report the YOLO-detectability verdict the probe settled on for this
+        # video (drives the occlusion-recovery strategy: detectable -> YOLO+DRM,
+        # not -> SiamABC-alone). The verdict lives on the tracker after the run.
+        enabled = bool(getattr(tracker, "_yolo_detectability_enabled", False))
+        probe_done = bool(getattr(tracker, "_detectability_probe_done", False))
+        detectable = bool(getattr(tracker, "_yolo_detectable", False))
+        runs = int(getattr(tracker, "_detectability_runs", 0))
+        hits = int(getattr(tracker, "_detectability_hits", 0))
+        if not enabled:
+            verdict = "probe DISABLED (yolo_detectability_enabled: false)"
+        elif not probe_done:
+            verdict = (
+                f"UNDETERMINED — probe never finished ({hits} hit(s) / {runs} run(s); "
+                "clip too short or occlusion before probe completed)"
+            )
+        elif detectable:
+            verdict = f"YOLO-DETECTABLE ✓  ({hits} hit(s) / {runs} run(s))"
+        else:
+            verdict = f"NOT YOLO-detectable ✗  ({hits} hit(s) / {runs} run(s))"
+        print("\n" + "=" * 70)
+        print(f"[detectability] {key}: {verdict}")
+        print("=" * 70 + "\n")
+
     # ------------------------------------------------------------------
     #  Stitch all per-video bbox files into one submission CSV.
     #

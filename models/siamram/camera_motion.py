@@ -216,12 +216,17 @@ class CameraMotionSubsystem:
         has_px_gate = self._host._camera_motion_heavy_disp_threshold > 0.0
         has_norm_gate = self._host._camera_motion_heavy_norm_threshold > 0.0
         if not has_px_gate and not has_norm_gate:
+            self._host._last_heavy_cam_motion = False
+            self._host._last_heavy_cam_disp = float(max_disp)
             return False, max_disp
-    
+
         heavy_px = (
             has_px_gate and max_disp >= self._host._camera_motion_heavy_disp_threshold
         )
         heavy_norm = (
             has_norm_gate and max_norm >= self._host._camera_motion_heavy_norm_threshold
         )
-        return (heavy_px or heavy_norm), max_disp
+        heavy = bool(heavy_px or heavy_norm)
+        self._host._last_heavy_cam_motion = heavy
+        self._host._last_heavy_cam_disp = float(max_disp)
+        return heavy, max_disp

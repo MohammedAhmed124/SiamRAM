@@ -40,11 +40,7 @@ model:
   _target_: models.SiamABC.model.SiamABC.SiamABCNet
   weights_path: "checkpoints/inference_checkpoint.pth"
   backbone: custom_fbnet
-  growth_factor: 1.2
-  upsample: pixel_shuffle
   pretrained: true
-  num_classes: 1
-  num_filters: 32
   num_channels: 3
   align: false
   img_size: 256
@@ -53,7 +49,6 @@ model:
   towernum: 2
   model_size: M
   max_layer: 4
-  crop_template_features: false
   build_simsiam_heads: false
   build_iou_head: true
 

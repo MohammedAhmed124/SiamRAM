@@ -206,6 +206,7 @@ class SiamRAMExperimentTracker:
         long_distance_area_fraction: float = 0.004,
         long_distance_mode: bool = False,
         enter_occlusion_on_loss: bool = True,
+        no_occlusion_first_n_frames: int = 0,
         block_distractor_mode_on_camera_motion: bool = True,
         block_occlusion_on_camera_motion: bool = True,
         camera_motion_heavy_disp_threshold: float = 18.0,
@@ -649,6 +650,9 @@ class SiamRAMExperimentTracker:
         )
         self._vel_score_min_speed = vel_score_min_speed
         self._entry_patience = max(1, entry_patience)
+        # Grace period: refuse to enter occlusion for this many initial frames
+        # (warm-up). 0 = no restriction.
+        self._no_occlusion_first_n_frames = max(0, int(no_occlusion_first_n_frames))
         # Alternate occlusion-entry patience used while camera motion is heavy.
         # < 1 disables it (always use _entry_patience). Meant as a softer
         # alternative to block_occlusion_on_camera_motion: set that False and set
@@ -742,6 +746,10 @@ class SiamRAMExperimentTracker:
         self._heavy_motion_cache_frame_idx: int = -1
         self._heavy_motion_cache_weighted_disp: float = 0.0
         self._heavy_motion_cache_inst_disp: float = 0.0
+        # Latest heavy-camera-motion verdict for this frame (for the viz marker
+        # and any consumer that wants the gate's current state).
+        self._last_heavy_cam_motion: bool = False
+        self._last_heavy_cam_disp: float = 0.0
 
         self._spike_step_norms: deque = deque(
             maxlen=max(2, int(spike_reject_history_window))
@@ -1206,6 +1214,11 @@ class SiamRAMExperimentTracker:
         H, H_reliable, current_gray = self._estimate_homography(proc_frame)
         self._last_H = H
         self._last_H_reliable = H_reliable
+
+        # Refresh the heavy-camera-motion verdict every frame (incl. occlusion)
+        # so the viz marker stays live. Cheap: displacement is cached per frame,
+        # and _normal_update re-runs this with the fresh pred bbox afterwards.
+        self._is_heavy_camera_motion(proc_frame)
 
         if self.in_occlusion and self._out_of_frame:
             ekf.P = ekf.P + ekf.Q
@@ -2287,6 +2300,17 @@ class SiamRAMExperimentTracker:
 
         if self._distractor_mode_active:
             self._entry_streak = 0
+        elif self.frame_idx < self._no_occlusion_first_n_frames:
+            # Grace period: never enter occlusion during the first N frames
+            # (warm-up). Low scores while the dynamic template is still settling
+            # must not be treated as target loss, and the entry streak is held
+            # at 0 so it cannot fire the instant the window ends.
+            self._entry_streak = 0
+            if self.debug and score < effective_threshold:
+                print(
+                    f"[occlusion guard] frame={self.frame_idx} in no-occlusion "
+                    f"grace window (< {self._no_occlusion_first_n_frames})"
+                )
         elif (
             score < effective_threshold
             and self.frame_idx >= 0
@@ -2313,7 +2337,7 @@ class SiamRAMExperimentTracker:
 
         if (
             self._entry_streak >= effective_entry_patience
-            and self.frame_idx >= 0
+            and self.frame_idx >= self._no_occlusion_first_n_frames
             and self.enter_occlusion_on_loss
         ):
 
@@ -2671,12 +2695,14 @@ class SiamRAMExperimentTracker:
         bbox: np.ndarray,
         desc: Optional[np.ndarray],
         score: float,
+        drm_score: Optional[float] = None,
     ) -> Tuple[np.ndarray, float]:
         return self._occlusion_subsystem.commit_reacquisition(
             frame=frame,
             bbox=bbox,
             desc=desc,
             score=score,
+            drm_score=drm_score,
         )
 
     def _record_recovery(
@@ -2688,11 +2714,16 @@ class SiamRAMExperimentTracker:
         sim: Optional[float] = None,
         iou: Optional[float] = None,
         desc: Optional[np.ndarray] = None,
+        drm_score: Optional[float] = None,
     ) -> None:
         """
         Snapshot the patch + stats of the latest successful recovery so the
         visualiser can render what we recovered onto. Called from the
         occlusion-recovery commit and the distractor-mode resolved exit.
+
+        `score` is the tracker (SiamABC) confidence at the recovered box;
+        `drm_score` is the DRM composite ranking score of the chosen candidate
+        (occlusion only — None/NaN elsewhere). Both are surfaced in the viz panel.
         """
         bb = np.asarray(bbox, dtype=int).reshape(-1)
         if bb.size < 4:
@@ -2720,15 +2751,19 @@ class SiamRAMExperimentTracker:
             if best is not None:
                 sim_val = float(_cos_sim(desc, best))
 
+        drm_val = float(drm_score) if drm_score is not None else float("nan")
+
         self._last_recovery_info = {
             "mode": str(mode),
             "bbox": np.asarray(bbox, dtype=int).copy(),
             "score": float(score),
+            "drm_score": drm_val,
             "sim": sim_val,
             "iou_held": iou_held,
             "frame_idx": int(self.frame_idx),
             "thresholds": {
                 "reacq": float(self.reacq_threshold),
+                "app_match": float(self.app_match_threshold),
                 "min_sim": float(self._distractor_mode_min_similarity),
                 "sel_min_sim": float(self._distractor_mode_selected_min_similarity),
             },

@@ -154,17 +154,21 @@ def _refresh_recovery_panel(
     sim = float(info.get("sim", float("nan")))
     iou = float(info.get("iou_held", float("nan")))
     score = float(info.get("score", float("nan")))
+    drm = float(info.get("drm_score", float("nan")))
     thr = info.get("thresholds", {})
 
     def _fmt(v: float) -> str:
         return "n/a" if not np.isfinite(v) else f"{v:.2f}"
 
+    # trk = SiamABC verification score (gated by reacq>=); drm = DRM composite
+    # ranking score of the chosen candidate (occlusion only; phase-0 gate app>=).
     lines = [
         f"sim={_fmt(sim)}  iou={_fmt(iou)}",
-        f"score={_fmt(score)}",
+        f"trk={_fmt(score)}  drm={_fmt(drm)}",
+        f"reacq>={float(thr.get('reacq', 0.0)):.2f}  "
+        f"app>={float(thr.get('app_match', 0.0)):.2f}",
         f"sel>={float(thr.get('sel_min_sim', 0.0)):.2f}  "
         f"min>={float(thr.get('min_sim', 0.0)):.2f}",
-        f"reacq>={float(thr.get('reacq', 0.0)):.2f}",
     ]
     y0 = panel.shape[0] - footer_h + 16
     for i, line in enumerate(lines):
@@ -706,6 +710,46 @@ def run_inference(
                 cv2.LINE_AA,
             )
 
+        def _draw_camera_motion_pill(
+            canvas: np.ndarray,
+            heavy: bool,
+            disp: float,
+        ) -> None:
+            """
+            Draws a pill in the top-right of the frame area reporting the
+            camera-motion gate's verdict for this frame:
+              - red  "CAMERA HIGH"   when heavy camera motion is flagged,
+              - green "CAMERA STABLE" otherwise.
+            `disp` is the per-frame camera displacement (px) appended for context.
+            Mirrors _draw_status_pill's rounded-rectangle style.
+            """
+            if heavy:
+                label = "CAMERA HIGH"
+                color = (0, 0, 255)
+            else:
+                label = "CAMERA STABLE"
+                color = C_STATUS_OK
+            label = f"{label}  {disp:.0f}px"
+            ph = 28
+            (tw, th), _ = cv2.getTextSize(label, FONT, 0.50, 1)
+            pw = max(150, tw + 28)
+            px = max(8, w - pw - 8)
+            py = y_off + 8
+            r = ph // 2
+            cv2.rectangle(canvas, (px + r, py), (px + pw - r, py + ph), color, -1)
+            cv2.circle(canvas, (px + r, py + r), r, color, -1)
+            cv2.circle(canvas, (px + pw - r, py + r), r, color, -1)
+            cv2.putText(
+                canvas,
+                label,
+                (px + (pw - tw) // 2, py + (ph + th) // 2 - 1),
+                FONT,
+                0.50,
+                C_STATUS_TEXT,
+                1,
+                cv2.LINE_AA,
+            )
+
         tracker.initialize(first_bgr, initial_bbox)
         _refresh_panels(
             inner_tracker,
@@ -962,6 +1006,12 @@ def run_inference(
                 )
 
                 _draw_status_pill(canvas, mode=visual_mode)
+                if is_dam:
+                    _draw_camera_motion_pill(
+                        canvas,
+                        heavy=bool(getattr(tracker, "_last_heavy_cam_motion", False)),
+                        disp=float(getattr(tracker, "_last_heavy_cam_disp", 0.0)),
+                    )
 
                 if visual_mode == "occluded":
                     hud = f"F:{frame_idx}  [DAM RECOVERY]"

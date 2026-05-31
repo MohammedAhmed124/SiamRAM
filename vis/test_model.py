@@ -15,7 +15,30 @@ import cv2
 import numpy as np
 from numpy._typing import NDArray
 
+from utils.console import siamram_latency
 from utils.utils import _iou
+
+
+def _latency_stats(arr):
+    """Summarize a list of per-frame millisecond timings for siamram_latency.
+
+    Returns ``None`` for an empty list (rendered as "no data"), otherwise a
+    dict with the keys siamram_latency expects: n, mean, med, p95, p99, min,
+    max, fps.
+    """
+    if not arr:
+        return None
+    a = np.array(arr)
+    return {
+        "n": len(a),
+        "mean": float(a.mean()),
+        "med": float(np.median(a)),
+        "p95": float(np.percentile(a, 95)),
+        "p99": float(np.percentile(a, 99)),
+        "min": float(a.min()),
+        "max": float(a.max()),
+        "fps": 1000.0 / float(a.mean()),
+    }
 
 PANEL_W = 240
 GAP = 8
@@ -567,28 +590,10 @@ def run_inference(
 
         np.savetxt(bbox_file, tracked_bboxes, fmt="%d", delimiter=" ")
 
-        def _stats_fast(
-            name,
-            arr,
-        ):
-            if not arr:
-                print(f"{name:20s}  no data")
-                return
-            a = np.array(arr)
-            print(
-                f"{name:20s}  n={len(a):4d}  "
-                f"mean={a.mean():.1f}ms  "
-                f"med={np.median(a):.1f}ms  "
-                f"p95={np.percentile(a, 95):.1f}ms  "
-                f"p99={np.percentile(a, 99):.1f}ms  "
-                f"min={a.min():.1f}ms  "
-                f"max={a.max():.1f}ms  "
-                f"fps={1000 / a.mean():.1f}"
-            )
-
-        print("\n─── Latency Report (fast inference) ──────────────────────")
-        _stats_fast("ALL FRAMES", frame_times)
-        print("──────────────────────────────────────────────────────────\n")
+        siamram_latency(
+            [("all", _latency_stats(frame_times))],
+            header="latency report · fast inference",
+        )
 
         gc.collect()
         return
@@ -1281,52 +1286,18 @@ def run_inference(
     if output_video:
         del canvas, panel_template, panel_search
 
-    def _stats(
-        name,
-        arr,
-    ):
-        """
-        Inputs:
-            name - str label for this timing group, printed left-aligned
-            arr  - list of float millisecond timings for this group
-
-        What it does:
-            Computes and prints mean, median, p95, p99, min, max, and effective
-            FPS for the given timing array. Prints a single "no data" line if
-            the list is empty.
-
-        Outputs:
-            None. Prints to stdout.
-
-        Why / where:
-            Called three times after the main loop to report latency for all
-            frames, normal tracking frames, and occlusion frames separately.
-            Defined here so it shares the numpy import without needing it passed in.
-        """
-        if not arr:
-            print(f"{name:20s}  no data")
-            return
-        a = np.array(arr)
-        print(
-            f"{name:20s}  n={len(a):4d}  "
-            f"mean={a.mean():.1f}ms  "
-            f"med={np.median(a):.1f}ms  "
-            f"p95={np.percentile(a, 95):.1f}ms  "
-            f"p99={np.percentile(a, 99):.1f}ms  "
-            f"min={a.min():.1f}ms  "
-            f"max={a.max():.1f}ms  "
-            f"fps={1000 / a.mean():.1f}"
-        )
-
-    print("\n─── Latency Report ───────────────────────────────────────")
-    _stats("ALL FRAMES", frame_times)
-    _stats("NORMAL TRACK", times_normal)
-    _stats("OCCLUSION", times_occlusion)
-    if times_occlusion:
-        print(
-            f"  occlusion frames: {len(times_occlusion)} "
-            f"({100 * len(times_occlusion) / len(frame_times):.1f}% of total)"
-        )
-    print("──────────────────────────────────────────────────────────\n")
+    occ_pct = (
+        100 * len(times_occlusion) / len(frame_times)
+        if times_occlusion and frame_times
+        else None
+    )
+    siamram_latency(
+        [
+            ("all", _latency_stats(frame_times)),
+            ("track", _latency_stats(times_normal)),
+            ("occl", _latency_stats(times_occlusion)),
+        ],
+        occlusion_pct=occ_pct,
+    )
 
     gc.collect()

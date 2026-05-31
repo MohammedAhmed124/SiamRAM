@@ -317,21 +317,25 @@ def get_trt_tracker(
     from ..SiamABC_Tracker import SiamABCTracker
 
     siamram_log("Loading model weights", phase="TRT", status="load")
-    model: nn.Module = instantiate(
-        config["model"], inference_mode=True, norm_lambda=lambda_tta
-    )
-    checkpoint = torch.load(
-        weights_path,
-        map_location=f"cuda:{cuda_id}",
-        weights_only=False,
-    )
-    state_dict = {
-        k.lstrip("module").lstrip("."): v
-        for k, v in checkpoint.items()
-        if k.startswith("module.")
-    }
-    transfer_weights(model, state_dict)
-    model = model.to(f"cuda:{cuda_id}").eval()
+    # Building the torchvision backbone with the legacy `pretrained=` argument
+    # emits harmless UserWarnings from native/3rd-party code; keep the load step
+    # quiet so it doesn't interrupt our clean status lines.
+    with quiet_external_logs():
+        model: nn.Module = instantiate(
+            config["model"], inference_mode=True, norm_lambda=lambda_tta
+        )
+        checkpoint = torch.load(
+            weights_path,
+            map_location=f"cuda:{cuda_id}",
+            weights_only=False,
+        )
+        state_dict = {
+            k.lstrip("module").lstrip("."): v
+            for k, v in checkpoint.items()
+            if k.startswith("module.")
+        }
+        transfer_weights(model, state_dict)
+        model = model.to(f"cuda:{cuda_id}").eval()
 
     tracking_cfg = config["tracker"]
     template_size = int(tracking_cfg["template_size"])

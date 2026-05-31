@@ -17,6 +17,8 @@ from ultralytics import YOLO
 
 import torch
 
+from utils.console import siamram_log
+
 from utils.utils import (
     _cos_sim,
     _extract_descriptor,
@@ -4781,9 +4783,11 @@ class SiamRAMExperimentTracker:
         engine_path = weights_path.replace(".pt", ".engine")
 
         if not os.path.exists(engine_path) or force_recompile:
-            print(
-                f"Compiling YOLO model using TensorRT at "
-                f"{self.yolo_imgsz}x{self.yolo_imgsz} (may take a minute)..."
+            siamram_log(
+                f"Compiling YOLO engine at {self.yolo_imgsz}x{self.yolo_imgsz} "
+                "(may take a minute)",
+                phase="YOLO",
+                status="build",
             )
 
             model = YOLO(weights_path)

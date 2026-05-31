@@ -11,6 +11,8 @@ import torch
 import torch.nn as nn
 from hydra.utils import instantiate
 
+from utils.console import siamram_log
+
 from .SiamABC_Tracker import SiamABCTracker
 
 
@@ -74,23 +76,31 @@ def load_model(
         total = max(1, len(model_state))
         loaded = len(compatible_state)
         pct = 100.0 * loaded / total
-        print(
-            f"[load_model] Loaded {loaded}/{total} tensors ({pct:.1f}%) from {checkpoint_path}"
+        siamram_log(
+            f"Loaded {loaded}/{total} tensors ({pct:.1f}%) from {checkpoint_path}",
+            phase="CKPT",
+            status="ready",
         )
         if shape_mismatch:
-            print(
-                f"[load_model][warn] shape mismatches: {len(shape_mismatch)} "
-                f"(examples: {shape_mismatch[:3]})"
+            siamram_log(
+                f"shape mismatches: {len(shape_mismatch)} "
+                f"(examples: {shape_mismatch[:3]})",
+                phase="CKPT",
+                status="warn",
             )
         if unexpected:
-            print(
-                f"[load_model][warn] unexpected keys in checkpoint: {len(unexpected)} "
-                f"(examples: {unexpected[:3]})"
+            siamram_log(
+                f"unexpected keys in checkpoint: {len(unexpected)} "
+                f"(examples: {unexpected[:3]})",
+                phase="CKPT",
+                status="warn",
             )
         if missing:
-            print(
-                f"[load_model][warn] missing keys in checkpoint: {len(missing)} "
-                f"(examples: {missing[:3]})"
+            siamram_log(
+                f"missing keys in checkpoint: {len(missing)} "
+                f"(examples: {missing[:3]})",
+                phase="CKPT",
+                status="warn",
             )
     return model
 

@@ -64,7 +64,7 @@ import sys
 import warnings
 from pathlib import Path
 
-from utils.console import quiet_external_logs, silence_noisy_libraries
+from utils.console import quiet_external_logs, siamram_log, silence_noisy_libraries
 
 silence_noisy_libraries()
 
@@ -616,8 +616,10 @@ def _build_train_entries_from_csv(
                 break
 
     if dropped_missing_path > 0:
-        print(
-            f"[train-csv] Skipped {dropped_missing_path} rows with missing seq/annotation paths."
+        siamram_log(
+            f"skipped {dropped_missing_path} rows with missing seq/annotation paths",
+            phase="DATA",
+            status="warn",
         )
     return entries
 
@@ -987,14 +989,20 @@ def _ensure_required_checkpoints(weights_path: Path, yolo_path: Path) -> tuple[P
         if not _looks_like_ultralytics_yolo_asset(path):
             return path
 
-        print(
-            f"Missing YOLO weights '{path.name}'. "
-            "Attempting auto-download from ultralytics/assets..."
+        siamram_log(
+            f"missing YOLO weights '{path.name}' · auto-downloading from "
+            "ultralytics/assets",
+            phase="CKPT",
+            status="build",
         )
         try:
             downloaded = _download_ultralytics_yolo_asset(path)
         except Exception as exc:
-            print(f"[checkpoints] YOLO auto-download failed for {path.name}: {exc}")
+            siamram_log(
+                f"YOLO auto-download failed for {path.name}: {exc}",
+                phase="CKPT",
+                status="error",
+            )
             return path
 
         if downloaded != path and _is_valid_checkpoint_file(downloaded):
@@ -1002,7 +1010,7 @@ def _ensure_required_checkpoints(weights_path: Path, yolo_path: Path) -> tuple[P
             shutil.copy2(downloaded, path)
 
         if _is_valid_checkpoint_file(path):
-            print(f"[checkpoints] YOLO weights ready at {path}")
+            siamram_log(f"YOLO weights ready · {path}", phase="CKPT", status="ready")
             return path
         if _is_valid_checkpoint_file(downloaded):
             return downloaded
@@ -1035,7 +1043,11 @@ def _ensure_required_checkpoints(weights_path: Path, yolo_path: Path) -> tuple[P
                 f"Also missing downloader script: {CHECKPOINT_DOWNLOADER}"
             )
 
-        print("Missing or invalid checkpoints detected. Downloading required models...")
+        siamram_log(
+            "missing or invalid checkpoints · downloading required models",
+            phase="CKPT",
+            status="build",
+        )
         subprocess.run(
             [sys.executable, str(CHECKPOINT_DOWNLOADER), "--force"],
             check=True,
@@ -1235,9 +1247,11 @@ def main():
     # erroring so older config files keep loading.
     ram_impl = str(getattr(config, "ram_tracker_impl", "experiment")).strip().lower()
     if ram_impl not in {"experiment", "exp", "siamram_experiment"}:
-        print(
-            f"[run_inference] config sets ram_tracker_impl='{ram_impl}' but the "
-            "base tracker has been removed; falling back to the experimental tracker."
+        siamram_log(
+            f"config sets ram_tracker_impl='{ram_impl}' but the base tracker was "
+            "removed; falling back to the experimental tracker",
+            phase="INIT",
+            status="warn",
         )
     tracker_cls = SiamRAMExperimentTracker
 
@@ -1259,7 +1273,7 @@ def main():
         )
 
     tracker = tracker_cls(siam_tracker=wrapped, **ram_tracker_kwargs)
-    print(f"Using tracker implementation: {tracker_cls.__name__}")
+    siamram_log(f"tracker · {tracker_cls.__name__}", phase="INIT", status="ready")
 
     if args.datasets is not None:
         # The user explicitly named which datasets they want.
@@ -1270,7 +1284,11 @@ def main():
         target_datasets = {
             p.name for p in data_root.iterdir() if p.is_dir() and p.name != "metadata"
         }
-        print(f"Auto-discovered datasets: {sorted(target_datasets)}")
+        siamram_log(
+            f"datasets · {', '.join(sorted(target_datasets))}",
+            phase="DATA",
+            status="info",
+        )
 
     # Build a unified entry map regardless of source split.
     if args.run_split in {"public_lb", "train"}:
@@ -1353,7 +1371,11 @@ def main():
     #   d) Hand everything off to run_inference(), which handles the actual
     #      tracking loop and writes per-frame bbox predictions to disk.
     # ------------------------------------------------------------------
-    print(f"Starting inference on {len(run_entries)} entries (split={args.run_split})...")
+    siamram_log(
+        f"{len(run_entries)} clips queued · split={args.run_split}",
+        phase="DATA",
+        status="info",
+    )
     for i, (key, value) in enumerate(run_entries.items()):
         video_path = _resolve_data_asset_path(value["video_path"], args.data_dir)
         ann_path = _resolve_data_asset_path(value["annotation_path"], args.data_dir)
@@ -1361,7 +1383,13 @@ def main():
 
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-        print(f"[{i + 1}/{len(run_entries)}] Processing: {video_path}")
+        siamram_log(
+            f"[{i + 1}/{len(run_entries)}] {key}",
+            phase="RUN",
+            status="load",
+            label="video",
+            blank_before=True,
+        )
 
         # Load the initial bbox. The annotation file is a single line like:
         #   320.5,140.0,64.0,80.0   (x, y, width, height in pixels)
@@ -1385,19 +1413,24 @@ def main():
         runs = int(getattr(tracker, "_detectability_runs", 0))
         hits = int(getattr(tracker, "_detectability_hits", 0))
         if not enabled:
-            verdict = "probe DISABLED (yolo_detectability_enabled: false)"
+            verdict, status = "probe disabled", "info"
         elif not probe_done:
-            verdict = (
-                f"UNDETERMINED — probe never finished ({hits} hit(s) / {runs} run(s); "
-                "clip too short or occlusion before probe completed)"
+            verdict, status = (
+                f"undetermined · {hits} hit(s) / {runs} run(s) "
+                "(clip too short or occluded before probe finished)",
+                "warn",
             )
         elif detectable:
-            verdict = f"YOLO-DETECTABLE ✓  ({hits} hit(s) / {runs} run(s))"
+            verdict, status = (
+                f"✓ detectable · {hits} hit(s) / {runs} run(s)",
+                "ready",
+            )
         else:
-            verdict = f"NOT YOLO-detectable ✗  ({hits} hit(s) / {runs} run(s))"
-        print("\n" + "=" * 70)
-        print(f"[detectability] {key}: {verdict}")
-        print("=" * 70 + "\n")
+            verdict, status = (
+                f"✗ not detectable · {hits} hit(s) / {runs} run(s)",
+                "warn",
+            )
+        siamram_log(verdict, phase="PROBE", status=status, label="yolo")
 
     # ------------------------------------------------------------------
     #  Stitch all per-video bbox files into one submission CSV.
@@ -1411,9 +1444,11 @@ def main():
     # everything into a flat DataFrame that the competition scorer expects.
     # ------------------------------------------------------------------
     if args.override_csv:
-        print(
-            "\nRebuilding submission CSV from saved bbox outputs under "
-            f"{args.outputs_dir}..."
+        siamram_log(
+            f"Rebuilding submission CSV from saved outputs under {args.outputs_dir}",
+            phase="CSV",
+            status="build",
+            blank_before=True,
         )
         submission, missing_bbox_keys, rebuilt_prefixes = _compile_submission_from_outputs(
             args=args,
@@ -1442,20 +1477,26 @@ def main():
                 rebuilt_prefixes=rebuilt_prefixes,
                 csv_path=args.submission_csv,
             )
-            print(
-                "Override CSV mode: rebuilt rows from "
-                f"{len(rebuilt_prefixes)} saved output file(s), replaced "
-                f"{replaced_existing_rows} old row(s), and preserved existing "
-                f"CSV rows for {len(missing_bbox_keys)} missing output file(s) "
-                f"({original_rows} -> {len(submission)} rows)."
+            siamram_log(
+                "override mode · rebuilt "
+                f"{len(rebuilt_prefixes)} file(s), replaced "
+                f"{replaced_existing_rows} row(s), preserved "
+                f"{len(missing_bbox_keys)} missing file(s) "
+                f"({original_rows} → {len(submission)} rows)",
+                phase="CSV",
+                status="done",
             )
         else:
-            print(
-                "Override CSV mode: rebuilt the full CSV from "
-                f"{len(csv_rebuild_entries)} saved output file(s)."
+            siamram_log(
+                "override mode · rebuilt full CSV from "
+                f"{len(csv_rebuild_entries)} saved output file(s)",
+                phase="CSV",
+                status="done",
             )
     else:
-        print("\nCompiling submission CSV...")
+        siamram_log(
+            "Compiling submission CSV", phase="CSV", status="build", blank_before=True
+        )
         submission, missing_bbox_keys, _rebuilt_prefixes = _compile_submission_from_outputs(
             args=args,
             entries=run_entries,
@@ -1464,13 +1505,17 @@ def main():
             # This shouldn't happen if inference completed successfully,
             # but we warn instead of crashing so one bad video doesn't
             # destroy the whole submission.
-            print(f"Warning: bbox file missing for {key}")
+            siamram_log(f"bbox file missing for {key}", phase="CSV", status="warn")
 
     submission.to_csv(args.submission_csv, index=False)
 
-    print(f"\nSubmission written to {args.submission_csv}")
+    siamram_log(
+        f"Submission written · {args.submission_csv} · {len(submission)} rows",
+        phase="CSV",
+        status="done",
+        blank_before=True,
+    )
     print(submission.head())
-    print(f"Total rows: {len(submission)}")
 
 
 if __name__ == "__main__":

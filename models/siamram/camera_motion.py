@@ -7,8 +7,6 @@ from typing import Any, Optional, Tuple
 import cv2
 import numpy as np
 
-from .botsort import CameraMotionEstimator as BotSortMotionEstimator
-
 
 class CameraMotionSubsystem:
     def __init__(self, host: Any) -> None:
@@ -24,65 +22,15 @@ class CameraMotionSubsystem:
         Mode selection:
         - classic: original grid+affine RANSAC path (fast).
         - accurate: feature+full-homography path with fallback to classic.
-        - botsort: BoT-SORT-inspired GMC estimator with stronger validity gates.
         """
         scale = self._host._flow_scale
         small = cv2.resize(
             frame, None, fx=scale, fy=scale, interpolation=cv2.INTER_LINEAR
         )
         gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-    
+
         if self._host.disable_camera_motion:
             return None, False, gray
-    
-        if self._host._homography_mode == "botsort":
-            if self._host._botsort_motion_estimator is None:
-                self._host._botsort_motion_estimator = BotSortMotionEstimator(
-                    first_frame=frame,
-                    config=self._host._botsort_motion_cfg,
-                )
-                return None, False, gray
-    
-            ref_bbox = self._host.held_box if self._host.held_box is not None else self._host.current_bbox
-            prev_target_bbox = None
-            if ref_bbox is not None:
-                ref = np.asarray(ref_bbox, dtype=float).reshape(-1)
-                if ref.size >= 4:
-                    prev_target_bbox = (
-                        float(ref[0]),
-                        float(ref[1]),
-                        float(ref[2]),
-                        float(ref[3]),
-                    )
-    
-            step_res = self._host._botsort_motion_estimator.step(
-                current_frame=frame,
-                prev_target_bbox=prev_target_bbox,
-            )
-            H_raw = np.asarray(step_res.transform_original, dtype=np.float64)
-            if H_raw.shape == (3, 3):
-                H = H_raw
-            elif H_raw.shape == (2, 3):
-                H = np.eye(3, dtype=np.float64)
-                H[:2, :] = H_raw
-            else:
-                H = None
-
-            if H is not None and abs(float(H[2, 2])) > 1e-8:
-                H = H / float(H[2, 2])
-
-            if step_res.used_fallback and not self._host._botsort_motion_use_fallback_transform:
-                return None, False, gray
-
-            reliable = bool(step_res.confidence.valid and not step_res.used_fallback)
-            if self._host.debug and (not step_res.confidence.valid):
-                print(
-                    f"[homography:botsort] frame={self._host.frame_idx} "
-                    f"valid=0 reason={step_res.confidence.reason} "
-                    f"fallback={int(step_res.used_fallback)} "
-                    f"runtime_ms={step_res.runtime_ms:.1f}"
-                )
-            return H, reliable, gray
 
         if self._host.prev_gray is None:
             return None, False, gray

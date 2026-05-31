@@ -23,10 +23,6 @@ from utils.utils import (
 )
 
 from ..SiamABC.tracker.SiamABC_Tracker import SiamABCTracker
-from .botsort import (
-    CameraMotionEstimator as BotSortMotionEstimator,
-)
-from .botsort import MotionConfig as BotSortMotionConfig
 from .camera_motion import CameraMotionSubsystem
 from .distractor_mode import DistractorModeSubsystem
 from .memory import AppearanceMemory
@@ -97,6 +93,7 @@ class SiamRAMExperimentTracker:
         osnet_device: str = "auto",
         siamese_feature_source: str = "neck",
         siamese_comparison_mode: str = "xcorr",
+        descriptor_stride: int = 1,
         conf_threshold: float = 0.60,
         occ_siam_reacq_threshold=0.8,
         reacq_threshold: float = 0.55,
@@ -169,40 +166,6 @@ class SiamRAMExperimentTracker:
         homo_max_corners: int = 200,
         homo_inlier_threshold: float = 0.50,
         homography_mode: str = "classic",
-        botsort_motion_model: str = "partial_affine",
-        botsort_motion_work_scale: float = 0.75,
-        botsort_motion_bbox_pad: float = 0.50,
-        botsort_motion_grid_rows: int = 6,
-        botsort_motion_grid_cols: int = 8,
-        botsort_motion_max_corners_per_cell: int = 24,
-        botsort_motion_quality_level: float = 0.01,
-        botsort_motion_min_distance: int = 7,
-        botsort_motion_block_size: int = 7,
-        botsort_motion_lk_win_size: int = 21,
-        botsort_motion_lk_max_level: int = 3,
-        botsort_motion_fb_max_error: float = 1.5,
-        botsort_motion_ransac_reproj_threshold: float = 3.0,
-        botsort_motion_ransac_confidence: float = 0.99,
-        botsort_motion_ransac_max_iters: int = 3000,
-        botsort_motion_min_inliers: int = 30,
-        botsort_motion_min_inlier_ratio: float = 0.35,
-        botsort_motion_max_median_residual: float = 4.0,
-        botsort_motion_min_coverage_cells: int = 6,
-        botsort_motion_max_translation_frac: float = 0.25,
-        botsort_motion_min_scale: float = 0.70,
-        botsort_motion_max_scale: float = 1.40,
-        botsort_motion_max_rotation_deg: float = 25.0,
-        botsort_motion_residual_mad_multiplier: float = 4.0,
-        botsort_motion_residual_min_threshold: int = 18,
-        botsort_motion_residual_max_fraction: float = 0.22,
-        botsort_motion_residual_min_area: int = 12,
-        botsort_motion_dynamic_dilate: int = 9,
-        botsort_motion_feature_detect_interval: int = 2,
-        botsort_motion_min_points_to_redetect: int = 120,
-        botsort_motion_max_track_points: int = 320,
-        botsort_motion_enable_dynamic_mask: bool = True,
-        botsort_motion_residual_update_interval: int = 2,
-        botsort_motion_use_fallback_transform: bool = True,
         shrinkage_min_drop_frac: float = 0.06,
         shrinkage_max_lookback: int = 60,
         velocity_lookback: int = 3,
@@ -420,7 +383,7 @@ class SiamRAMExperimentTracker:
             ekf_meas_noise (any): EKF measurement noise covariance scalar
             homo_max_corners (any): max GFTT feature points used by the accurate homography mode
             homo_inlier_threshold (any): minimum RANSAC inlier ratio to mark a homography as reliable
-            homography_mode (any): camera-motion mode; "classic" uses grid+affine RANSAC, "accurate" uses feature tracking + full homography RANSAC, "botsort" uses BoT-SORT-inspired GMC gating/fallback
+            homography_mode (any): camera-motion mode; "classic" uses grid+affine RANSAC, "accurate" uses feature tracking + full homography RANSAC
             shrinkage_min_drop_frac (any): minimum fractional area drop to trigger shrinkage detection
             shrinkage_max_lookback (any): how many frames back shrinkage and drift detection looks
             velocity_lookback (any): how many frames back finite-difference velocity is computed over
@@ -471,6 +434,14 @@ class SiamRAMExperimentTracker:
             siamese_comparison_mode=siamese_comparison_mode,
         )
 
+        # How often the descriptor backend (OSNet / siamese) is run on the
+        # per-frame normal-tracking memory-admission path. 1 = every confident
+        # frame (default). N>1 only extracts/admits a descriptor every Nth frame
+        # to save compute during stable tracking; the event-driven occlusion /
+        # distractor-recovery paths still run the descriptor every time they need
+        # it, so appearance fidelity is preserved exactly where it matters.
+        self._descriptor_stride = max(1, int(descriptor_stride))
+
         if copile_yolo:
             self.yolo = self.load_yolo_compiled(yolo_weights)
         else:
@@ -501,72 +472,12 @@ class SiamRAMExperimentTracker:
         self.homo_max_corners = homo_max_corners
         self.homo_inlier_threshold = homo_inlier_threshold
         mode = str(homography_mode).strip().lower()
-        if mode in {"bot_sort", "gmc", "botsort_gmc"}:
-            mode = "botsort"
-        if mode not in {"classic", "accurate", "botsort"} and self.debug:
+        if mode not in {"classic", "accurate"} and self.debug:
             print(
                 f"[homography] unsupported mode '{homography_mode}', "
                 "falling back to 'classic'"
             )
-        self._homography_mode = (
-            mode if mode in {"classic", "accurate", "botsort"} else "classic"
-        )
-        bot_model = str(botsort_motion_model).strip().lower()
-        if bot_model not in {"partial_affine", "full_affine", "homography"}:
-            if self.debug:
-                print(
-                    f"[homography:botsort] unsupported model '{botsort_motion_model}', "
-                    "falling back to 'partial_affine'"
-                )
-            bot_model = "partial_affine"
-        self._botsort_motion_cfg = BotSortMotionConfig(
-            model=bot_model,
-            work_scale=float(max(0.10, botsort_motion_work_scale)),
-            bbox_pad=float(max(0.0, botsort_motion_bbox_pad)),
-            grid_rows=max(1, int(botsort_motion_grid_rows)),
-            grid_cols=max(1, int(botsort_motion_grid_cols)),
-            max_corners_per_cell=max(1, int(botsort_motion_max_corners_per_cell)),
-            quality_level=float(max(1e-6, botsort_motion_quality_level)),
-            min_distance=int(max(1, botsort_motion_min_distance)),
-            block_size=int(max(3, botsort_motion_block_size)),
-            lk_win_size=int(max(5, botsort_motion_lk_win_size)),
-            lk_max_level=int(max(0, botsort_motion_lk_max_level)),
-            fb_max_error=float(max(0.0, botsort_motion_fb_max_error)),
-            ransac_reproj_threshold=float(max(0.1, botsort_motion_ransac_reproj_threshold)),
-            ransac_confidence=float(np.clip(botsort_motion_ransac_confidence, 0.50, 0.9999)),
-            ransac_max_iters=int(max(50, botsort_motion_ransac_max_iters)),
-            min_inliers=int(max(4, botsort_motion_min_inliers)),
-            min_inlier_ratio=float(np.clip(botsort_motion_min_inlier_ratio, 0.0, 1.0)),
-            max_median_residual=float(max(0.0, botsort_motion_max_median_residual)),
-            min_coverage_cells=int(max(1, botsort_motion_min_coverage_cells)),
-            max_translation_frac=float(max(0.0, botsort_motion_max_translation_frac)),
-            min_scale=float(max(0.01, botsort_motion_min_scale)),
-            max_scale=float(max(0.02, botsort_motion_max_scale)),
-            max_rotation_deg=float(max(0.0, botsort_motion_max_rotation_deg)),
-            residual_mad_multiplier=float(max(0.1, botsort_motion_residual_mad_multiplier)),
-            residual_min_threshold=int(max(1, botsort_motion_residual_min_threshold)),
-            residual_max_fraction=float(np.clip(botsort_motion_residual_max_fraction, 0.0, 1.0)),
-            residual_min_area=int(max(1, botsort_motion_residual_min_area)),
-            dynamic_dilate=int(max(1, botsort_motion_dynamic_dilate)),
-            feature_detect_interval=int(max(1, botsort_motion_feature_detect_interval)),
-            min_points_to_redetect=int(max(4, botsort_motion_min_points_to_redetect)),
-            max_track_points=int(max(8, botsort_motion_max_track_points)),
-            enable_dynamic_mask=bool(botsort_motion_enable_dynamic_mask),
-            residual_update_interval=int(max(1, botsort_motion_residual_update_interval)),
-        )
-        if self._botsort_motion_cfg.max_scale <= self._botsort_motion_cfg.min_scale:
-            self._botsort_motion_cfg.max_scale = self._botsort_motion_cfg.min_scale + 1e-3
-        if (
-            self._botsort_motion_cfg.min_points_to_redetect
-            > self._botsort_motion_cfg.max_track_points
-        ):
-            self._botsort_motion_cfg.min_points_to_redetect = (
-                self._botsort_motion_cfg.max_track_points
-            )
-        self._botsort_motion_use_fallback_transform = bool(
-            botsort_motion_use_fallback_transform
-        )
-        self._botsort_motion_estimator: Optional[BotSortMotionEstimator] = None
+        self._homography_mode = mode if mode in {"classic", "accurate"} else "classic"
 
         self.shrinkage_min_drop_frac = shrinkage_min_drop_frac
         self.shrinkage_max_lookback = shrinkage_max_lookback
@@ -1164,13 +1075,6 @@ class SiamRAMExperimentTracker:
             interpolation=cv2.INTER_LINEAR,
         )
         self.prev_gray = cv2.cvtColor(small_init, cv2.COLOR_BGR2GRAY)
-        if self._homography_mode == "botsort":
-            self._botsort_motion_estimator = BotSortMotionEstimator(
-                first_frame=proc_frame,
-                config=self._botsort_motion_cfg,
-            )
-        else:
-            self._botsort_motion_estimator = None
 
         self.init_frame = proc_frame.copy()
         self.init_bbox = bbox.copy()
@@ -2568,9 +2472,11 @@ class SiamRAMExperimentTracker:
 
         self.velocity = self._compute_velocity_from_history(pred_bbox)
 
+        descriptor_due = (self.frame_idx % self._descriptor_stride) == 0
         if (
             score >= effective_threshold
             and self._distractor_mode_memory_freeze_left <= 0
+            and descriptor_due
         ):
             desc = _extract_descriptor(frame, pred_bbox)
             if desc is not None:

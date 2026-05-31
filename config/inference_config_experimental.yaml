@@ -2,7 +2,7 @@
 weights_path: "/home/moha/SiamRAM/checkpoints/inference_checkpoint.pth"
 
 # Build and run a TensorRT engine instead of plain PyTorch (GPU-only).
-make_trt_engine: False
+make_trt_engine: True
 
 # Which SiamRAM implementation to use ("experiment" enables jump-rejection logic).
 ram_tracker_impl: "experiment"
@@ -76,7 +76,7 @@ tracker:
   N: 40
   # Dynamic-template refresh cadence during warm-up frames.
   # Set equal to N to keep the same cadence throughout the sequence.
-  warm_up_n: 6
+  warm_up_n: 40
   # Length of the rolling template-memory window.
   memory_window_size: 30
   # Confidence required to admit a new dynamic-template update.
@@ -187,6 +187,11 @@ ram_tracker:
     osnet_device: "auto"
     # Cap on candidates passed into OSNet per call (0 = no cap).
     osnet_max_candidate_batch: 5
+    # How often the descriptor backend runs on the per-frame normal-tracking
+    # memory-admission path. 1 = every confident frame (default). N>1 only
+    # extracts/admits a descriptor every Nth frame to save compute during stable
+    # tracking. Occlusion / distractor-recovery descriptor calls are unaffected.
+    descriptor_stride: 1
 
   # NOTE: normal-tracking loss-detection knobs (conf_threshold, entry_patience,
   # entry_patience_high_motion, enter_occlusion_on_loss, nudge_alpha) now live
@@ -197,81 +202,10 @@ ram_tracker:
   # ---------------------------------------------------------------------------
   camera_motion:
     core:
-      # Which estimator: "classic" (fast), "accurate" (slower), or "botsort" (BoT-SORT-inspired).
+      # Which estimator: "classic" (fast) or "accurate" (slower).
       homography_mode: "classic"
       # Hard-off switch for all camera-motion estimation (debug only).
-      disable_camera_motion: false
-
-    # BoT-SORT options — only consulted when homography_mode == "botsort".
-    botsort:
-      # Transform family: "partial_affine", "full_affine", or "homography".
-      botsort_motion_model: "partial_affine"
-      # Downscale factor before feature tracking (lower = faster, less detail).
-      botsort_motion_work_scale: 0.65
-      # Padding fraction around the target bbox when building the dynamic exclusion mask.
-      botsort_motion_bbox_pad: 0.5
-      # Grid rows used to distribute corner detection across the frame.
-      botsort_motion_grid_rows: 5
-      # Grid columns for corner-detection distribution.
-      botsort_motion_grid_cols: 7
-      # Max corners detected per grid cell.
-      botsort_motion_max_corners_per_cell: 16
-      # Shi-Tomasi corner-quality cutoff (lower = more corners, noisier).
-      botsort_motion_quality_level: 0.01
-      # Minimum spacing (px) between detected corners.
-      botsort_motion_min_distance: 7
-      # Neighbourhood block size used for corner-quality scoring.
-      botsort_motion_block_size: 7
-      # Lucas-Kanade optical-flow window size (px).
-      botsort_motion_lk_win_size: 17
-      # Pyramid depth — higher tolerates larger frame-to-frame motion.
-      botsort_motion_lk_max_level: 2
-      # Forward-backward consistency error threshold to filter bad matches.
-      botsort_motion_fb_max_error: 1.5
-      # RANSAC reprojection error threshold (px).
-      botsort_motion_ransac_reproj_threshold: 3.0
-      # RANSAC target confidence level.
-      botsort_motion_ransac_confidence: 0.99
-      # Max RANSAC iterations per transform estimate.
-      botsort_motion_ransac_max_iters: 1500
-      # Minimum number of inliers required to accept the fit.
-      botsort_motion_min_inliers: 24
-      # Minimum inlier ratio required to accept the fit.
-      botsort_motion_min_inlier_ratio: 0.35
-      # Max median residual allowed for an accepted transform.
-      botsort_motion_max_median_residual: 4.0
-      # Minimum number of grid cells with inliers (forces spatial spread).
-      botsort_motion_min_coverage_cells: 5
-      # Reject the fit if implied translation exceeds this fraction of the frame.
-      botsort_motion_max_translation_frac: 0.25
-      # Reject if implied camera zoom-out is below this factor.
-      botsort_motion_min_scale: 0.7
-      # Reject if implied camera zoom-in is above this factor.
-      botsort_motion_max_scale: 1.4
-      # Reject if implied rotation exceeds this many degrees.
-      botsort_motion_max_rotation_deg: 25.0
-      # MAD multiplier used in residual-based outlier rejection.
-      botsort_motion_residual_mad_multiplier: 4.0
-      # Floor for residual rejection threshold (prevents over-tight cuts on quiet frames).
-      botsort_motion_residual_min_threshold: 18
-      # Max fraction of frame flagged as high-residual before bailing out.
-      botsort_motion_residual_max_fraction: 0.22
-      # Minimum contour area (px) considered in residual-mask processing.
-      botsort_motion_residual_min_area: 12
-      # Dilation size (px) applied to the dynamic residual mask.
-      botsort_motion_dynamic_dilate: 7
-      # How many frames between fresh corner-detection passes.
-      botsort_motion_feature_detect_interval: 2
-      # Re-detect features when active points drop below this count.
-      botsort_motion_min_points_to_redetect: 96
-      # Hard cap on the number of active feature points.
-      botsort_motion_max_track_points: 260
-      # Enable dynamic residual masking inside motion estimation.
-      botsort_motion_enable_dynamic_mask: true
-      # Frame interval between residual-mask updates.
-      botsort_motion_residual_update_interval: 2
-      # When the fit fails, fall back to the previous (or identity) transform.
-      botsort_motion_use_fallback_transform: true
+      disable_camera_motion: False
 
     # When the camera is shaking a lot, optionally skip distractor/occlusion entry
     # to avoid false triggers caused by the camera moving rather than the target.
@@ -293,7 +227,7 @@ ram_tracker:
     template_adapt:
       # Master switch. false = always use the base tracker.N / memory_window_size
       # (zero behavior change; the heavy-motion signal isn't even computed early).
-      camera_motion_template_adapt_enabled: True
+      camera_motion_template_adapt_enabled: False
       # select_representatives() cadence (dynamic template re-picked every N frames) under heavy motion.
       camera_motion_high_N: 15
       # Memory window length (frames kept for dynamic-template selection) under heavy motion.
@@ -321,7 +255,7 @@ ram_tracker:
     # over N/window). Disabled by default; flip the first flag to try it.
     template_rate:
       # Master switch for the adaptive rate mode.
-      template_rate_auto_enabled: True
+      template_rate_auto_enabled: False
       # Fast end (motion high): cadence + window when updating fast.
       template_rate_auto_N_fast: 20
       template_rate_auto_window_fast: 20

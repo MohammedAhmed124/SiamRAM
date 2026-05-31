@@ -1062,13 +1062,26 @@ def run_inference(
                     tgt_diag = max(
                         1.0, float(np.hypot(float(bbox[2]), float(bbox[3])))
                     )
-                    tgt_ref_norm = float(
-                        getattr(tracker, "_template_rate_auto_target_ref_norm", 0.15)
-                    )
-                    tgt_fast = (
-                        tgt_ref_norm > 0.0
-                        and tgt_speed_disp >= tgt_ref_norm * tgt_diag
-                    )
+                    # When the binary target-motion adapt is on, "fast" is the
+                    # absolute px/frame threshold it gates on; otherwise fall back
+                    # to template_rate_auto's bbox-diagonal reference.
+                    if getattr(
+                        tracker, "_target_motion_template_adapt_enabled", False
+                    ):
+                        tm_thr = float(
+                            getattr(tracker, "_target_motion_high_px_threshold", 0.0)
+                        )
+                        tgt_fast = tm_thr > 0.0 and tgt_speed_disp >= tm_thr
+                    else:
+                        tgt_ref_norm = float(
+                            getattr(
+                                tracker, "_template_rate_auto_target_ref_norm", 0.15
+                            )
+                        )
+                        tgt_fast = (
+                            tgt_ref_norm > 0.0
+                            and tgt_speed_disp >= tgt_ref_norm * tgt_diag
+                        )
                     _draw_target_motion_pill(
                         canvas, fast=bool(tgt_fast), speed=tgt_speed_disp
                     )
@@ -1233,11 +1246,18 @@ def run_inference(
                     n_cur = int(getattr(inner_tracker, "N", 0))
                     win_cur = int(getattr(inner_tracker, "memory_window_size", 0))
                     tr_auto = getattr(tracker, "_template_rate_auto", None)
-                    tr_l2 = (
-                        f"(auto) motion={tr_auto.motion:.2f}"
-                        if tr_auto is not None
-                        else "(fixed)"
-                    )
+                    if tr_auto is not None:
+                        tr_l2 = f"(auto) motion={tr_auto.motion:.2f}"
+                    elif getattr(
+                        tracker, "_target_motion_template_adapt_enabled", False
+                    ):
+                        spd = float(getattr(tracker, "_last_target_motion_px", 0.0))
+                        thr = float(
+                            getattr(tracker, "_target_motion_high_px_threshold", 0.0)
+                        )
+                        tr_l2 = f"(tgt) {spd:.0f}>={thr:.0f}px/f"
+                    else:
+                        tr_l2 = "(fixed)"
                     stack_y = _stack_box(
                         stack_y, f"Tmpl rate: N={n_cur} win={win_cur}", tr_l2, (0, 210, 140)
                     )

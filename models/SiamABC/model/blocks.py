@@ -11,8 +11,11 @@ from typing import Any, List, Tuple, Union
 
 import torch
 import torch.nn as nn
-from mobile_cv.model_zoo.models.fbnet_v2 import fbnet
 from torchvision.models.resnet import resnet50
+from utils.console import quiet_external_logs
+
+with quiet_external_logs():
+    from mobile_cv.model_zoo.models.fbnet_v2 import fbnet
 
 from .adaptive_batch_norm import AdaptiveBatchNorm
 

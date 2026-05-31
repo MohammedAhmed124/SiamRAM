@@ -91,7 +91,7 @@ ram_tracker:
   # IoU with the tracked box for a YOLO detection to count as a hit.
   yolo_detectability_iou_thr: 0.3
 
-  # Descriptor backend selector. Supported: "osnet".
+  # Descriptor backend selector. Supported: "osnet", "siamese", "pixel descriptors".
   descriptor_backend: "osnet"
   # OSNet model name from torchreid (examples: osnet_x1_0, osnet_x0_75, osnet_ain_x1_0).
   osnet_model_name: "osnet_x1_0"

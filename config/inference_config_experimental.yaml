@@ -1,8 +1,24 @@
 # Path to the trained SiamABC checkpoint loaded at startup.
 weights_path: "/home/moha/SiamRAM/checkpoints/inference_checkpoint.pth"
 
-# Build and run a TensorRT engine instead of plain PyTorch (GPU-only).
-make_trt_engine: True
+# =============================================================================
+# trt_engine: all TensorRT / FP16 options (GPU-only), grouped in one place.
+# =============================================================================
+trt_engine:
+  # TRT-compile the SiamABC backbone. Master switch for the SiamABC engine.
+  trt_compile_siamabc: False
+  # FP16 precision for the SiamABC TRT engine (build + execution).
+  fp16: False
+  # OSNet-only descriptor acceleration. Ignored unless descriptor_backend == "osnet".
+  trt_compile_osnet: False
+  # OSNet-only FP16 descriptor inference. Ignored unless descriptor_backend == "osnet".
+  osnet_fp16: False
+  # OSNet-only async overlap. Pixel descriptors are CPU-only and synchronous.
+  osnet_async_overlap: False
+  # Test-time-augmentation blend factor inside the SiamABC TRT wrapper.
+  lambda_tta: 0.1
+  # GPU device index to build / run engines on.
+  cuda_id: 0
 
 # Which SiamRAM implementation to use ("experiment" enables jump-rejection logic).
 ram_tracker_impl: "experiment"
@@ -14,18 +30,8 @@ ram_tracker_impl: "experiment"
 model:
   # Python import path of the model class Hydra should instantiate.
   _target_: models.SiamABC.model.SiamABC.SiamABCNet
-  # Backbone family for the shared feature extractor.
-  backbone: custom_fbnet
   # Start from ImageNet pretrained weights for backbone layers that support it.
   pretrained: true
-  # Input image channels (3 = RGB).
-  num_channels: 3
-  # Enable an internal feature alignment correction step.
-  align: false
-  # Image size assumed by preprocessing.
-  img_size: 256
-  # Net downsampling factor of feature map relative to input.
-  stride: 2
   # Conv block flavour used across stages (sep_conv = depthwise separable).
   conv_block: sep_conv
   # Number of stacked tower blocks in the prediction head.
@@ -43,83 +49,41 @@ model:
 # =============================================================================
 tracker:
   _target_: models.SiamABC.tracker.SiamABC_Tracker.SiamABCTracker
-  # Penalty strength on scale / aspect changes — higher = more conservative.
-  penalty_k: 0.062
-  # Cosine-window bias on the score map — higher pulls picks toward the centre.
-  window_influence: 0.38
-  # How fast tracker state catches up to new observations (EMA rate).
-  lr: 0.4
-  # Window function used for spatial score smoothing.
-  windowing: cosine
-  # Effective stride mapping score-map cells back to pixels.
-  total_stride: 16
-  # Score-map spatial resolution (NxN candidate grid).
-  score_size: 16
+  # Spatial prior applied to the score map ("cosine" biases picks toward the crop centre).
+  score_window_type: cosine
+  # Pixel stride between neighbouring score-grid cells.
+  score_grid_stride: 16
+  # Score-grid side length (16 means a 16x16 candidate grid).
+  score_grid_size: 16
 
   # Allow the dynamic template to evolve across frames.
-  dynamic_update: true
-  # Use the auxiliary similarity score in candidate ranking.
-  similarity_score: false
-  # Feature stride used in coordinate math.
-  stride: 2
+  template_update_enabled: true
   # Apply extra temporal smoothing on the predicted trajectory.
-  smooth: false
+  bbox_smoothing_enabled: false
   # Offset factor when extracting the template crop around the target centre.
-  template_bbox_offset: 0.2
+  template_context_padding: 0.2
   # Multiplier deciding how much context around target is included in search crop.
-  search_context: 2
+  search_context_scale: 2
   # Pixel size of the search crop fed to the model.
-  instance_size: 256
+  search_crop_size: 256
   # Pixel size of the template crop.
-  template_size: 128
-  # Number of proposals scored per update.
-  N: 40
-  # Dynamic-template refresh cadence during warm-up frames.
-  # Set equal to N to keep the same cadence throughout the sequence.
-  warm_up_n: 40
-  # Length of the rolling template-memory window.
-  memory_window_size: 30
-  # Confidence required to admit a new dynamic-template update.
-  dynamic_update_threshold: 0.8
+  template_crop_size: 128
+  # Frames between dynamic-template re-selection during steady-state tracking.
+  template_update_interval: 40
+  # Frames between dynamic-template re-selection during warm-up.
+  warmup_template_update_interval: 2
+  # Number of recent confident frames kept for dynamic-template selection.
+  template_memory_window: 30
+  # Confidence required before a frame can enter the dynamic-template memory.
+  template_admit_conf_threshold: 0.83
   # Lower clamp on the running-confidence smoother.
-  running_confidence_floor_value: 0.50
-  # IoU required for continuity / quality checks.
-  iou_threshold: 0.6
-  # First N frames treated as warmup (relaxed gating).
-  warmup_frames: 35
-  # During warm-up cadence ticks (`warm_up_n`), only the latest
-  # `warmup_window_size` memory entries are considered for template refresh.
-  warmup_window_size: 8
-  # Multiply candidate scores by predicted IoU quality.
-  use_iou_score: false
-  # Exponent applied to the IoU score component.
-  iou_power: 1.0
-  # Reject candidates that fail an IoU consistency gate.
-  use_iou_gate: False
-  # Apply the IoU gate at final score-pick time.
-  use_iou_gate_for_score: false
-  # Skip the IoU gate during the first N frames.
-  iou_gate_warmup_frames: 20
-  # EMA smoothing factor for the IoU gate signal.
-  iou_gate_ema_beta: 0.9
-  # Use the smoothed gate value instead of the raw per-frame one.
-  iou_gate_use_ema: true
-  # IoU value below which the gate rejects the candidate.
-  iou_gate_threshold: 0.2
-  # When uncertain, block the update (true) instead of letting it pass (false).
-  iou_gate_fail_closed: false
-
-
-# =============================================================================
-# trt_engine: TensorRT-only options (used when make_trt_engine == True).
-# =============================================================================
-trt_engine:
-  # Test-time-augmentation blend factor inside the TRT wrapper.
-  lambda_tta: 0.1
-  # Enable FP16 precision for TensorRT engine build + execution.
-  fp16: True
-  # GPU device index to build / run on.
-  cuda_id: 0
+  running_confidence_floor: 0.50
+  # IoU required between consecutive boxes before admitting a template update.
+  template_admit_iou_threshold: 0.6
+  # First frames treated as template warm-up.
+  template_warmup_frames: 5
+  # During warm-up, consider only this many recent memory entries.
+  warmup_template_memory_window: 8
 
 
 # =============================================================================
@@ -167,7 +131,10 @@ ram_tracker:
   # descriptor: which appearance model is used for re-ID & DRM ranking.
   # ---------------------------------------------------------------------------
   descriptor:
-    # Which appearance model: "osnet" (strong person re-ID) or "siamese" (reuse SiamABC features, faster).
+    # Which appearance model:
+    #   "osnet"             = strong person re-ID, slower.
+    #   "siamese"           = reuse SiamABC features.
+    #   "pixel descriptors" = legacy grayscale+HSV descriptor from commit 3f01ab9, fastest.
     descriptor_backend: "osnet"
     # If siamese: which layer to pool the embedding from ("neck" ~256-d, "encoder" ~1024-d).
     siamese_feature_source: "neck"
@@ -178,7 +145,7 @@ ram_tracker:
     #                  (keeps spatial detail, but no translation tolerance).
     siamese_comparison_mode: "similarity"
     # Which OSNet variant to use.
-    osnet_model_name: "osnet_x0_75"
+    osnet_model_name: "osnet_x0_25"
     # Which OSNet pretrained weights preset to load ("" = use default).
     osnet_pretrained_checkpoint: ""
     # Optional local OSNet weights file (overrides the preset above).
@@ -187,11 +154,13 @@ ram_tracker:
     osnet_device: "auto"
     # Cap on candidates passed into OSNet per call (0 = no cap).
     osnet_max_candidate_batch: 5
+    # NOTE: OSNet FP16 / TRT compilation are configured under the top-level
+    # `trt_engine` block (osnet_fp16, trt_compile_osnet).
     # How often the descriptor backend runs on the per-frame normal-tracking
     # memory-admission path. 1 = every confident frame (default). N>1 only
     # extracts/admits a descriptor every Nth frame to save compute during stable
     # tracking. Occlusion / distractor-recovery descriptor calls are unaffected.
-    descriptor_stride: 1
+    descriptor_stride: 2
 
   # NOTE: normal-tracking loss-detection knobs (conf_threshold, entry_patience,
   # entry_patience_high_motion, enter_occlusion_on_loss, nudge_alpha) now live
@@ -229,14 +198,14 @@ ram_tracker:
       # (zero behavior change; the heavy-motion signal isn't even computed early).
       camera_motion_template_adapt_enabled: False
       # select_representatives() cadence (dynamic template re-picked every N frames) under heavy motion.
-      camera_motion_high_N: 15
+      camera_motion_high_N: 20
       # Memory window length (frames kept for dynamic-template selection) under heavy motion.
       # Shrinking drops the oldest memory frames; deques are rebuilt only on an actual change.
-      camera_motion_high_memory_window_size: 15
+      camera_motion_high_memory_window_size: 20
       # Dynamic-template ADMISSION GATES under heavy motion (-1 = leave unchanged).
       # Score gate: min confidence to admit a dynamic-template update. Raising it
       # under motion avoids learning blurred/low-quality templates during pans.
-      camera_motion_high_dynamic_update_threshold: 0.5
+      camera_motion_high_dynamic_update_threshold: 0.7
       # Continuity gate: min IoU(pred, prev) to admit an update. Raising it under
       # motion rejects large jumpy boxes; lowering it tolerates fast displacement.
       camera_motion_high_iou_threshold: 0.5
@@ -244,6 +213,29 @@ ram_tracker:
       # camera motion calms, before reverting to base (handles the brief blur /
       # settle right after a pan ends). 0 = revert the instant motion drops.
       camera_motion_template_adapt_linger_frames: 30
+
+    # Binary dynamic-template adapt on the TARGET's own motion (the object speed
+    # in full-frame px/frame -- the exact value shown in the target-motion pill),
+    # instead of camera motion. When the object moves faster than the px
+    # threshold below, N (re-selection cadence) and the memory window switch to
+    # the high-motion values, reverting (after an optional linger) when it slows.
+    # Standalone: mutually exclusive with template_adapt / template_rate
+    # (precedence: template_rate > target_motion_adapt > template_adapt).
+    # Disabled by default.
+    target_motion_adapt:
+      # Master switch. false = always use base tracker.N / memory_window_size.
+      target_motion_template_adapt_enabled: True
+      # Object speed (full-frame px/frame, as shown in the pill) at/above which
+      # the high-motion template params kick in.
+      target_motion_high_px_threshold: 22.0
+      # select_representatives() cadence (template re-picked every N frames) when fast.
+      target_motion_high_N: 15
+      # Memory window length (frames kept for template selection) when fast.
+      # Shrinking drops the oldest memory frames; deques rebuilt only on a change.
+      target_motion_high_memory_window_size: 15
+      # Keep the high-motion params lingering this many frames after the object
+      # slows, before reverting to base. 0 = revert the instant it slows.
+      target_motion_template_adapt_linger_frames: 0
 
     # Adaptive dynamic-template update rate. A SMOOTH alternative to the binary
     # template_adapt block above: instead of a hard slow/fast switch on a camera
@@ -453,7 +445,7 @@ ram_tracker:
         # How far below the EMA the margin sits (bigger = more permissive / catches more).
         drm_margin_auto_delta: 0.05
         # EMA smoothing of the self-score (higher = reacts faster, noisier).
-        drm_margin_auto_ema_alpha: 0.7
+        drm_margin_auto_ema_alpha: 0.2
         # Sample the target self-score every N confident frames.
         drm_margin_auto_n_frames: 10
         # Margin used before enough samples accrue (acts as a fixed warmup margin).

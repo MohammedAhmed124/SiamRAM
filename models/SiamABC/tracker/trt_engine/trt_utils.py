@@ -3,7 +3,11 @@ from typing import Tuple
 
 import torch
 import torch.nn as nn
-import torch_tensorrt
+from utils.console import quiet_external_logs, silence_noisy_libraries
+
+silence_noisy_libraries()
+with quiet_external_logs():
+    import torch_tensorrt
 
 from ...model.SiamABC import SiamABCNet
 

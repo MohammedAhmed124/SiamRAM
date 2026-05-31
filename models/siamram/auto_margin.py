@@ -63,6 +63,16 @@ class AutoDrmMargin:
         self._last_frame: Optional[int] = None
         self.value: float = self.warmup
 
+    @property
+    def ema(self) -> Optional[float]:
+        """Current EMA of the target self-score (None before the first sample)."""
+        return self._ema
+
+    @property
+    def samples(self) -> int:
+        """Number of self-score samples folded in so far."""
+        return self._samples
+
     def due(self, frame_idx: int) -> bool:
         """Whether enough frames have elapsed to take a fresh sample."""
         return (

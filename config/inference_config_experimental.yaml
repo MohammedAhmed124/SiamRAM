@@ -35,7 +35,7 @@ model:
   # How many backbone stages to keep — caps depth of feature extraction.
   max_layer: 4
   # Build the auxiliary IoU prediction head on top.
-  build_iou_head: true
+  build_iou_head: False
 
 
 # =============================================================================
@@ -80,7 +80,7 @@ tracker:
   # Length of the rolling template-memory window.
   memory_window_size: 30
   # Confidence required to admit a new dynamic-template update.
-  dynamic_update_threshold: 0.80
+  dynamic_update_threshold: 0.8
   # Lower clamp on the running-confidence smoother.
   running_confidence_floor_value: 0.50
   # IoU required for continuity / quality checks.
@@ -134,7 +134,7 @@ ram_tracker:
   # ---------------------------------------------------------------------------
   runtime:
     # Print verbose diagnostics from the tracker (useful when debugging).
-    debug: false
+    debug: False
     # Downscale every input frame so its long edge is at most this many px (keeps things fast on big videos).
     max_proc_long_edge: 1280
 
@@ -176,7 +176,7 @@ ram_tracker:
     #   "pooled"     = global-avg-pool to a vector, then cosine (spatial info discarded).
     #   "similarity" = flatten the whole feature map to a vector, then cosine
     #                  (keeps spatial detail, but no translation tolerance).
-    siamese_comparison_mode: "xcorr"
+    siamese_comparison_mode: "similarity"
     # Which OSNet variant to use.
     osnet_model_name: "osnet_x0_75"
     # Which OSNet pretrained weights preset to load ("" = use default).
@@ -295,10 +295,10 @@ ram_tracker:
       # (zero behavior change; the heavy-motion signal isn't even computed early).
       camera_motion_template_adapt_enabled: True
       # select_representatives() cadence (dynamic template re-picked every N frames) under heavy motion.
-      camera_motion_high_N: 5
+      camera_motion_high_N: 15
       # Memory window length (frames kept for dynamic-template selection) under heavy motion.
       # Shrinking drops the oldest memory frames; deques are rebuilt only on an actual change.
-      camera_motion_high_memory_window_size: 5
+      camera_motion_high_memory_window_size: 15
       # Dynamic-template ADMISSION GATES under heavy motion (-1 = leave unchanged).
       # Score gate: min confidence to admit a dynamic-template update. Raising it
       # under motion avoids learning blurred/low-quality templates during pans.
@@ -310,6 +310,31 @@ ram_tracker:
       # camera motion calms, before reverting to base (handles the brief blur /
       # settle right after a pan ends). 0 = revert the instant motion drops.
       camera_motion_template_adapt_linger_frames: 30
+
+    # Adaptive dynamic-template update rate. A SMOOTH alternative to the binary
+    # template_adapt block above: instead of a hard slow/fast switch on a camera
+    # heavy/calm flag, it glides N (re-selection cadence) and memory_window_size
+    # along a range from an EMA of combined camera + target motion. Slow & steady
+    # scene -> slow end (big N / big window = very stable averaging); camera OR
+    # target fast -> fast end (small N / small window = snap to latest look).
+    # When enabled this TAKES OVER from template_adapt above (they would fight
+    # over N/window). Disabled by default; flip the first flag to try it.
+    template_rate:
+      # Master switch for the adaptive rate mode.
+      template_rate_auto_enabled: True
+      # Fast end (motion high): cadence + window when updating fast.
+      template_rate_auto_N_fast: 20
+      template_rate_auto_window_fast: 20
+      # Slow end (motion low / steady): cadence + window when updating slowly.
+      template_rate_auto_N_slow: 50
+      template_rate_auto_window_slow: 50
+      # EMA smoothing of the 0..1 motion signal (higher = snappier, noisier).
+      template_rate_auto_ema_alpha: 0.2
+      # Camera motion (bbox-diagonal units) that counts as "fully fast".
+      # <= 0 reuses camera_motion_heavy_norm_threshold as the reference.
+      template_rate_auto_cam_ref_norm: -1.0
+      # Target speed (bbox-diagonals per frame) that counts as "fully fast".
+      template_rate_auto_target_ref_norm: 0.15
 
   # ---------------------------------------------------------------------------
   # gmc_prior: warp the previous bbox forward by camera motion so SiamABC
@@ -441,10 +466,10 @@ ram_tracker:
       # Master switch. When false, occlusion recovery behaves exactly as before.
       yolo_detectability_enabled: true
       # N: how many YOLO probe attempts to run during early tracking.
-      yolo_detectability_probe_attempts: 6
+      yolo_detectability_probe_attempts: 12
       # Frames between probe attempts. Probe spans ~ attempts x stride frames,
       # so this knob controls how long the detectability check takes.
-      yolo_detectability_probe_stride: 3
+      yolo_detectability_probe_stride: 10
       # Hits (probes that land a box on the target) needed to call it detectable.
       yolo_detectability_min_hits: 1
       # IoU with the tracked box for a YOLO detection to count as a hit.
@@ -480,9 +505,27 @@ ram_tracker:
         # Minimum support count required to promote a bank entry.
         drm_mmin: 3
         # Max entries in the DRM bank.
-        drm_capacity: 20
+        drm_capacity: 50
         # Required margin between the DRM winner and runner-up.
-        drm_margin: 0.58
+        # "auto" = adapt per video: EMA of the genuine target's own composite
+        # self-score, minus delta, clamped to [min, max]. A number (e.g. 0.58)
+        # keeps the fixed legacy behavior and ignores every drm_margin_auto_* knob.
+        drm_margin: auto
+        # --- adaptive margin knobs (only used when drm_margin == "auto") ---
+        # Lower clamp: the tuned margin never drops below this.
+        drm_margin_auto_min: 0.5
+        # Upper clamp: the tuned margin never rises above this.
+        drm_margin_auto_max: 0.80
+        # How far below the EMA the margin sits (bigger = more permissive / catches more).
+        drm_margin_auto_delta: 0.05
+        # EMA smoothing of the self-score (higher = reacts faster, noisier).
+        drm_margin_auto_ema_alpha: 0.7
+        # Sample the target self-score every N confident frames.
+        drm_margin_auto_n_frames: 10
+        # Margin used before enough samples accrue (acts as a fixed warmup margin).
+        drm_margin_auto_warmup: 0.70
+        # Samples required before the margin starts adapting away from warmup.
+        drm_margin_auto_min_samples: 5
         # Skip the DRM update if quality score is already this high.
         drm_skip_threshold: 23
         # Number of top candidates evaluated per DRM step.

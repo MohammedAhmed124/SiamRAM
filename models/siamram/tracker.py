@@ -234,6 +234,22 @@ class SiamRAMExperimentTracker:
         # Keep high-motion template behavior for this many frames after motion
         # calms before reverting to base (0 = revert immediately).
         camera_motion_template_adapt_linger_frames: int = 0,
+        # Adaptive dynamic-template update rate. When template_rate_auto_enabled
+        # is True, N and memory_window_size glide between the slow-end and
+        # fast-end values below based on an EMA of combined camera+target motion,
+        # and this path TAKES OVER from the binary camera_motion_template_adapt.
+        # All defaults are inert until the flag is set, so legacy behavior holds.
+        template_rate_auto_enabled: bool = False,
+        template_rate_auto_N_fast: int = 3,
+        template_rate_auto_N_slow: int = 40,
+        template_rate_auto_window_fast: int = 8,
+        template_rate_auto_window_slow: int = 40,
+        template_rate_auto_ema_alpha: float = 0.2,
+        # Camera motion (in bbox-diagonal units) that counts as "fully fast".
+        # <= 0 reuses camera_motion_heavy_norm_threshold as the reference.
+        template_rate_auto_cam_ref_norm: float = -1.0,
+        # Target speed (bbox-diagonals per frame) that counts as "fully fast".
+        template_rate_auto_target_ref_norm: float = 0.15,
         early_occlusion_entry_n_frames: int = -1,
         early_occlusion_max_frames: int = -1,
         occlusion_use_ram_until_drm_full: bool = True,
@@ -614,6 +630,28 @@ class SiamRAMExperimentTracker:
         self._base_template_window: Optional[int] = None
         self._base_dynamic_update_threshold: Optional[float] = None
         self._base_iou_threshold: Optional[float] = None
+
+        # Adaptive dynamic-template update rate (template_rate_auto). None unless
+        # the mode is enabled, so _normal_update's adapt block and every helper
+        # below short-circuit and the legacy / binary-adapt paths are unchanged.
+        self._template_rate_auto = None
+        self._template_rate_auto_cam_ref_norm = float(template_rate_auto_cam_ref_norm)
+        self._template_rate_auto_target_ref_norm = max(
+            0.0, float(template_rate_auto_target_ref_norm)
+        )
+        if bool(template_rate_auto_enabled):
+            from .auto_template_rate import AutoTemplateRate
+
+            self._template_rate_auto = AutoTemplateRate(
+                n_fast=template_rate_auto_N_fast,
+                n_slow=template_rate_auto_N_slow,
+                window_fast=template_rate_auto_window_fast,
+                window_slow=template_rate_auto_window_slow,
+                ema_alpha=template_rate_auto_ema_alpha,
+            )
+        # Last frame's camera-motion magnitude in bbox-diagonal units, published
+        # by is_heavy_camera_motion for the auto-rate controller (and debug).
+        self._last_cam_motion_norm: float = 0.0
         self._early_occlusion_entry_n_frames = int(early_occlusion_entry_n_frames)
         self._early_occlusion_max_frames = int(early_occlusion_max_frames)
         self._occlusion_use_ram_until_drm_full = bool(
@@ -2195,23 +2233,7 @@ class SiamRAMExperimentTracker:
             else self._base_template_window
         )
 
-        if int(getattr(tr, "N", desired_n)) != desired_n:
-            tr.N = desired_n
-
-        if int(getattr(tr, "memory_window_size", desired_w)) != desired_w:
-            tr.memory_window_size = desired_w
-            tr.all_memory_imgs = deque(tr.all_memory_imgs, maxlen=desired_w)
-            tr.classification_scores = deque(
-                tr.classification_scores, maxlen=desired_w
-            )
-            if tr.classification_scores:
-                scores = np.array(tr.classification_scores, dtype=np.float16)
-                tr._best_idx = int(np.argmax(scores))
-                tr._best_score = float(scores[tr._best_idx])
-            else:
-                tr._best_idx = 0
-                tr._best_score = 0.5
-            tr._is_full = len(tr.classification_scores) == desired_w
+        self._set_template_N_window(desired_n, desired_w)
 
         # Dynamic-update admission gates (sentinel < 0 => leave the gate alone).
         if self._camera_motion_high_dynamic_update_threshold >= 0.0:
@@ -2231,6 +2253,73 @@ class SiamRAMExperimentTracker:
             )
             if float(tr.tracking_config.get("iou_threshold", desired_iou)) != desired_iou:
                 tr.tracking_config["iou_threshold"] = desired_iou
+
+    def _set_template_N_window(self, desired_n: int, desired_w: int) -> None:
+        """
+        Apply a dynamic-template cadence (N) and memory window size to the inner
+        tracker, rebuilding the fixed-size memory deques only when the window
+        actually changes (oldest frames drop when shrinking). Shared by the
+        binary camera-motion adapt and the adaptive template_rate_auto path.
+        """
+        tr = self.tracker
+        desired_n = max(1, int(desired_n))
+        desired_w = max(1, int(desired_w))
+
+        if int(getattr(tr, "N", desired_n)) != desired_n:
+            tr.N = desired_n
+
+        if int(getattr(tr, "memory_window_size", desired_w)) != desired_w:
+            tr.memory_window_size = desired_w
+            tr.all_memory_imgs = deque(tr.all_memory_imgs, maxlen=desired_w)
+            tr.classification_scores = deque(
+                tr.classification_scores, maxlen=desired_w
+            )
+            if tr.classification_scores:
+                scores = np.array(tr.classification_scores, dtype=np.float16)
+                tr._best_idx = int(np.argmax(scores))
+                tr._best_score = float(scores[tr._best_idx])
+            else:
+                tr._best_idx = 0
+                tr._best_score = 0.5
+            tr._is_full = len(tr.classification_scores) == desired_w
+
+    def _apply_auto_template_rate(self, frame: np.ndarray) -> None:
+        """
+        Adaptive dynamic-template update rate (template_rate_auto). Builds a 0..1
+        "fastness" from this frame's camera motion and the (one-frame-stale)
+        target velocity -- combined with max() so either being fast drives fast
+        updating -- smooths it (EMA, inside the controller), and interpolates N
+        and memory_window_size between the slow-end and fast-end values.
+
+        Runs BEFORE self.tracker.update(), where N / memory_window_size are
+        consumed. No-op unless the mode is enabled.
+        """
+        if self._template_rate_auto is None:
+            return
+
+        ref_diag = self._motion_gate_reference_diag(frame, bbox_hint=self.current_bbox)
+
+        # Camera fastness: refresh + read the published bbox-relative magnitude.
+        self._is_heavy_camera_motion(frame, bbox_hint=self.current_bbox)
+        cam_ref = self._template_rate_auto_cam_ref_norm
+        if cam_ref <= 0.0:
+            cam_ref = self._camera_motion_heavy_norm_threshold
+        cam_fast = (
+            min(1.0, max(0.0, self._last_cam_motion_norm / cam_ref))
+            if cam_ref > 0.0
+            else 0.0
+        )
+
+        # Target fastness: speed (px/frame) over a bbox-diagonal reference.
+        tgt_speed = float(np.linalg.norm(self.velocity))
+        tgt_ref = self._template_rate_auto_target_ref_norm * ref_diag
+        tgt_fast = (
+            min(1.0, max(0.0, tgt_speed / tgt_ref)) if tgt_ref > 0.0 else 0.0
+        )
+
+        motion = max(cam_fast, tgt_fast)
+        desired_n, desired_w = self._template_rate_auto.observe(motion)
+        self._set_template_N_window(desired_n, desired_w)
 
     def _normal_update(
         self,
@@ -2283,7 +2372,11 @@ class SiamRAMExperimentTracker:
 
         if self._gmc_prior_enabled:
             self._apply_gmc_search_prior(frame)
-        if self._camera_motion_template_adapt_enabled:
+        if self._template_rate_auto is not None:
+            # Adaptive template rate takes over from the binary camera-motion
+            # adapt when enabled (they would otherwise fight over N/window).
+            self._apply_auto_template_rate(frame)
+        elif self._camera_motion_template_adapt_enabled:
             heavy_now, _ = self._is_heavy_camera_motion(
                 frame, bbox_hint=self.current_bbox
             )

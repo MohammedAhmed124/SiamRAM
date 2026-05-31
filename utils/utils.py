@@ -8,9 +8,9 @@ the rest of the project, but almost everything in the project imports from here.
 Concretely, it provides six categories of helpers:
 
 1. APPEARANCE DESCRIPTORS
-   _extract_descriptor() — builds OSNet appearance embeddings ϕ(It, b) for one
-   bbox or a batch of bboxes. Used by the RAM/DRM memory buffers and by
-   Phase-2 reacquisition scoring.
+   _extract_descriptor() — builds appearance embeddings ϕ(It, b) with the active
+   descriptor backend for one bbox or a batch of bboxes. Used by the RAM/DRM
+   memory buffers and by Phase-2 reacquisition scoring.
 
 2. GEOMETRIC CHECKS
    _iou() — lightweight single-pair IoU for the RAM admission gate (Section 3.2).
@@ -45,15 +45,80 @@ import torch
 from numpy._typing import NDArray
 from torch import Tensor
 from torch.nn import Module
+from utils.console import quiet_external_logs
 
 BBoxLike = Union[np.ndarray, Sequence[float], Sequence[Sequence[float]]]
 DescriptorOutput = Union[Optional[np.ndarray], list[Optional[np.ndarray]]]
 
 
-class _OSNetDescriptorExtractor:
-    """Lazy OSNet descriptor extractor wrapper."""
+def _preprocess_patches_to_tensor(
+    rgb_patches: list[np.ndarray],
+    out_hw: Tuple[int, int],
+    mean: torch.Tensor,
+    std: torch.Tensor,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """
+    Batched GPU-side patch preprocessing shared by both descriptor backends.
 
-    def __init__(self, model_name: str, model_path: str, device: str) -> None:
+    Recipe is identical to SiamABC's own ``_preprocess_image``
+    (RGB→CHW → /255 → ImageNet ``(x-mean)/std``), so every appearance embedding
+    in the system is normalized the same way. Doing it in one batched pass —
+    single ``np.stack``, one uint8 host→device transfer, then float-cast and
+    normalize on the GPU — avoids the per-image PIL/torchvision loop that the
+    torchreid ``FeatureExtractor`` would otherwise run on the CPU.
+
+    Only the *recipe* is shared, never the crop: each backend passes its own
+    ``out_hw`` (OSNet 256×128, siamese 128×128) and the patches are different
+    pixels, so sharing the resized tensor across backends would corrupt one of
+    them. ``mean``/``std`` are float32 ``(1,3,1,1)`` tensors on ``device``; the
+    arithmetic is done in float32 and the result cast to ``dtype`` last for
+    precision.
+    """
+    out_h, out_w = out_hw
+    resized = [
+        cv2.resize(p, (out_w, out_h), interpolation=cv2.INTER_LINEAR)
+        for p in rgb_patches
+    ]
+    arr = np.stack(resized, axis=0)  # (N, H, W, 3) uint8
+    t = torch.from_numpy(arr).to(device)
+    t = t.permute(0, 3, 1, 2).contiguous().float().div_(255.0)
+    t = t.sub_(mean).div_(std)
+    return t.to(dtype)
+
+
+class _OSNetDescriptorExtractor:
+    """
+    Lazy OSNet descriptor extractor.
+
+    Preprocessing mirrors the SiamABC pipeline: batched ``cv2`` resize → one
+    uint8 host→device transfer → on-GPU ``/255`` + ImageNet normalize (no
+    per-image PIL/torchvision loop). The OSNet backbone can optionally run in
+    FP16 and/or as a TensorRT engine compiled the same way as the SiamABC
+    backbone (TorchScript trace + ``torch_tensorrt.compile``).
+
+    The torchreid ``FeatureExtractor`` is used only to build/load the weighted
+    model; its ``__call__`` preprocessing is bypassed entirely — we drive
+    ``extractor.model`` directly with our own preprocessed tensor.
+    """
+
+    _IMAGENET_MEAN: Tuple[float, float, float] = (0.485, 0.456, 0.406)
+    _IMAGENET_STD: Tuple[float, float, float] = (0.229, 0.224, 0.225)
+    # torchreid/OSNet convention is (H, W) = (256, 128). Kept fixed so the
+    # ImageNet-pretrained weights see their training resolution.
+    _INPUT_H: int = 256
+    _INPUT_W: int = 128
+
+    def __init__(
+        self,
+        model_name: str,
+        model_path: str,
+        device: str,
+        fp16: bool = False,
+        trt_compile: bool = False,
+        max_batch: int = 8,
+    ) -> None:
         try:
             from torchreid.utils import FeatureExtractor
         except Exception as exc:
@@ -62,22 +127,133 @@ class _OSNetDescriptorExtractor:
                 "Install it in the active environment first."
             ) from exc
 
-        self._extractor = FeatureExtractor(
-            model_name=model_name,
-            model_path=model_path,
-            image_size=(256, 128),
-            device=device,
-            verbose=False,
+        self._device = (
+            device if isinstance(device, torch.device) else torch.device(device)
         )
 
+        with quiet_external_logs():
+            extractor = FeatureExtractor(
+                model_name=model_name,
+                model_path=model_path,
+                image_size=(self._INPUT_H, self._INPUT_W),
+                device=str(self._device),
+                verbose=False,
+            )
+        model = extractor.model.eval()
+
+        self._fp16 = bool(fp16) and self._device.type == "cuda"
+        self._dtype = torch.float16 if self._fp16 else torch.float32
+        if self._fp16:
+            model = model.half()
+        self._model = model
+
+        self._mean = torch.as_tensor(
+            self._IMAGENET_MEAN, dtype=torch.float32, device=self._device
+        ).view(1, 3, 1, 1)
+        self._std = torch.as_tensor(
+            self._IMAGENET_STD, dtype=torch.float32, device=self._device
+        ).view(1, 3, 1, 1)
+        self._max_batch = max(1, int(max_batch))
+
+        self._engine = None
+        if trt_compile:
+            if self._device.type != "cuda":
+                raise RuntimeError(
+                    "trt_compile_osnet requires a CUDA device; got "
+                    f"'{self._device}'."
+                )
+            # Lazy import: keeps utils free of any torch_tensorrt / models.*
+            # dependency unless TRT is actually requested.
+            from models.SiamABC.tracker.trt_engine.osnet import build_osnet_trt
+
+            self._engine = build_osnet_trt(
+                model=self._model,
+                dtype=self._dtype,
+                device=self._device,
+                input_h=self._INPUT_H,
+                input_w=self._INPUT_W,
+            )
+
+        self._forward = self._engine if self._engine is not None else self._model
+        # The TRT engine is a static batch-1 graph (see build_osnet_trt), so feed
+        # it one crop at a time. The eager backbone handles any batch, but we
+        # still bound it by the candidate cap to keep memory predictable.
+        self._chunk = 1 if self._engine is not None else self._max_batch
+        # Dedicated non-default CUDA stream for the async (Tier-3) overlap path.
+        # OSNet(frame N) runs here while SiamABC(frame N+1) runs on its own
+        # non-default stream — both must be non-default or the legacy default
+        # stream would serialize them.
+        self._stream = (
+            torch.cuda.Stream(device=self._device)
+            if self._device.type == "cuda"
+            else None
+        )
+
+    def _run_forward(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Run the backbone over a preprocessed tensor, chunked to the engine's
+        batch limit. Returns the raw (un-normalized) feature batch on-device."""
+        feats: list[torch.Tensor] = []
+        for i in range(0, tensor.shape[0], self._chunk):
+            out = self._forward(tensor[i : i + self._chunk])
+            if not isinstance(out, torch.Tensor):
+                out = torch.as_tensor(out)
+            feats.append(out)
+        return torch.cat(feats, dim=0)
+
+    @torch.no_grad()
     def extract_batch(self, rgb_patches: list[np.ndarray]) -> np.ndarray:
-        features = self._extractor(rgb_patches)
-        if isinstance(features, torch.Tensor):
-            features_t = features.detach()
-        else:
-            features_t = torch.as_tensor(features)
+        if not rgb_patches:
+            return np.zeros((0, 0), dtype=np.float32)
+
+        tensor = _preprocess_patches_to_tensor(
+            rgb_patches,
+            (self._INPUT_H, self._INPUT_W),
+            self._mean,
+            self._std,
+            self._device,
+            self._dtype,
+        )
+        features_t = self._run_forward(tensor).float()
         features_t = torch.nn.functional.normalize(features_t, p=2, dim=1)
-        return features_t.cpu().numpy().astype(np.float32)
+        return features_t.detach().cpu().numpy().astype(np.float32)
+
+    @torch.no_grad()
+    def extract_batch_async(self, rgb_patches: list[np.ndarray]) -> dict:
+        """
+        Queue the OSNet forward on the side stream and return a pending handle
+        WITHOUT synchronizing. The raw feature batch stays on the GPU until
+        `resolve_batch` is called. Falls back to a synchronous result on CPU.
+        """
+        if not rgb_patches:
+            return {"empty": True}
+        if self._stream is None:
+            return {"result": self.extract_batch(rgb_patches)}
+
+        with torch.cuda.stream(self._stream):
+            tensor = _preprocess_patches_to_tensor(
+                rgb_patches,
+                (self._INPUT_H, self._INPUT_W),
+                self._mean,
+                self._std,
+                self._device,
+                self._dtype,
+            )
+            features_t = self._run_forward(tensor)
+        return {"gpu": features_t}
+
+    @torch.no_grad()
+    def resolve_batch(self, pending: dict) -> np.ndarray:
+        """Block on the side stream and return the L2-normalized numpy batch."""
+        if pending.get("empty"):
+            return np.zeros((0, 0), dtype=np.float32)
+        if "result" in pending:
+            return pending["result"]
+        # Wait for the queued OSNet forward to finish before reading it back.
+        self._stream.synchronize()
+        features_t = torch.nn.functional.normalize(
+            pending["gpu"].float(), p=2, dim=1
+        )
+        return features_t.detach().cpu().numpy().astype(np.float32)
 
 
 class _SiameseDescriptorExtractor:
@@ -179,16 +355,14 @@ class _SiameseDescriptorExtractor:
         if not rgb_patches:
             return np.zeros((0, 0), dtype=np.float32)
 
-        resized = [
-            cv2.resize(
-                p, (self._CROP_SIZE, self._CROP_SIZE), interpolation=cv2.INTER_LINEAR
-            )
-            for p in rgb_patches
-        ]
-        arr = np.stack(resized, axis=0)  # (N, H, W, 3) uint8
-        tensor = torch.from_numpy(arr).to(self._device, dtype=torch.float32)
-        tensor = tensor.permute(0, 3, 1, 2).contiguous() / 255.0
-        tensor = (tensor - self._mean) / self._std
+        tensor = _preprocess_patches_to_tensor(
+            rgb_patches,
+            (self._CROP_SIZE, self._CROP_SIZE),
+            self._mean,
+            self._std,
+            self._device,
+            torch.float32,
+        )
 
         was_training = self._model.training
         self._model.eval()
@@ -237,6 +411,19 @@ _OSNET_MODEL_NAME: str = "osnet_x1_0"
 _OSNET_MODEL_PATH: str = ""
 _OSNET_PRETRAINED_CHECKPOINT: str = "imagenet"
 _OSNET_DEVICE: str = "auto"
+_OSNET_FP16: bool = False
+_TRT_COMPILE_OSNET: bool = False
+_OSNET_MAX_CANDIDATE_BATCH: int = 0
+_SUPPORTED_DESCRIPTOR_BACKENDS: tuple[str, ...] = (
+    "osnet",
+    "siamese",
+    "pixel_descriptors",
+)
+_DESCRIPTOR_BACKEND_LABELS: dict[str, str] = {
+    "osnet": "osnet",
+    "siamese": "siamese",
+    "pixel_descriptors": "pixel descriptors",
+}
 _OSNET_PRETRAINED_DEFAULTS: set[str] = {"", "default", "imagenet", "torchreid_imagenet"}
 _OSNET_REID_PRESET_TO_DRIVE: dict[str, dict[str, str]] = {
     "reid_market1501": {
@@ -261,6 +448,27 @@ _OSNET_REID_PRESET_TO_DRIVE: dict[str, dict[str, str]] = {
     },
 }
 _OSNET_REID_MIN_BYTES = 1_000_000
+
+
+def _canonical_descriptor_backend(name: str) -> str:
+    """Normalize user-facing descriptor backend names to internal keys."""
+    raw = str(name or "osnet").strip().lower()
+    key = "_".join(raw.replace("-", " ").split())
+    aliases = {
+        "osnet": "osnet",
+        "siamese": "siamese",
+        "pixel": "pixel_descriptors",
+        "pixels": "pixel_descriptors",
+        "pixel_descriptor": "pixel_descriptors",
+        "pixel_descriptors": "pixel_descriptors",
+    }
+    if key in aliases:
+        return aliases[key]
+
+    options = ", ".join(_DESCRIPTOR_BACKEND_LABELS[k] for k in _SUPPORTED_DESCRIPTOR_BACKENDS)
+    raise ValueError(
+        f"Unsupported descriptor_backend='{name}'. Supported values: {options}."
+    )
 
 
 def _ensure_osnet_reid_checkpoint(preset_key: str, preset_cfg: dict[str, str]) -> str:
@@ -348,6 +556,9 @@ def configure_descriptor_backend(
     siam_tracker: Any = None,
     siamese_feature_source: str = "neck",
     siamese_comparison_mode: str = "xcorr",
+    osnet_fp16: bool = False,
+    trt_compile_osnet: bool = False,
+    osnet_max_candidate_batch: int = 0,
 ) -> None:
     """
     Configure global descriptor extraction backend options.
@@ -361,6 +572,8 @@ def configure_descriptor_backend(
         "osnet"   — torchreid OSNet (separate ReID network, OSNet-x1_0 = 512-d).
         "siamese" — reuse siam_tracker.net's encoder + global avg pool. No
                     extra weights. Dim depends on `siamese_feature_source`.
+        "pixel descriptors" — legacy 384-d grayscale + HSV histogram descriptor
+                    from commit 3f01ab9. No neural net, CPU-only, very fast.
 
     Supported `siamese_feature_source` values (ignored when backend != siamese):
         "neck"    — model.get_features(crop), neck-projected (~256-d). Default.
@@ -380,17 +593,24 @@ def configure_descriptor_backend(
     global _SIAMESE_FEATURE_SOURCE, _SIAMESE_COMPARISON_MODE
     global _DESCRIPTOR_BACKEND
     global _OSNET_MODEL_NAME, _OSNET_MODEL_PATH, _OSNET_PRETRAINED_CHECKPOINT
-    global _OSNET_DEVICE
+    global _OSNET_DEVICE, _OSNET_FP16, _TRT_COMPILE_OSNET, _OSNET_MAX_CANDIDATE_BATCH
 
-    _DESCRIPTOR_BACKEND = descriptor_backend.strip().lower()
+    _DESCRIPTOR_BACKEND = _canonical_descriptor_backend(descriptor_backend)
     _OSNET_MODEL_NAME = osnet_model_name.strip()
     _OSNET_PRETRAINED_CHECKPOINT = osnet_pretrained_checkpoint.strip().lower()
-    _OSNET_MODEL_PATH = _resolve_osnet_model_path(
-        osnet_model_name=_OSNET_MODEL_NAME,
-        osnet_model_path=osnet_model_path,
-        osnet_pretrained_checkpoint=_OSNET_PRETRAINED_CHECKPOINT,
+    _OSNET_MODEL_PATH = (
+        _resolve_osnet_model_path(
+            osnet_model_name=_OSNET_MODEL_NAME,
+            osnet_model_path=osnet_model_path,
+            osnet_pretrained_checkpoint=_OSNET_PRETRAINED_CHECKPOINT,
+        )
+        if _DESCRIPTOR_BACKEND == "osnet"
+        else osnet_model_path.strip()
     )
     _OSNET_DEVICE = osnet_device.strip().lower()
+    _OSNET_FP16 = bool(osnet_fp16)
+    _TRT_COMPILE_OSNET = bool(trt_compile_osnet)
+    _OSNET_MAX_CANDIDATE_BATCH = max(0, int(osnet_max_candidate_batch))
     _OSNET_EXTRACTOR = None
     _SIAMESE_EXTRACTOR = None
     _SIAM_TRACKER_REF = siam_tracker
@@ -409,10 +629,17 @@ def _get_osnet_extractor() -> _OSNetDescriptorExtractor:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         else:
             device = _OSNET_DEVICE
+        # TRT engine batch profile upper bound. Tie it to the candidate cap when
+        # set; otherwise fall back to a generous default and let extract_batch
+        # chunk anything larger.
+        max_batch = _OSNET_MAX_CANDIDATE_BATCH if _OSNET_MAX_CANDIDATE_BATCH > 0 else 16
         _OSNET_EXTRACTOR = _OSNetDescriptorExtractor(
             model_name=_OSNET_MODEL_NAME,
             model_path=_OSNET_MODEL_PATH,
             device=device,
+            fp16=_OSNET_FP16,
+            trt_compile=_TRT_COMPILE_OSNET,
+            max_batch=max_batch,
         )
     return _OSNET_EXTRACTOR
 
@@ -448,19 +675,42 @@ def _extract_descriptor(
     _PROC_SIZE: int = 64,
 ) -> DescriptorOutput:
     """
-    Extract OSNet descriptors for one box or a batch of boxes.
+    Extract appearance descriptors for one box or a batch of boxes.
 
-    The legacy arguments (`size`, `w_gray`, `w_color`, `_PROC_SIZE`) are kept for
-    backward compatibility and intentionally unused.
+    The legacy arguments (`size`, `w_gray`, `w_color`, `_PROC_SIZE`) are used by
+    the "pixel descriptors" backend and ignored by neural backends.
     """
-    del size, w_gray, w_color, _PROC_SIZE
+    rgb_patches, valid_indices, n_boxes, single_input = _build_patches(frame, bbox)
 
+    desc_batch = _compute_descriptor_batch(
+        rgb_patches,
+        pixel_size=size,
+        pixel_w_gray=w_gray,
+        pixel_w_color=w_color,
+        pixel_proc_size=_PROC_SIZE,
+    )
+    return _scatter_descriptor_batch(
+        desc_batch, valid_indices, n_boxes, single_input
+    )
+
+
+def _build_patches(
+    frame: np.ndarray,
+    bbox: BBoxLike,
+) -> tuple[list[np.ndarray], list[int], int, bool]:
+    """
+    Crop + BGR→RGB every requested box. Shared by the synchronous and async
+    descriptor entry points so cropping logic stays in one place.
+
+    Returns (rgb_patches, valid_indices, n_boxes, single_input) where
+    valid_indices maps each produced patch back to its slot in the n_boxes-long
+    output, and single_input mirrors whether the caller passed one bbox.
+    """
     bbox_batch, single_input = _as_bbox_batch(bbox)
     h_fr, w_fr = frame.shape[:2]
 
     valid_indices: list[int] = []
     rgb_patches: list[np.ndarray] = []
-    output: list[Optional[np.ndarray]] = [None] * len(bbox_batch)
 
     for idx, bb in enumerate(bbox_batch):
         x, y, w, h = map(int, bb)
@@ -481,21 +731,158 @@ def _extract_descriptor(
         rgb_patches.append(cv2.cvtColor(patch_bgr, cv2.COLOR_BGR2RGB))
         valid_indices.append(idx)
 
-    if _DESCRIPTOR_BACKEND not in ("osnet", "siamese"):
+    return rgb_patches, valid_indices, len(bbox_batch), single_input
+
+
+def _extract_pixel_descriptor_from_rgb_patch(
+    patch_rgb: np.ndarray,
+    *,
+    size: int = 16,
+    w_gray: float = 0.4,
+    w_color: float = 0.6,
+    proc_size: int = 64,
+) -> np.ndarray:
+    """
+    Legacy 384-d pixel descriptor from commit 3f01ab9.
+
+    It concatenates a normalized 16x16 grayscale texture patch with an 8x4x4 HSV
+    color histogram, then L2-normalizes the whole vector.
+    """
+    small = cv2.resize(
+        patch_rgb,
+        (int(proc_size), int(proc_size)),
+        interpolation=cv2.INTER_LINEAR,
+    )
+
+    gray = cv2.cvtColor(small, cv2.COLOR_RGB2GRAY)
+    p = cv2.resize(gray, (int(size), int(size))).flatten().astype(np.float32)
+    p /= np.linalg.norm(p) + 1e-8
+
+    hsv = cv2.cvtColor(small, cv2.COLOR_RGB2HSV)
+    h_hist = (
+        cv2.calcHist([hsv], [0, 1, 2], None, [8, 4, 4], [0, 180, 0, 256, 0, 256])
+        .flatten()
+        .astype(np.float32)
+    )
+    h_hist /= np.linalg.norm(h_hist) + 1e-8
+
+    desc = np.concatenate([float(w_gray) * p, float(w_color) * h_hist])
+    desc /= np.linalg.norm(desc) + 1e-8
+    return desc.astype(np.float32, copy=False)
+
+
+def _extract_pixel_descriptor_batch(
+    rgb_patches: list[np.ndarray],
+    *,
+    size: int = 16,
+    w_gray: float = 0.4,
+    w_color: float = 0.6,
+    proc_size: int = 64,
+) -> np.ndarray:
+    if not rgb_patches:
+        return np.zeros((0, int(size) * int(size) + 128), dtype=np.float32)
+    descs = [
+        _extract_pixel_descriptor_from_rgb_patch(
+            patch,
+            size=size,
+            w_gray=w_gray,
+            w_color=w_color,
+            proc_size=proc_size,
+        )
+        for patch in rgb_patches
+    ]
+    return np.stack(descs, axis=0).astype(np.float32, copy=False)
+
+
+def _compute_descriptor_batch(
+    rgb_patches: list[np.ndarray],
+    *,
+    pixel_size: int = 16,
+    pixel_w_gray: float = 0.4,
+    pixel_w_color: float = 0.6,
+    pixel_proc_size: int = 64,
+) -> np.ndarray:
+    """Synchronously run the active backend over the cropped patches."""
+    if not rgb_patches:
+        return np.zeros((0, 0), dtype=np.float32)
+    if _DESCRIPTOR_BACKEND == "pixel_descriptors":
+        return _extract_pixel_descriptor_batch(
+            rgb_patches,
+            size=pixel_size,
+            w_gray=pixel_w_gray,
+            w_color=pixel_w_color,
+            proc_size=pixel_proc_size,
+        )
+    if _DESCRIPTOR_BACKEND == "siamese":
+        return _get_siamese_extractor().extract_batch(rgb_patches)
+    if _DESCRIPTOR_BACKEND != "osnet":
+        options = ", ".join(_DESCRIPTOR_BACKEND_LABELS[k] for k in _SUPPORTED_DESCRIPTOR_BACKENDS)
         raise RuntimeError(
             f"Unsupported descriptor_backend='{_DESCRIPTOR_BACKEND}'. "
-            "Supported values: 'osnet', 'siamese'."
+            f"Supported values: {options}."
         )
+    return _get_osnet_extractor().extract_batch(rgb_patches)
 
-    if rgb_patches:
-        if _DESCRIPTOR_BACKEND == "siamese":
-            desc_batch = _get_siamese_extractor().extract_batch(rgb_patches)
-        else:
-            desc_batch = _get_osnet_extractor().extract_batch(rgb_patches)
+
+def _scatter_descriptor_batch(
+    desc_batch,
+    valid_indices: list[int],
+    n_boxes: int,
+    single_input: bool,
+) -> DescriptorOutput:
+    """Place each computed descriptor back into its original box slot."""
+    output: list[Optional[np.ndarray]] = [None] * n_boxes
+    if len(desc_batch):
         for local_i, global_i in enumerate(valid_indices):
             output[global_i] = desc_batch[local_i]
-
     return output[0] if single_input else output
+
+
+def descriptor_async_supported() -> bool:
+    """
+    True when the active backend can run OSNet on a side CUDA stream, overlapping
+    its forward with the next SiamABC forward. Only the OSNet backend on CUDA
+    qualifies — siamese reuses the SiamABC engine and pixel descriptors are CPU
+    feature extraction.
+    """
+    if _DESCRIPTOR_BACKEND != "osnet":
+        return False
+    if not torch.cuda.is_available():
+        return False
+    return _OSNET_DEVICE in ("", "auto") or _OSNET_DEVICE.startswith("cuda")
+
+
+def _extract_descriptor_async(frame: np.ndarray, bbox: BBoxLike) -> dict:
+    """
+    Begin descriptor extraction without blocking. For the OSNet/CUDA backend the
+    forward is queued on a side stream and a pending handle is returned; resolve
+    it later with `_resolve_descriptor`. For any other backend it falls back to
+    a synchronous compute stored in the handle (so callers stay uniform).
+    """
+    rgb_patches, valid_indices, n_boxes, single_input = _build_patches(frame, bbox)
+    handle = {
+        "valid_indices": valid_indices,
+        "n_boxes": n_boxes,
+        "single": single_input,
+    }
+    if _DESCRIPTOR_BACKEND == "osnet" and descriptor_async_supported():
+        handle["pending"] = _get_osnet_extractor().extract_batch_async(rgb_patches)
+        handle["async"] = True
+    else:
+        handle["batch"] = _compute_descriptor_batch(rgb_patches)
+        handle["async"] = False
+    return handle
+
+
+def _resolve_descriptor(handle: dict) -> DescriptorOutput:
+    """Finish a `_extract_descriptor_async` handle into the usual output format."""
+    if handle.get("async"):
+        desc_batch = _get_osnet_extractor().resolve_batch(handle["pending"])
+    else:
+        desc_batch = handle["batch"]
+    return _scatter_descriptor_batch(
+        desc_batch, handle["valid_indices"], handle["n_boxes"], handle["single"]
+    )
 
 
 def _iou(
@@ -651,7 +1038,7 @@ def _cos_sim(
 
     Shape-dispatch:
         - 1D × 1D vectors  → standard cosine = dot product of L2-normalized vectors.
-                              Used by the OSNet backend and by the siamese "pooled" mode.
+                              Used by OSNet, pixel descriptors, and siamese vector modes.
         - 3D × 3D maps     → 2D cross-correlation peak (`_xcorr_sim_2d`). Used by
                               the siamese "xcorr" mode where descriptors are spatial
                               (C, H, W) feature maps with per-cell L2 normalization.

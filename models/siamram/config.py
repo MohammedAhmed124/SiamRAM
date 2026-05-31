@@ -32,6 +32,7 @@ class DescriptorConfig:
     osnet_model_path: str = ""
     osnet_device: str = "auto"
     osnet_max_candidate_batch: int = 0
+    # Supported backends: "osnet", "siamese", "pixel descriptors".
     # Only consulted when backend == "siamese". Picks which SiamABC layer to
     # pool into the appearance embedding. "neck" → ~256-d, "encoder" → ~1024-d.
     siamese_feature_source: str = "neck"

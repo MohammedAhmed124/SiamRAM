@@ -179,7 +179,7 @@ class SiamABCTracker(Tracker):
         )
         self.warmup_window_size = max(1, int(raw_warmup_window_size))
         self.dynamic_update = self.tracking_config["dynamic_update"]
-        self.similarity_score = self.tracking_config["similarity_score"]
+        self.similarity_score = bool(self.tracking_config.get("similarity_score", False))
         self.dynamic_update_threshold = self.tracking_config["dynamic_update_threshold"]
 
         rect = clamp_bbox(rect, image.shape)

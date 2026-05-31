@@ -55,8 +55,12 @@ from typing import Dict, Tuple
 
 import torch
 import torch.nn as nn
-import torch_tensorrt
-from torch_tensorrt.dynamo import compile as trt_dynamo_compile
+from utils.console import quiet_external_logs, silence_noisy_libraries
+
+silence_noisy_libraries()
+with quiet_external_logs():
+    import torch_tensorrt
+    from torch_tensorrt.dynamo import compile as trt_dynamo_compile
 
 log = logging.getLogger(__name__)
 

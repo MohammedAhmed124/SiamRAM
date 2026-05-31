@@ -15,9 +15,14 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 
+import torch
+
 from utils.utils import (
     _cos_sim,
     _extract_descriptor,
+    _extract_descriptor_async,
+    _resolve_descriptor,
+    descriptor_async_supported,
     _iou,
     configure_descriptor_backend,
 )
@@ -91,6 +96,9 @@ class SiamRAMExperimentTracker:
         osnet_model_path: str = "",
         osnet_pretrained_checkpoint: str = "imagenet",
         osnet_device: str = "auto",
+        osnet_fp16: bool = False,
+        trt_compile_osnet: bool = False,
+        osnet_async_overlap: bool = False,
         siamese_feature_source: str = "neck",
         siamese_comparison_mode: str = "xcorr",
         descriptor_stride: int = 1,
@@ -213,6 +221,19 @@ class SiamRAMExperimentTracker:
         template_rate_auto_cam_ref_norm: float = -1.0,
         # Target speed (bbox-diagonals per frame) that counts as "fully fast".
         template_rate_auto_target_ref_norm: float = 0.15,
+        # Binary dynamic-template adapt on the TARGET's own motion, measured in
+        # full-frame px/frame -- the same on-screen object speed shown in the
+        # target-motion pill. When target_motion_template_adapt_enabled and that
+        # speed exceeds target_motion_high_px_threshold, N (re-selection cadence)
+        # and memory_window_size switch to the high-motion values below, reverting
+        # (after an optional linger) once the object slows. Standalone binary mode,
+        # mutually exclusive with template_rate_auto / camera_motion_template_adapt
+        # (precedence resolved in _normal_update). Inert by default.
+        target_motion_template_adapt_enabled: bool = False,
+        target_motion_high_px_threshold: float = 18.0,
+        target_motion_high_N: int = 20,
+        target_motion_high_memory_window_size: int = 20,
+        target_motion_template_adapt_linger_frames: int = 0,
         early_occlusion_entry_n_frames: int = -1,
         early_occlusion_max_frames: int = -1,
         occlusion_use_ram_until_drm_full: bool = True,
@@ -416,6 +437,8 @@ class SiamRAMExperimentTracker:
             entry_patience (any): consecutive low-score frames required before declaring occlusion
             cand_collection_frames (any): number of YOLO collection frames before the final DRM phase
             osnet_max_candidate_batch (any): max detections per frame sent to OSNet; 0 disables capping
+            osnet_fp16 (any): run the OSNet descriptor backbone in FP16 (CUDA only; ignored on CPU)
+            trt_compile_osnet (any): TRT-compile the OSNet descriptor backbone (CUDA only; needs torch_tensorrt)
             yolo_warmup_frames (any): initial frame count that uses centered warm-up ROI
             yolo_warmup_center_scale (any): warm-up ROI side ratio relative to frame size
             vel_dir_hard_gate (any): if cosine similarity between candidate and expected velocity is below -this, velocity score is floored to 0.05
@@ -423,6 +446,27 @@ class SiamRAMExperimentTracker:
             yolo_class_detect_frames (any): stride used during the class warm-up period
     """
         self.tracker: SiamABCTracker = siam_tracker
+        tracker_cfg = getattr(siam_tracker, "tracking_config", {}) or {}
+        self._initial_template_N = max(
+            1, int(tracker_cfg.get("N", getattr(siam_tracker, "N", 1)))
+        )
+        self._initial_template_window = max(
+            1,
+            int(
+                tracker_cfg.get(
+                    "memory_window_size",
+                    getattr(siam_tracker, "memory_window_size", 50),
+                )
+                or 50
+            ),
+        )
+        self._initial_dynamic_update_threshold = float(
+            tracker_cfg.get(
+                "dynamic_update_threshold",
+                getattr(siam_tracker, "dynamic_update_threshold", 0.8),
+            )
+        )
+        self._initial_iou_threshold = float(tracker_cfg.get("iou_threshold", 0.3))
         configure_descriptor_backend(
             descriptor_backend=descriptor_backend,
             osnet_model_name=osnet_model_name,
@@ -432,6 +476,9 @@ class SiamRAMExperimentTracker:
             siam_tracker=siam_tracker,
             siamese_feature_source=siamese_feature_source,
             siamese_comparison_mode=siamese_comparison_mode,
+            osnet_fp16=osnet_fp16,
+            trt_compile_osnet=trt_compile_osnet,
+            osnet_max_candidate_batch=osnet_max_candidate_batch,
         )
 
         # How often the descriptor backend (OSNet / siamese) is run on the
@@ -441,6 +488,25 @@ class SiamRAMExperimentTracker:
         # distractor-recovery paths still run the descriptor every time they need
         # it, so appearance fidelity is preserved exactly where it matters.
         self._descriptor_stride = max(1, int(descriptor_stride))
+
+        # Tier-3 GPU overlap: run OSNet for frame N on a side stream concurrently
+        # with SiamABC for frame N+1. Only active for the OSNet/CUDA backend;
+        # otherwise everything stays fully synchronous (no behavior change).
+        # _overlap_active is resolved lazily on the first update so the OSNet
+        # extractor (and thus its CUDA device) has been created.
+        self._osnet_async_overlap = bool(osnet_async_overlap)
+        self._overlap_active: Optional[bool] = None
+        # Dedicated non-default stream for the SiamABC forward; OSNet uses its own
+        # side stream inside the extractor. Both must be non-default so the legacy
+        # default stream does not serialize them.
+        self._siam_stream = (
+            torch.cuda.Stream()
+            if (self._osnet_async_overlap and torch.cuda.is_available())
+            else None
+        )
+        # Holds the deferred descriptor for the previous confident frame:
+        # (handle, pred_bbox, ref_bbox, velocity, distractor_bank, sample_drm).
+        self._pending_desc: Optional[dict] = None
 
         if copile_yolo:
             self.yolo = self.load_yolo_compiled(yolo_weights)
@@ -563,6 +629,30 @@ class SiamRAMExperimentTracker:
         # Last frame's camera-motion magnitude in bbox-diagonal units, published
         # by is_heavy_camera_motion for the auto-rate controller (and debug).
         self._last_cam_motion_norm: float = 0.0
+
+        # Binary target-motion template adapt (target_motion_template_adapt).
+        # Gated on the object's own speed in full-frame px/frame (the pill value).
+        # Shares the lazily-captured base N/window with the camera-motion path
+        # (only one adapt branch runs per frame, see _normal_update) but keeps its
+        # own linger counter. All inert unless the flag is set.
+        self._target_motion_template_adapt_enabled = bool(
+            target_motion_template_adapt_enabled
+        )
+        self._target_motion_high_px_threshold = max(
+            0.0, float(target_motion_high_px_threshold)
+        )
+        self._target_motion_high_N = max(1, int(target_motion_high_N))
+        self._target_motion_high_memory_window_size = max(
+            1, int(target_motion_high_memory_window_size)
+        )
+        self._target_motion_template_adapt_linger_frames = max(
+            0, int(target_motion_template_adapt_linger_frames)
+        )
+        # Frames of high-motion behavior still owed after the object slowed.
+        self._target_motion_adapt_linger_left: int = 0
+        # Last frame's target speed in full-frame px/frame (pill units), published
+        # for the viz fast/slow verdict and the rate box.
+        self._last_target_motion_px: float = 0.0
         self._early_occlusion_entry_n_frames = int(early_occlusion_entry_n_frames)
         self._early_occlusion_max_frames = int(early_occlusion_max_frames)
         self._occlusion_use_ram_until_drm_full = bool(
@@ -1021,6 +1111,55 @@ class SiamRAMExperimentTracker:
         self._camera_motion_subsystem = CameraMotionSubsystem(self)
         self._occlusion_subsystem = OcclusionRecoverySubsystem(self)
 
+    def _restore_inner_tracker_sequence_defaults(self) -> None:
+        """
+        Restore SiamABC fields that SiamRAM may adapt during a sequence.
+
+        The expensive SiamABC/TRT object is intentionally reused across videos,
+        but its template cadence/window/gates are sequence-local state once any
+        adaptive mode has touched them.
+        """
+        tr = self.tracker
+        tr.N = self._initial_template_N
+        tr.memory_window_size = self._initial_template_window
+        tr.dynamic_update_threshold = self._initial_dynamic_update_threshold
+        tr.tracking_config["iou_threshold"] = self._initial_iou_threshold
+
+        if hasattr(tr, "all_memory_imgs"):
+            tr.all_memory_imgs = deque(
+                tr.all_memory_imgs, maxlen=self._initial_template_window
+            )
+        if hasattr(tr, "classification_scores"):
+            tr.classification_scores = deque(
+                tr.classification_scores, maxlen=self._initial_template_window
+            )
+        tracking_state = getattr(tr, "tracking_state", None)
+        if tracking_state is not None:
+            tracking_state.mapping = None
+            tracking_state.prev_size = None
+            if hasattr(tracking_state, "paths"):
+                tracking_state.paths.clear()
+
+    def _discard_pending_descriptor(self) -> None:
+        """
+        Drain an unfinished async descriptor from the previous sequence.
+
+        Clearing the Python handle is not enough when OSNet ran on a side CUDA
+        stream: the kernel may still be in flight and overlap the next video's
+        initialization. Resolve/synchronize it, then intentionally drop the
+        descriptor so no old-video appearance enters the fresh memory bank.
+        """
+        pending = self._pending_desc
+        self._pending_desc = None
+        if pending is None:
+            return
+        try:
+            _resolve_descriptor(pending["handle"])
+        except Exception:
+            # This is only best-effort cleanup at a sequence boundary. The fresh
+            # initialize below fully resets target state even if cleanup fails.
+            pass
+
     def initialize(
         self,
         frame: np.ndarray,
@@ -1039,6 +1178,31 @@ class SiamRAMExperimentTracker:
         size_history, current_bbox, held_box, tracker.tracking_state.bbox —
         is in proc-frame pixel coordinates.  update() scales the output back.
         """
+
+        # A single tracker instance is reused across videos to avoid rebuilding
+        # heavy models/TRT engines. Keep that warm state, but reset every adaptive
+        # per-sequence accumulator so statistics cannot leak video-to-video.
+        self._discard_pending_descriptor()
+        self._overlap_active = None
+        if self._drm_margin_auto is not None:
+            self._drm_margin_auto.reset()
+            self._drm_kwargs["margin"] = self._drm_margin_auto.value
+        if self._template_rate_auto is not None:
+            self._template_rate_auto.reset()
+        self._camera_motion_adapt_linger_left = 0
+        self._target_motion_adapt_linger_left = 0
+        self._last_cam_motion_norm = 0.0
+        self._last_target_motion_px = 0.0
+        self._heavy_motion_cache_frame_idx = -1
+        self._heavy_motion_cache_weighted_disp = 0.0
+        self._heavy_motion_cache_inst_disp = 0.0
+        self._last_heavy_cam_motion = False
+        self._last_heavy_cam_disp = 0.0
+        self._base_template_N = None
+        self._base_template_window = None
+        self._base_dynamic_update_threshold = None
+        self._base_iou_threshold = None
+        self._restore_inner_tracker_sequence_defaults()
 
         h_fr, w_fr = frame.shape[:2]
         long_edge = max(h_fr, w_fr)
@@ -1103,10 +1267,13 @@ class SiamRAMExperimentTracker:
 
         self._target_class_id = None
         self._class_warmup_done = False
+        self._class_votes = {}
         self._yolo_detectable = False
         self._detectability_probe_done = False
         self._detectability_runs = 0
         self._detectability_hits = 0
+        self._last_recovery_patch = None
+        self._last_recovery_info = None
         self._clear_jump_watch_state()
         self._jump_watch_last_step_norm = 0.0
         self._spike_debug_speed_norm = float("nan")
@@ -1141,6 +1308,7 @@ class SiamRAMExperimentTracker:
             self.visual_mode = "tracking"
             self.visual_reason = "Normal tracking"
             self.visual_details = ""
+        self._sync_visual_state()
 
         self.ekf = BBoxEKF(
             bbox,
@@ -1155,7 +1323,40 @@ class SiamRAMExperimentTracker:
         if desc is not None:
             self.memory.try_admit(bbox, desc, bbox)
 
+    def _overlap_enabled(self) -> bool:
+        """
+        Whether the Tier-3 OSNet/SiamABC GPU overlap is active. Resolved lazily on
+        first use so the OSNet extractor (and its CUDA device) already exists.
+        """
+        if self._overlap_active is None:
+            self._overlap_active = bool(
+                self._osnet_async_overlap
+                and self._siam_stream is not None
+                and descriptor_async_supported()
+            )
+            if self._overlap_active:
+                # Make the SiamABC stream wait for any init work still pending on
+                # the default stream (template features built during initialize),
+                # so the first streamed forward can't race those tensors.
+                self._siam_stream.wait_stream(torch.cuda.default_stream())
+        return self._overlap_active
+
     def update(
+        self,
+        frame: np.ndarray,
+    ) -> Tuple[np.ndarray, float, bool, List]:
+        """
+        Thin wrapper around `_update_impl`. When the OSNet/SiamABC overlap is
+        active, the whole per-frame pipeline runs on a dedicated non-default CUDA
+        stream so SiamABC(frame N+1) overlaps the OSNet forward queued for
+        frame N on the extractor's side stream. Otherwise it's a direct call.
+        """
+        if self._overlap_enabled():
+            with torch.cuda.stream(self._siam_stream):
+                return self._update_impl(frame)
+        return self._update_impl(frame)
+
+    def _update_impl(
         self,
         frame: np.ndarray,
     ) -> Tuple[np.ndarray, float, bool, List]:
@@ -2158,6 +2359,55 @@ class SiamRAMExperimentTracker:
             if float(tr.tracking_config.get("iou_threshold", desired_iou)) != desired_iou:
                 tr.tracking_config["iou_threshold"] = desired_iou
 
+    def _current_target_speed_px(self) -> float:
+        """
+        Current target speed in full-frame px/frame -- the same on-screen value
+        the target-motion pill shows. self.velocity is in proc-frame px/frame, so
+        dividing by the frame downscale maps it back to full-frame pixels (the
+        pill multiplies by 1/_frame_scale, which is identical). Uses the previous
+        frame's velocity (one-frame-stale, as in _apply_auto_template_rate).
+        """
+        scale = self._frame_scale if self._frame_scale else 1.0
+        return float(np.linalg.norm(self.velocity)) / scale
+
+    def _apply_target_motion_template_adapt(self, fast: bool) -> None:
+        """
+        Swap the inner SiamABC dynamic-template params (re-selection cadence N +
+        memory window length) to the high-motion set while the TARGET is moving
+        fast, and restore the base values otherwise.
+
+        "Fast" is decided in _normal_update by comparing the object's speed in
+        full-frame px/frame (the value shown in the target-motion pill) against
+        target_motion_high_px_threshold. Reuses _set_template_N_window (memory
+        deques rebuilt only on an actual window change) and the same lazily
+        captured base N/window as the camera-motion path; only N and window are
+        touched (the admission gates are left alone).
+
+        No-op unless target_motion_template_adapt_enabled.
+        """
+        if not self._target_motion_template_adapt_enabled:
+            return
+        tr = self.tracker
+        if self._base_template_N is None:
+            self._base_template_N = int(
+                getattr(tr, "N", self._target_motion_high_N)
+            )
+            self._base_template_window = int(
+                getattr(
+                    tr,
+                    "memory_window_size",
+                    self._target_motion_high_memory_window_size,
+                )
+            )
+
+        desired_n = self._target_motion_high_N if fast else self._base_template_N
+        desired_w = (
+            self._target_motion_high_memory_window_size
+            if fast
+            else self._base_template_window
+        )
+        self._set_template_N_window(desired_n, desired_w)
+
     def _set_template_N_window(self, desired_n: int, desired_w: int) -> None:
         """
         Apply a dynamic-template cadence (N) and memory window size to the inner
@@ -2225,6 +2475,43 @@ class SiamRAMExperimentTracker:
         desired_n, desired_w = self._template_rate_auto.observe(motion)
         self._set_template_N_window(desired_n, desired_w)
 
+    def _resolve_pending_descriptor(self) -> None:
+        """
+        Finish the OSNet descriptor deferred from the previous confident frame
+        (Tier-3 overlap) and admit it to the appearance memory, replaying the
+        adaptive-drm_margin sample with the snapshot captured at launch.
+
+        Called right after the SiamABC forward — so the deferred OSNet forward
+        has overlapped it on the side stream — and before any memory consumer.
+        No-op when nothing is pending (the common non-overlap case).
+        """
+        pending = self._pending_desc
+        if pending is None:
+            return
+        self._pending_desc = None
+
+        desc = _resolve_descriptor(pending["handle"])
+        if desc is None:
+            return
+
+        self.memory.try_admit(pending["pred_bbox"], desc, pending["ref_bbox"])
+        if pending["sample_drm"]:
+            self_score = self.memory.score_target_against_drm(
+                target_bbox=pending["pred_bbox"],
+                target_desc=desc,
+                ref_bbox=pending["ref_bbox"],
+                velocity=pending["velocity"],
+                distractor_bank=pending["distractor_bank"],
+                lam_iou=self._drm_kwargs["lam_iou"],
+                lam_app=self._drm_kwargs["lam_app"],
+                lam_mot=self._drm_kwargs["lam_mot"],
+                lam_time=self._drm_kwargs["lam_time"],
+                alpha=self._drm_kwargs["alpha"],
+                gamma=self._drm_kwargs["gamma"],
+            )
+            if self_score is not None:
+                self._drm_margin_auto.observe(self_score, pending["frame_idx"])
+
     def _normal_update(
         self,
         frame: np.ndarray,
@@ -2277,9 +2564,28 @@ class SiamRAMExperimentTracker:
         if self._gmc_prior_enabled:
             self._apply_gmc_search_prior(frame)
         if self._template_rate_auto is not None:
-            # Adaptive template rate takes over from the binary camera-motion
-            # adapt when enabled (they would otherwise fight over N/window).
+            # Adaptive template rate takes over from the binary adapts when
+            # enabled (they would otherwise fight over N/window).
             self._apply_auto_template_rate(frame)
+        elif self._target_motion_template_adapt_enabled:
+            # Binary swap on the object's own speed (full-frame px/frame, the
+            # value shown in the target-motion pill). Linger keeps the high-motion
+            # params for a window after the object slows, mirroring the camera
+            # path so they don't snap back the instant it decelerates.
+            speed_px = self._current_target_speed_px()
+            self._last_target_motion_px = speed_px
+            fast_now = speed_px >= self._target_motion_high_px_threshold
+            if fast_now:
+                self._target_motion_adapt_linger_left = (
+                    self._target_motion_template_adapt_linger_frames
+                )
+                effective_fast = True
+            elif self._target_motion_adapt_linger_left > 0:
+                self._target_motion_adapt_linger_left -= 1
+                effective_fast = True
+            else:
+                effective_fast = False
+            self._apply_target_motion_template_adapt(effective_fast)
         elif self._camera_motion_template_adapt_enabled:
             heavy_now, _ = self._is_heavy_camera_motion(
                 frame, bbox_hint=self.current_bbox
@@ -2300,6 +2606,11 @@ class SiamRAMExperimentTracker:
             self._apply_camera_motion_template_adapt(effective_heavy)
         pred_bbox, score, _ = self.tracker.update(frame)
         pred_bbox = np.array(pred_bbox, dtype=int)
+
+        # Tier-3: the SiamABC forward above just overlapped last frame's OSNet
+        # forward on the side stream. Finish + admit that deferred descriptor now,
+        # before any appearance-memory consumer (jump-reject / spike) runs below.
+        self._resolve_pending_descriptor()
 
         self._maybe_run_class_warmup(frame)
         self._maybe_run_detectability_probe(frame)
@@ -2478,35 +2789,66 @@ class SiamRAMExperimentTracker:
             and self._distractor_mode_memory_freeze_left <= 0
             and descriptor_due
         ):
-            desc = _extract_descriptor(frame, pred_bbox)
-            if desc is not None:
-                self.memory.try_admit(pred_bbox, desc, self.current_bbox)
-                # Adaptive drm_margin: on confident frames, sample how well the
-                # genuine target scores against its own DRM anchors and feed the
-                # estimator. No-op unless drm_margin == "auto".
-                if (
-                    self._drm_margin_auto is not None
-                    and self._drm_margin_auto.due(self.frame_idx)
-                ):
-                    self_score = self.memory.score_target_against_drm(
-                        target_bbox=pred_bbox,
-                        target_desc=desc,
-                        ref_bbox=self.current_bbox,
-                        velocity=self.velocity,
-                        distractor_bank=(
-                            self._get_active_distractor_bank()
-                            if self._use_distractor_bank
-                            else ()
-                        ),
-                        lam_iou=self._drm_kwargs["lam_iou"],
-                        lam_app=self._drm_kwargs["lam_app"],
-                        lam_mot=self._drm_kwargs["lam_mot"],
-                        lam_time=self._drm_kwargs["lam_time"],
-                        alpha=self._drm_kwargs["alpha"],
-                        gamma=self._drm_kwargs["gamma"],
-                    )
-                    if self_score is not None:
-                        self._drm_margin_auto.observe(self_score, self.frame_idx)
+            # Whether to sample the adaptive drm_margin estimator for this frame.
+            sample_drm = (
+                self._drm_margin_auto is not None
+                and self._drm_margin_auto.due(self.frame_idx)
+            )
+            if self._overlap_enabled():
+                # Tier-3: queue OSNet on the side stream now and defer admission
+                # to the next frame (resolved after that frame's SiamABC forward,
+                # so this OSNet forward overlaps it). Snapshot every input the
+                # deferred admit / drm sample needs, since tracker state advances.
+                self._pending_desc = {
+                    "handle": _extract_descriptor_async(frame, pred_bbox),
+                    "pred_bbox": pred_bbox.copy(),
+                    "ref_bbox": (
+                        self.current_bbox.copy()
+                        if self.current_bbox is not None
+                        else None
+                    ),
+                    "velocity": (
+                        self.velocity.copy()
+                        if self.velocity is not None
+                        else self.velocity
+                    ),
+                    "distractor_bank": (
+                        self._get_active_distractor_bank()
+                        if self._use_distractor_bank
+                        else ()
+                    ),
+                    "sample_drm": bool(sample_drm),
+                    "frame_idx": self.frame_idx,
+                }
+            else:
+                desc = _extract_descriptor(frame, pred_bbox)
+                if desc is not None:
+                    self.memory.try_admit(pred_bbox, desc, self.current_bbox)
+                    # Adaptive drm_margin: on confident frames, sample how well
+                    # the genuine target scores against its own DRM anchors and
+                    # feed the estimator. No-op unless drm_margin == "auto".
+                    if sample_drm:
+                        self_score = self.memory.score_target_against_drm(
+                            target_bbox=pred_bbox,
+                            target_desc=desc,
+                            ref_bbox=self.current_bbox,
+                            velocity=self.velocity,
+                            distractor_bank=(
+                                self._get_active_distractor_bank()
+                                if self._use_distractor_bank
+                                else ()
+                            ),
+                            lam_iou=self._drm_kwargs["lam_iou"],
+                            lam_app=self._drm_kwargs["lam_app"],
+                            lam_mot=self._drm_kwargs["lam_mot"],
+                            lam_time=self._drm_kwargs["lam_time"],
+                            alpha=self._drm_kwargs["alpha"],
+                            gamma=self._drm_kwargs["gamma"],
+                        )
+                        if self_score is not None:
+                            self._drm_margin_auto.observe(
+                                self_score, self.frame_idx
+                            )
 
         self._maybe_update_stable_anchor(pred_bbox)
 
@@ -2610,6 +2952,11 @@ class SiamRAMExperimentTracker:
         self,
         frame: np.ndarray,
     ) -> Tuple[np.ndarray, float]:
+        # Flush any deferred descriptor before occlusion recovery runs its own
+        # (synchronous) OSNet calls, so the side stream is drained and the
+        # appearance memory is consistent. Normally a no-op (pending is cleared
+        # on occlusion entry).
+        self._resolve_pending_descriptor()
         return self._occlusion_subsystem.occlusion_update(
             frame=frame,
         )

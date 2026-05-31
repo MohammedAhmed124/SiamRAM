@@ -64,6 +64,10 @@ import sys
 import warnings
 from pathlib import Path
 
+from utils.console import quiet_external_logs, silence_noisy_libraries
+
+silence_noisy_libraries()
+
 import pandas as pd
 from omegaconf import OmegaConf
 
@@ -76,9 +80,10 @@ from models.siamram.tracker import SiamRAMExperimentTracker
 from vis.test_model import run_inference
 
 try:
-    from models.SiamABC.tracker.trt_engine.siamabc import get_trt_tracker
+    with quiet_external_logs():
+        from models.SiamABC.tracker.trt_engine.siamabc import get_trt_tracker
     _trt_import_error: Exception | None = None
-except ModuleNotFoundError as exc:
+except (ModuleNotFoundError, ImportError, AssertionError, RuntimeError) as exc:
     get_trt_tracker = None  # type: ignore[assignment]
     _trt_import_error = exc
 
@@ -91,7 +96,8 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", message=".*LeafSpec.*")
 warnings.filterwarnings("ignore", message=".*tensorrt.plugin module is experimental.*")
 
-os.environ["TORCH_LOGS"] = ""
+if os.environ.get("TORCH_LOGS", None) == "":
+    os.environ.pop("TORCH_LOGS", None)
 os.environ["TORCHDYNAMO_VERBOSE"] = "0"
 
 logging.basicConfig(level=logging.ERROR)
@@ -680,6 +686,40 @@ def _filter_run_entries_by_video_key(
     return chosen
 
 
+TRACKER_CONFIG_ALIASES = {
+    "score_window_type": "windowing",
+    "score_grid_stride": "total_stride",
+    "score_grid_size": "score_size",
+    "template_update_enabled": "dynamic_update",
+    "bbox_smoothing_enabled": "smooth",
+    "template_context_padding": "template_bbox_offset",
+    "search_context_scale": "search_context",
+    "search_crop_size": "instance_size",
+    "template_crop_size": "template_size",
+    "template_update_interval": "N",
+    "warmup_template_update_interval": "warm_up_n",
+    "template_memory_window": "memory_window_size",
+    "template_admit_conf_threshold": "dynamic_update_threshold",
+    "running_confidence_floor": "running_confidence_floor_value",
+    "template_admit_iou_threshold": "iou_threshold",
+    "template_warmup_frames": "warmup_frames",
+    "warmup_template_memory_window": "warmup_window_size",
+}
+
+
+def _normalize_tracker_config_aliases(config) -> None:
+    """
+    Let inference YAML use readable tracker keys while keeping SiamABC internals
+    compatible with the original short/legacy names.
+    """
+    if "tracker" not in config:
+        return
+    tracker_cfg = config.tracker
+    for friendly_key, legacy_key in TRACKER_CONFIG_ALIASES.items():
+        if friendly_key in tracker_cfg:
+            tracker_cfg[legacy_key] = tracker_cfg[friendly_key]
+
+
 SUBMISSION_COLUMNS = ["id", "x", "y", "w", "h"]
 
 
@@ -1049,12 +1089,12 @@ def main():
     --------------------------
     We construct the tracker in one of two modes:
 
-      a) TensorRT mode (config.make_trt_engine = True):
+      a) TensorRT mode (config.trt_engine.trt_compile_siamabc = True):
          Compiles the model to a TRT engine for maximum GPU throughput.
          This is slower to initialise but much faster per frame — ideal for
          large datasets or tight time budgets.
 
-      b) Standard PyTorch mode (config.make_trt_engine = False):
+      b) Standard PyTorch mode (config.trt_engine.trt_compile_siamabc = False):
          Loads the model normally with optional test-time augmentation (TTA)
          controlled by lambda_tta. Easier to set up and still fast.
 
@@ -1110,6 +1150,7 @@ def main():
     #         if anything is missing or corrupted.
     # ------------------------------------------------------------------
     config = OmegaConf.load(args.yaml_config_path)
+    _normalize_tracker_config_aliases(config)
     ram_tracker_kwargs = flatten_ram_tracker_config(config)
 
     resolved_weights_path = _resolve_weights_path(args.weights_path)
@@ -1136,14 +1177,49 @@ def main():
     # Either way, we wrap the result in SiamRAMTracker to get the
     # YOLO-powered re-detection safety net on top.
     # ------------------------------------------------------------------
-    if config.make_trt_engine:
+    # All TRT/FP16 settings now live under the `trt_engine` block. The SiamABC
+    # toggle is `trt_engine.trt_compile_siamabc`; the legacy top-level
+    # `trt_compile_siamabc` / `make_trt_engine` keys are honored as fallbacks so
+    # older configs keep working.
+    trt_cfg = config.get("trt_engine", {}) or {}
+    _siam_flag = trt_cfg.get("trt_compile_siamabc", None)
+    if _siam_flag is None:
+        _siam_flag = config.get(
+            "trt_compile_siamabc", config.get("make_trt_engine", False)
+        )
+    compile_siamabc = bool(_siam_flag)
+
+    # OSNet FP16 / TRT also live under trt_engine; inject them into the tracker
+    # kwargs (they are no longer in the ram_tracker.descriptor block). Fall back
+    # to any legacy descriptor-block values, then to disabled.
+    ram_tracker_kwargs["osnet_fp16"] = bool(
+        trt_cfg.get("osnet_fp16", ram_tracker_kwargs.get("osnet_fp16", False))
+    )
+    ram_tracker_kwargs["trt_compile_osnet"] = bool(
+        trt_cfg.get(
+            "trt_compile_osnet", ram_tracker_kwargs.get("trt_compile_osnet", False)
+        )
+    )
+    ram_tracker_kwargs["osnet_async_overlap"] = bool(
+        trt_cfg.get(
+            "osnet_async_overlap",
+            ram_tracker_kwargs.get("osnet_async_overlap", False),
+        )
+    )
+
+    if compile_siamabc:
         if get_trt_tracker is None:
             raise ModuleNotFoundError(
                 "TensorRT tracker dependencies are missing. "
-                "Set make_trt_engine: False in your config or install torch_tensorrt."
+                "Set trt_engine.trt_compile_siamabc: False in your config or "
+                "install torch_tensorrt."
             ) from _trt_import_error
         wrapped = get_trt_tracker(
-            config=config, weights_path=args.weights_path, **config.trt_engine
+            config=config,
+            weights_path=args.weights_path,
+            lambda_tta=float(trt_cfg.get("lambda_tta", args.lambda_tta)),
+            fp16=bool(trt_cfg.get("fp16", True)),
+            cuda_id=int(trt_cfg.get("cuda_id", 0)),
         )
     else:
         wrapped = get_tracker(

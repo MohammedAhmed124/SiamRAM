@@ -62,7 +62,6 @@ import shutil
 import subprocess
 import sys
 import warnings
-from collections import defaultdict
 from pathlib import Path
 
 import pandas as pd
@@ -131,6 +130,7 @@ def parse_args():
       --datasets        : optionally restrict to specific dataset sub-folders
       --video_key       : run only one manifest/sequence entry by key
       --submission_csv  : where to write the final submission CSV
+      --override_csv    : rebuild/overlay CSV rows from saved bbox outputs
       --output_video    : if set, writes annotated debug videos to outputs_dir
 
     Returns
@@ -255,6 +255,16 @@ def parse_args():
         "--submission_csv",
         default=str(BASE_DIR / "submission.csv"),
         help="Output path for the submission CSV file.",
+    )
+    parser.add_argument(
+        "--override_csv",
+        "--override-csv",
+        action="store_true",
+        help=(
+            "After this run, rebuild --submission_csv from all bbox .txt outputs "
+            "found for the selected split under --outputs_dir. Useful for rerunning "
+            "one video while keeping a full submission CSV built from saved outputs."
+        ),
     )
     parser.add_argument(
         "--output_video",
@@ -670,6 +680,174 @@ def _filter_run_entries_by_video_key(
     return chosen
 
 
+SUBMISSION_COLUMNS = ["id", "x", "y", "w", "h"]
+
+
+def _uses_train_submission_id(args, entry: dict) -> bool:
+    split_name = str(entry.get("split", args.run_split))
+    return args.run_split == "train_csv" or (
+        args.run_split in {"train", "all"} and split_name == "train"
+    )
+
+
+def _build_submission_id(args, key: str, entry: dict, frame_idx: int) -> str:
+    if _uses_train_submission_id(args, entry):
+        return f"{args.id_prefix}_{key}_{frame_idx}"
+    return f"{key}_{frame_idx}"
+
+
+def _build_submission_id_prefix(args, key: str, entry: dict) -> str:
+    if _uses_train_submission_id(args, entry):
+        return f"{args.id_prefix}_{key}_"
+    return f"{key}_"
+
+
+def _submission_id_matches_prefix(sample_id: object, prefix: str) -> bool:
+    sample_id = str(sample_id)
+    if not sample_id.startswith(prefix):
+        return False
+    return sample_id[len(prefix) :].isdigit()
+
+
+def _bbox_file_for_entry(outputs_dir: str, entry: dict) -> str:
+    head, tail = os.path.split(os.path.join(outputs_dir, entry["output_rel_path"]))
+    return os.path.join(head, os.path.splitext(tail)[0] + ".txt")
+
+
+def _compile_submission_from_outputs(
+    args,
+    entries: dict[str, dict],
+) -> tuple[pd.DataFrame, list[str], list[str]]:
+    """
+    Build a submission DataFrame from saved per-video bbox text files.
+
+    In normal mode, entries are just the videos processed in this invocation.
+    With --override_csv, entries are the full selected split, so the final CSV
+    is rebuilt from the bbox outputs already present under --outputs_dir.
+    """
+    rows: list[dict[str, float | str]] = []
+    missing_keys: list[str] = []
+    present_prefixes: list[str] = []
+
+    for key, entry in entries.items():
+        bbox_file = _bbox_file_for_entry(args.outputs_dir, entry)
+
+        if not os.path.exists(bbox_file):
+            missing_keys.append(key)
+            continue
+
+        with open(bbox_file, "r", encoding="utf-8") as f:
+            lines = [line for line in f.read().splitlines() if line.strip()]
+
+        if not lines:
+            raise ValueError(f"Bbox output file is empty: {bbox_file}")
+
+        present_prefixes.append(_build_submission_id_prefix(args, key, entry))
+        for frame_idx, line in enumerate(lines):
+            parts = line.strip().split()
+            if len(parts) != 4:
+                raise ValueError(
+                    f"Invalid bbox line in {bbox_file!r} at frame {frame_idx}: "
+                    f"expected 4 values, got {len(parts)} ({line!r})"
+                )
+            x, y, w, h = parts
+            rows.append(
+                {
+                    "id": _build_submission_id(args, key, entry, frame_idx),
+                    "x": float(x),
+                    "y": float(y),
+                    "w": float(w),
+                    "h": float(h),
+                }
+            )
+
+    submission = pd.DataFrame(rows, columns=SUBMISSION_COLUMNS)
+    _validate_submission(submission)
+
+    return submission, missing_keys, present_prefixes
+
+
+def _validate_submission(submission: pd.DataFrame) -> None:
+    if submission["id"].duplicated().any():
+        duplicate_ids = submission.loc[submission["id"].duplicated(), "id"].head(5)
+        raise ValueError(
+            "Compiled submission contains duplicate ids; refusing to write CSV. "
+            f"Examples: {duplicate_ids.tolist()}"
+        )
+
+
+def _require_submission_columns(submission: pd.DataFrame, csv_path: str) -> None:
+    missing_columns = [
+        column for column in SUBMISSION_COLUMNS if column not in submission.columns
+    ]
+    if missing_columns:
+        raise ValueError(
+            f"Cannot --override_csv because {csv_path!r} is missing "
+            f"required column(s): {missing_columns}"
+        )
+
+
+def _merge_rebuilt_outputs_into_existing(
+    existing_submission: pd.DataFrame,
+    rebuilt_submission: pd.DataFrame,
+    rebuilt_prefixes: list[str],
+    csv_path: str,
+) -> tuple[pd.DataFrame, int]:
+    """
+    Overlay rebuilt bbox-output rows onto an existing submission CSV.
+
+    This is the safe one-video-rerun path: every saved output under
+    --outputs_dir is trusted as fresh, while videos without a saved bbox file
+    keep their previous CSV rows.
+    """
+    _require_submission_columns(existing_submission, csv_path)
+
+    existing = existing_submission[SUBMISSION_COLUMNS].copy()
+    rebuilt = rebuilt_submission[SUBMISSION_COLUMNS].copy()
+    existing["id"] = existing["id"].astype(str)
+    rebuilt["id"] = rebuilt["id"].astype(str)
+
+    def matching_prefix(sample_id: object) -> str | None:
+        for prefix in rebuilt_prefixes:
+            if _submission_id_matches_prefix(sample_id, prefix):
+                return prefix
+        return None
+
+    rebuilt_by_prefix = {
+        prefix: rebuilt[
+            rebuilt["id"].map(
+                lambda sample_id, prefix=prefix: _submission_id_matches_prefix(
+                    sample_id, prefix
+                )
+            )
+        ]
+        for prefix in rebuilt_prefixes
+    }
+
+    merged_rows: list[dict] = []
+    inserted_prefixes: set[str] = set()
+    replaced_existing_rows = 0
+
+    for _, row in existing.iterrows():
+        prefix = matching_prefix(row["id"])
+        if prefix is None:
+            merged_rows.append(row.to_dict())
+            continue
+
+        replaced_existing_rows += 1
+        if prefix not in inserted_prefixes:
+            merged_rows.extend(rebuilt_by_prefix[prefix].to_dict("records"))
+            inserted_prefixes.add(prefix)
+
+    for prefix in rebuilt_prefixes:
+        if prefix not in inserted_prefixes:
+            merged_rows.extend(rebuilt_by_prefix[prefix].to_dict("records"))
+
+    merged = pd.DataFrame(merged_rows, columns=SUBMISSION_COLUMNS)
+    _validate_submission(merged)
+    return merged, replaced_existing_rows
+
+
 # ---------------------------------------------------------------------------
 # Checkpoint management
 # ---------------------------------------------------------------------------
@@ -1074,6 +1252,7 @@ def main():
             key=lambda item: (str(item[1].get("dataset", "")), item[0]),
         )
     )
+    csv_rebuild_entries = dict(run_entries)
 
     run_entries = _filter_run_entries_by_video_key(
         run_entries=run_entries,
@@ -1155,37 +1334,62 @@ def main():
     # We assign each line an id of "<video_key>_<frame_index>" and collect
     # everything into a flat DataFrame that the competition scorer expects.
     # ------------------------------------------------------------------
-    print("\nCompiling submission CSV...")
-    submission_df = defaultdict(list)
+    if args.override_csv:
+        print(
+            "\nRebuilding submission CSV from saved bbox outputs under "
+            f"{args.outputs_dir}..."
+        )
+        submission, missing_bbox_keys, rebuilt_prefixes = _compile_submission_from_outputs(
+            args=args,
+            entries=csv_rebuild_entries,
+        )
+        if not rebuilt_prefixes:
+            raise RuntimeError(
+                "--override_csv found no bbox output files under "
+                f"{args.outputs_dir}; refusing to modify the CSV."
+            )
+        if missing_bbox_keys:
+            if not os.path.exists(args.submission_csv):
+                sample_missing = missing_bbox_keys[:10]
+                raise RuntimeError(
+                    "--override_csv found missing bbox output files and cannot "
+                    "preserve their previous rows because --submission_csv does "
+                    f"not exist. Missing count: {len(missing_bbox_keys)}. "
+                    f"Examples: {sample_missing}"
+                )
 
-    for key, value in run_entries.items():
-        head, tail = os.path.split(os.path.join(args.outputs_dir, value["output_rel_path"]))
-        bbox_file = os.path.join(head, os.path.splitext(tail)[0] + ".txt")
-
-        if os.path.exists(bbox_file):
-            with open(bbox_file, "r") as f:
-                lines = f.read().strip().split("\n")
-                for frame_idx, line in enumerate(lines):
-                    x, y, w, h = line.strip().split()
-                    split_name = str(value.get("split", args.run_split))
-                    if args.run_split == "train_csv" or (
-                        args.run_split in {"train", "all"} and split_name == "train"
-                    ):
-                        sample_id = f"{args.id_prefix}_{key}_{frame_idx}"
-                    else:
-                        sample_id = f"{key}_{frame_idx}"
-                    submission_df["id"].append(sample_id)
-                    submission_df["x"].append(float(x))
-                    submission_df["y"].append(float(y))
-                    submission_df["w"].append(float(w))
-                    submission_df["h"].append(float(h))
+            existing_submission = pd.read_csv(args.submission_csv, dtype={"id": str})
+            original_rows = len(existing_submission)
+            submission, replaced_existing_rows = _merge_rebuilt_outputs_into_existing(
+                existing_submission=existing_submission,
+                rebuilt_submission=submission,
+                rebuilt_prefixes=rebuilt_prefixes,
+                csv_path=args.submission_csv,
+            )
+            print(
+                "Override CSV mode: rebuilt rows from "
+                f"{len(rebuilt_prefixes)} saved output file(s), replaced "
+                f"{replaced_existing_rows} old row(s), and preserved existing "
+                f"CSV rows for {len(missing_bbox_keys)} missing output file(s) "
+                f"({original_rows} -> {len(submission)} rows)."
+            )
         else:
+            print(
+                "Override CSV mode: rebuilt the full CSV from "
+                f"{len(csv_rebuild_entries)} saved output file(s)."
+            )
+    else:
+        print("\nCompiling submission CSV...")
+        submission, missing_bbox_keys, _rebuilt_prefixes = _compile_submission_from_outputs(
+            args=args,
+            entries=run_entries,
+        )
+        for key in missing_bbox_keys:
             # This shouldn't happen if inference completed successfully,
             # but we warn instead of crashing so one bad video doesn't
             # destroy the whole submission.
             print(f"Warning: bbox file missing for {key}")
 
-    submission = pd.DataFrame(submission_df)
     submission.to_csv(args.submission_csv, index=False)
 
     print(f"\nSubmission written to {args.submission_csv}")

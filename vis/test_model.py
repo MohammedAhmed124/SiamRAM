@@ -750,6 +750,45 @@ def run_inference(
                 cv2.LINE_AA,
             )
 
+        def _draw_target_motion_pill(
+            canvas: np.ndarray,
+            fast: bool,
+            speed: float,
+        ) -> None:
+            """
+            Draws a pill directly below the camera-motion pill (top-right)
+            reporting target speed (on-screen px/frame) and a fast/slow verdict,
+            mirroring _draw_camera_motion_pill's style. "Fast" uses the same
+            speed-vs-bbox-diagonal reference the adaptive template-rate controller
+            uses, so the verdict matches what template_rate_auto reacts to.
+            """
+            if fast:
+                label = "TARGET FAST"
+                color = (0, 0, 255)
+            else:
+                label = "TARGET SLOW"
+                color = C_STATUS_OK
+            label = f"{label}  {speed:.0f}px/f"
+            ph = 28
+            (tw, th), _ = cv2.getTextSize(label, FONT, 0.50, 1)
+            pw = max(150, tw + 28)
+            px = max(8, w - pw - 8)
+            py = y_off + 8 + ph + 6
+            r = ph // 2
+            cv2.rectangle(canvas, (px + r, py), (px + pw - r, py + ph), color, -1)
+            cv2.circle(canvas, (px + r, py + r), r, color, -1)
+            cv2.circle(canvas, (px + pw - r, py + r), r, color, -1)
+            cv2.putText(
+                canvas,
+                label,
+                (px + (pw - tw) // 2, py + (ph + th) // 2 - 1),
+                FONT,
+                0.50,
+                C_STATUS_TEXT,
+                1,
+                cv2.LINE_AA,
+            )
+
         tracker.initialize(first_bgr, initial_bbox)
         _refresh_panels(
             inner_tracker,
@@ -1012,6 +1051,27 @@ def run_inference(
                         heavy=bool(getattr(tracker, "_last_heavy_cam_motion", False)),
                         disp=float(getattr(tracker, "_last_heavy_cam_disp", 0.0)),
                     )
+                    # Target speed pill, mirroring the camera-motion pill. velocity
+                    # is in processed-frame px/frame; overlay_scale maps it back to
+                    # on-screen px/frame, and the bbox diagonal (display coords)
+                    # gives the same fast/slow reference template_rate_auto uses.
+                    tgt_speed_disp = (
+                        float(np.linalg.norm(getattr(tracker, "velocity", np.zeros(2))))
+                        * overlay_scale
+                    )
+                    tgt_diag = max(
+                        1.0, float(np.hypot(float(bbox[2]), float(bbox[3])))
+                    )
+                    tgt_ref_norm = float(
+                        getattr(tracker, "_template_rate_auto_target_ref_norm", 0.15)
+                    )
+                    tgt_fast = (
+                        tgt_ref_norm > 0.0
+                        and tgt_speed_disp >= tgt_ref_norm * tgt_diag
+                    )
+                    _draw_target_motion_pill(
+                        canvas, fast=bool(tgt_fast), speed=tgt_speed_disp
+                    )
 
                 if visual_mode == "occluded":
                     hud = f"F:{frame_idx}  [DAM RECOVERY]"
@@ -1120,6 +1180,66 @@ def run_inference(
                         expected_hist=list(expected_speed_hist),
                         actual_hist=list(actual_speed_hist),
                         distractor_hist=list(distractor_mode_hist),
+                    )
+
+                # Right-column readout stack, drawn LAST so the full-width
+                # velocity strip can't paint over it. Bottom-anchored: each box
+                # stacks upward from there. Pinned to the bottom of the velocity
+                # strip when present, else just below the side panels.
+                stack_x0 = w + 4
+                stack_x1 = total_w - 4
+                stack_y = (
+                    canvas_h - 6
+                    if show_velocity_overlay
+                    else min(canvas_h - 6, PANEL_W * 3 + GAP * 2 + 92)
+                )
+
+                def _stack_box(y_bottom, line1, line2, fg):
+                    y_top = y_bottom - 40
+                    cv2.rectangle(
+                        canvas, (stack_x0, y_top), (stack_x1, y_bottom), (20, 20, 20), -1
+                    )
+                    cv2.rectangle(
+                        canvas, (stack_x0, y_top), (stack_x1, y_bottom), (70, 70, 70), 1
+                    )
+                    cv2.putText(
+                        canvas, line1, (stack_x0 + 6, y_top + 16),
+                        FONT, 0.42, fg, 1, cv2.LINE_AA,
+                    )
+                    cv2.putText(
+                        canvas, line2, (stack_x0 + 6, y_top + 33),
+                        FONT, 0.38, fg, 1, cv2.LINE_AA,
+                    )
+                    return y_top - 6
+
+                # (1) Adaptive DRM acceptance margin (only when drm_margin=="auto";
+                # numeric drm_margin leaves _drm_margin_auto None -> not drawn).
+                auto_margin = getattr(tracker, "_drm_margin_auto", None) if is_dam else None
+                if auto_margin is not None:
+                    ema = auto_margin.ema
+                    m_l2 = (
+                        "(auto, warmup)"
+                        if ema is None
+                        else f"(auto) ema={ema:.3f} n={auto_margin.samples}"
+                    )
+                    stack_y = _stack_box(
+                        stack_y, f"DRM margin: {auto_margin.value:.3f}", m_l2, (0, 220, 220)
+                    )
+
+                # (2) Dynamic-template update rate (N / window). Always shown; the
+                # second line says whether template_rate_auto is driving it this
+                # frame (and the smoothed 0..1 motion) or it's a fixed rate.
+                if is_dam:
+                    n_cur = int(getattr(inner_tracker, "N", 0))
+                    win_cur = int(getattr(inner_tracker, "memory_window_size", 0))
+                    tr_auto = getattr(tracker, "_template_rate_auto", None)
+                    tr_l2 = (
+                        f"(auto) motion={tr_auto.motion:.2f}"
+                        if tr_auto is not None
+                        else "(fixed)"
+                    )
+                    stack_y = _stack_box(
+                        stack_y, f"Tmpl rate: N={n_cur} win={win_cur}", tr_l2, (0, 210, 140)
                     )
 
                 writer.write(canvas)

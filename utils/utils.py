@@ -45,7 +45,7 @@ import torch
 from numpy._typing import NDArray
 from torch import Tensor
 from torch.nn import Module
-from utils.console import quiet_external_logs
+from utils.console import quiet_external_logs, siamram_log
 
 BBoxLike = Union[np.ndarray, Sequence[float], Sequence[Sequence[float]]]
 DescriptorOutput = Union[Optional[np.ndarray], list[Optional[np.ndarray]]]
@@ -492,7 +492,11 @@ def _ensure_osnet_reid_checkpoint(preset_key: str, preset_cfg: dict[str, str]) -
         out_file.unlink()
 
     url = f"https://drive.google.com/uc?id={preset_cfg['file_id']}"
-    print(f"[osnet] downloading preset '{preset_key}' -> {out_file}")
+    siamram_log(
+        f"downloading preset '{preset_key}' → {out_file}",
+        phase="DESC",
+        status="build",
+    )
     output_path = gdown.download(url=url, output=str(out_file), quiet=False)
     if not output_path or not out_file.exists() or out_file.stat().st_size < _OSNET_REID_MIN_BYTES:
         raise RuntimeError(

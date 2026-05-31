@@ -6,15 +6,15 @@ weights_path: "/home/moha/SiamRAM/checkpoints/inference_checkpoint.pth"
 # =============================================================================
 trt_engine:
   # TRT-compile the SiamABC backbone. Master switch for the SiamABC engine.
-  trt_compile_siamabc: False
+  trt_compile_siamabc: True
   # FP16 precision for the SiamABC TRT engine (build + execution).
-  fp16: False
+  fp16: True
   # OSNet-only descriptor acceleration. Ignored unless descriptor_backend == "osnet".
-  trt_compile_osnet: False
+  trt_compile_osnet: True
   # OSNet-only FP16 descriptor inference. Ignored unless descriptor_backend == "osnet".
-  osnet_fp16: False
+  osnet_fp16: True
   # OSNet-only async overlap. Pixel descriptors are CPU-only and synchronous.
-  osnet_async_overlap: False
+  osnet_async_overlap: True
   # Test-time-augmentation blend factor inside the SiamABC TRT wrapper.
   lambda_tta: 0.1
   # GPU device index to build / run engines on.
@@ -229,10 +229,10 @@ ram_tracker:
       # the high-motion template params kick in.
       target_motion_high_px_threshold: 22.0
       # select_representatives() cadence (template re-picked every N frames) when fast.
-      target_motion_high_N: 15
+      target_motion_high_N: 10
       # Memory window length (frames kept for template selection) when fast.
       # Shrinking drops the oldest memory frames; deques rebuilt only on a change.
-      target_motion_high_memory_window_size: 15
+      target_motion_high_memory_window_size: 10
       # Keep the high-motion params lingering this many frames after the object
       # slows, before reverting to base. 0 = revert the instant it slows.
       target_motion_template_adapt_linger_frames: 0
@@ -427,7 +427,7 @@ ram_tracker:
       # DRM (composite candidate ranking) used during occlusion recovery.
       drm:
         # Appearance similarity needed to admit a candidate into the DRM bank.
-        drm_tau_sim: 0.85
+        drm_tau_sim: 0.75
         # Minimum support count required to promote a bank entry.
         drm_mmin: 3
         # Max entries in the DRM bank.

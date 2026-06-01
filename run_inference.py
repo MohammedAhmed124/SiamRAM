@@ -224,7 +224,7 @@ def parse_args():
     )
     parser.add_argument(
         "--yaml_config_path",
-        default=str(BASE_DIR / "config" / "inference_config.yaml"),
+        default=str(BASE_DIR / "config" / "inference_config_experimental.yaml"),
         help="Path to the inference config YAML file.",
     )
     parser.add_argument(

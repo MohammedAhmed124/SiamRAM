@@ -26,10 +26,12 @@ of the TRT compilation while third-party TensorRT chatter stays hidden.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Set
 
 import torch
 import torch.nn as nn
+
 from utils.console import quiet_external_logs, siamram_log, silence_noisy_libraries
 
 log = logging.getLogger(__name__)
@@ -42,6 +44,9 @@ def build_osnet_trt(
     device: torch.device,
     input_h: int,
     input_w: int,
+    cache_dir: str = "",
+    cache_prefix: str = "osnet",
+    rebuild_cache: bool = False,
 ) -> nn.Module:
     """
     Compile a torchreid OSNet model into a static batch-1 TensorRT engine.
@@ -68,6 +73,37 @@ def build_osnet_trt(
     )
 
     dummy = torch.randn(1, 3, input_h, input_w, device=device, dtype=dtype)
+    cache_path = (
+        Path(cache_dir) / f"{cache_prefix}.ts"
+        if cache_dir
+        else None
+    )
+
+    if cache_path is not None and cache_path.exists() and not rebuild_cache:
+        try:
+            siamram_log(
+                f"Loading cached OSNet engine · {cache_path.name}",
+                phase="DESC",
+                status="load",
+                indent=1,
+            )
+            engine = torch.jit.load(str(cache_path), map_location=device).eval()
+            with torch.no_grad():
+                engine(dummy)
+            siamram_log(
+                "OSNet descriptor engine ready",
+                phase="DESC",
+                status="ready",
+                indent=1,
+            )
+            return engine
+        except Exception as exc:
+            siamram_log(
+                f"cached OSNet engine load failed ({cache_path.name}): {exc}; rebuilding",
+                phase="DESC",
+                status="warn",
+                indent=1,
+            )
 
     siamram_log("Compiling OSNet descriptor engine", phase="DESC", status="build", indent=1)
     with quiet_external_logs():
@@ -89,6 +125,24 @@ def build_osnet_trt(
         # Warm the engine so the first real frame doesn't pay the lazy-init cost.
         with torch.no_grad():
             engine(dummy)
+
+    if cache_path is not None:
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            torch.jit.save(engine, str(cache_path))
+            siamram_log(
+                f"Saved cached OSNet engine · {cache_path.name}",
+                phase="DESC",
+                status="done",
+                indent=1,
+            )
+        except Exception as exc:
+            siamram_log(
+                f"cached OSNet engine save failed ({cache_path.name}): {exc}",
+                phase="DESC",
+                status="warn",
+                indent=1,
+            )
 
     siamram_log("OSNet descriptor engine ready", phase="DESC", status="ready", indent=1)
     return engine

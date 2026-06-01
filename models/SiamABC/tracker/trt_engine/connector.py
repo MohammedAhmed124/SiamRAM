@@ -51,10 +51,12 @@ from __future__ import annotations
 
 import copy
 import logging
+from pathlib import Path
 from typing import Dict, Tuple
 
 import torch
 import torch.nn as nn
+
 from utils.console import quiet_external_logs, silence_noisy_libraries
 
 silence_noisy_libraries()
@@ -140,6 +142,9 @@ def _build_connect_engines(
     t_feat_shape: Tuple[int, ...],
     norm_lambda: float,
     device: torch.device,
+    cache_dir: str = "",
+    cache_prefix: str = "siamabc",
+    rebuild_cache: bool = False,
 ) -> Dict[str, torch.nn.Module]:
     _, C_s, h_s, w_s = s_feat_shape
     _, _, h_t, w_t = t_feat_shape
@@ -155,8 +160,29 @@ def _build_connect_engines(
     ]
 
     engines: Dict[str, torch.nn.Module] = {}
+    cache_root = Path(cache_dir) if cache_dir else None
 
     for tag, lam_val in (("zero", 0.0), ("lambda", norm_lambda)):
+        cache_path = (
+            cache_root / f"{cache_prefix}_connect_{tag}.ep"
+            if cache_root is not None
+            else None
+        )
+        if cache_path is not None and cache_path.exists() and not rebuild_cache:
+            try:
+                log.info("TRTSiamABCNet: loading cached connect_model [%s]", tag)
+                loaded = torch_tensorrt.load(str(cache_path)).module()
+                with torch.no_grad():
+                    loaded(dummy_search_org, dummy_search, dummy_kernel)
+                engines[tag] = loaded
+                continue
+            except Exception as exc:
+                log.warning(
+                    "TRTSiamABCNet: cached connect_model load failed [%s]: %s; rebuilding",
+                    tag,
+                    exc,
+                )
+
         log.info(
             "TRTSiamABCNet: building connect_model TRT engine [lam=%.4f] …", lam_val
         )
@@ -185,6 +211,26 @@ def _build_connect_engines(
             engine(dummy_search_org, dummy_search, dummy_kernel)
 
         engines[tag] = engine
+        if cache_path is not None:
+            try:
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                torch_tensorrt.save(
+                    engine,
+                    str(cache_path),
+                    output_format="exported_program",
+                    arg_inputs=(dummy_search_org, dummy_search, dummy_kernel),
+                )
+                log.info(
+                    "TRTSiamABCNet: cached connect_model engine [%s] saved to %s",
+                    tag,
+                    cache_path,
+                )
+            except Exception as exc:
+                log.warning(
+                    "TRTSiamABCNet: cached connect_model save failed [%s]: %s",
+                    tag,
+                    exc,
+                )
         del module, exported         
         torch.cuda.empty_cache()     
 

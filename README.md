@@ -188,6 +188,11 @@ uv run run_inference.py \
 | `--lambda_tta` | `0.1` | TTA lambda for the base tracker |
 | `--datasets` | all sub-dirs in `--data_dir` | Specific dataset folders to run; defaults to everything in `data/` except `metadata/` |
 | `--submission_csv` | `submission.csv` | Output path for the final submission CSV |
+| `--reuse_tracker` | off | Reuse one SiamRAM wrapper across clips for speed; default is one fresh wrapper per clip |
+| `--trt_cache_dir` | `checkpoints/trt_engines` | Directory for serialized TensorRT engine caches |
+| `--rebuild_trt_cache` | on | Rebuild and overwrite TensorRT caches once at run startup; this is the default |
+| `--use_existing_trt_cache` | off | Load already-saved TensorRT caches when available instead of forcing a rebuild |
+| `--disable_trt_cache` | off | Disable TensorRT cache load/save |
 
 ---
 

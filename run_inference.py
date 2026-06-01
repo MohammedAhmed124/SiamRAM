@@ -119,6 +119,13 @@ CHECKPOINT_DOWNLOADER = CHECKPOINTS_DIR / "download_checkpoints.py"
 # CLI argument parsing
 # ---------------------------------------------------------------------------
 
+class _SiamRAMArgumentFormatter(argparse.ArgumentDefaultsHelpFormatter):
+    def _get_help_string(self, action):
+        if action.dest == "rebuild_trt_cache":
+            return action.help
+        return super()._get_help_string(action)
+
+
 def parse_args():
     """
     Define and parse all command-line arguments for the inference run.
@@ -146,7 +153,7 @@ def parse_args():
     """
     parser = argparse.ArgumentParser(
         description="Run SiamRAM inference on a competition manifest.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        formatter_class=_SiamRAMArgumentFormatter,
     )
     parser.add_argument(
         "--split",
@@ -280,6 +287,48 @@ def parse_args():
             "Write annotated debug videos (slower). "
             "When not set, runs in fast-inference mode and writes bbox files only."
         ),
+    )
+    parser.add_argument(
+        "--reuse_tracker",
+        action="store_true",
+        help=(
+            "Reuse one SiamRAM wrapper across all selected videos. Faster, but "
+            "sequence-local state bugs can make a clip depend on previous clips. "
+            "By default each video gets a fresh wrapper around the loaded SiamABC core."
+        ),
+    )
+    parser.add_argument(
+        "--trt_cache_dir",
+        default=str(BASE_DIR / "checkpoints" / "trt_engines"),
+        help="Directory for serialized TensorRT engine caches.",
+    )
+    trt_cache_mode = parser.add_mutually_exclusive_group()
+    trt_cache_mode.add_argument(
+        "--rebuild_trt_cache",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        dest="rebuild_trt_cache",
+        help=(
+            "Ignore any existing TensorRT cache and rebuild/save engines once for "
+            "this run. This is the default."
+        ),
+    )
+    trt_cache_mode.add_argument(
+        "--use_existing_trt_cache",
+        "--use-existing-trt-cache",
+        action="store_false",
+        default=argparse.SUPPRESS,
+        dest="rebuild_trt_cache",
+        help=(
+            "Use already-saved TensorRT engines when available instead of forcing "
+            "a rebuild at run startup."
+        ),
+    )
+    parser.set_defaults(rebuild_trt_cache=True)
+    parser.add_argument(
+        "--disable_trt_cache",
+        action="store_true",
+        help="Disable TensorRT engine load/save caching.",
     )
     return parser.parse_args()
 
@@ -1218,6 +1267,16 @@ def main():
             ram_tracker_kwargs.get("osnet_async_overlap", False),
         )
     )
+    trt_cache_dir = ""
+    if not args.disable_trt_cache:
+        trt_cache_path = Path(args.trt_cache_dir).expanduser()
+        if not trt_cache_path.is_absolute():
+            trt_cache_path = BASE_DIR / trt_cache_path
+        trt_cache_path.mkdir(parents=True, exist_ok=True)
+        trt_cache_dir = str(trt_cache_path.resolve())
+
+    ram_tracker_kwargs["trt_cache_dir"] = trt_cache_dir
+    ram_tracker_kwargs["trt_rebuild_cache"] = bool(args.rebuild_trt_cache)
 
     if compile_siamabc:
         if get_trt_tracker is None:
@@ -1232,6 +1291,8 @@ def main():
             lambda_tta=float(trt_cfg.get("lambda_tta", args.lambda_tta)),
             fp16=bool(trt_cfg.get("fp16", True)),
             cuda_id=int(trt_cfg.get("cuda_id", 0)),
+            engine_cache_dir=trt_cache_dir,
+            rebuild_cache=bool(args.rebuild_trt_cache),
         )
     else:
         wrapped = get_tracker(
@@ -1272,8 +1333,27 @@ def main():
             _resolve_weights_path(osnet_model_path_raw)
         )
 
-    tracker = tracker_cls(siam_tracker=wrapped, **ram_tracker_kwargs)
-    siamram_log(f"tracker · {tracker_cls.__name__}", phase="INIT", status="ready")
+    shared_tracker = None
+    if args.reuse_tracker:
+        shared_tracker = tracker_cls(siam_tracker=wrapped, **ram_tracker_kwargs)
+        siamram_log(
+            f"tracker · {tracker_cls.__name__} · reused across clips",
+            phase="INIT",
+            status="ready",
+        )
+    else:
+        siamram_log(
+            f"tracker · {tracker_cls.__name__} · fresh wrapper per clip",
+            phase="INIT",
+            status="ready",
+        )
+
+    def _ram_kwargs_for_clip(clip_index: int) -> dict:
+        kwargs = dict(ram_tracker_kwargs)
+        # Fresh wrappers are constructed per clip. A forced TRT rebuild should
+        # happen only on the first wrapper, then later clips load/reuse the cache.
+        kwargs["trt_rebuild_cache"] = bool(args.rebuild_trt_cache and clip_index == 0)
+        return kwargs
 
     if args.datasets is not None:
         # The user explicitly named which datasets they want.
@@ -1396,41 +1476,48 @@ def main():
         # If the file has multiple rows for some reason, we take the first.
         init_bbox = _load_initial_bbox(ann_path)
 
-        run_inference(
-            video_path=video_path,
-            initial_bbox=init_bbox,
-            tracker=tracker,
-            output_path=output_path,
-            output_video=args.output_video,
+        tracker = shared_tracker or tracker_cls(
+            siam_tracker=wrapped, **_ram_kwargs_for_clip(i)
         )
+        try:
+            run_inference(
+                video_path=video_path,
+                initial_bbox=init_bbox,
+                tracker=tracker,
+                output_path=output_path,
+                output_video=args.output_video,
+            )
 
-        # Report the YOLO-detectability verdict the probe settled on for this
-        # video (drives the occlusion-recovery strategy: detectable -> YOLO+DRM,
-        # not -> SiamABC-alone). The verdict lives on the tracker after the run.
-        enabled = bool(getattr(tracker, "_yolo_detectability_enabled", False))
-        probe_done = bool(getattr(tracker, "_detectability_probe_done", False))
-        detectable = bool(getattr(tracker, "_yolo_detectable", False))
-        runs = int(getattr(tracker, "_detectability_runs", 0))
-        hits = int(getattr(tracker, "_detectability_hits", 0))
-        if not enabled:
-            verdict, status = "probe disabled", "info"
-        elif not probe_done:
-            verdict, status = (
-                f"undetermined · {hits} hit(s) / {runs} run(s) "
-                "(clip too short or occluded before probe finished)",
-                "warn",
-            )
-        elif detectable:
-            verdict, status = (
-                f"✓ detectable · {hits} hit(s) / {runs} run(s)",
-                "ready",
-            )
-        else:
-            verdict, status = (
-                f"✗ not detectable · {hits} hit(s) / {runs} run(s)",
-                "warn",
-            )
-        siamram_log(verdict, phase="PROBE", status=status, label="yolo")
+            # Report the YOLO-detectability verdict the probe settled on for this
+            # video (drives the occlusion-recovery strategy: detectable -> YOLO+DRM,
+            # not -> SiamABC-alone). The verdict lives on the tracker after the run.
+            enabled = bool(getattr(tracker, "_yolo_detectability_enabled", False))
+            probe_done = bool(getattr(tracker, "_detectability_probe_done", False))
+            detectable = bool(getattr(tracker, "_yolo_detectable", False))
+            runs = int(getattr(tracker, "_detectability_runs", 0))
+            hits = int(getattr(tracker, "_detectability_hits", 0))
+            if not enabled:
+                verdict, status = "probe disabled", "info"
+            elif not probe_done:
+                verdict, status = (
+                    f"undetermined · {hits} hit(s) / {runs} run(s) "
+                    "(clip too short or occluded before probe finished)",
+                    "warn",
+                )
+            elif detectable:
+                verdict, status = (
+                    f"✓ detectable · {hits} hit(s) / {runs} run(s)",
+                    "ready",
+                )
+            else:
+                verdict, status = (
+                    f"✗ not detectable · {hits} hit(s) / {runs} run(s)",
+                    "warn",
+                )
+            siamram_log(verdict, phase="PROBE", status=status, label="yolo")
+        finally:
+            if shared_tracker is None and hasattr(tracker, "_discard_pending_descriptor"):
+                tracker._discard_pending_descriptor()
 
     # ------------------------------------------------------------------
     #  Stitch all per-video bbox files into one submission CSV.

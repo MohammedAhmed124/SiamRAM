@@ -182,7 +182,7 @@ uv run run_inference.py \
 | `--data_dir` | `data` | Root directory containing video files and annotation sub-folders |
 | `--manifest_path` | `data/metadata/contestant_manifest.json` | Path to the competition manifest JSON |
 | `--weights_path` | `checkpoints/head_epoch_000.pth` | SiamABC checkpoint to use for inference |
-| `--yaml_config_path` | `config/inference_config.yaml` | Inference config YAML |
+| `--yaml_config_path` | `config/inference_config_experimental.yaml` | Inference config YAML |
 | `--outputs_dir` | `outputs/SiamRAM` | Where per-video bounding-box predictions are written |
 | `--model_size` | `M` | SiamABC model size — `S`, `M`, or `L` |
 | `--lambda_tta` | `0.1` | TTA lambda for the base tracker |
@@ -255,6 +255,7 @@ SiamRAM/
 ├── utils/                        # Shared utilities (IoU, descriptors, cosine sim, losses, etc.)
 ├── config/
 │   ├── inference_config.yaml
+│   ├── inference_config_experimental.yaml
 │   └── training_config.yaml
 ├── data_prep/
 │   └── build_dataset_index.py   # Decodes videos to frames and builds the CSV index

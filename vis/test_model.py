@@ -15,7 +15,7 @@ import cv2
 import numpy as np
 from numpy._typing import NDArray
 
-from utils.console import siamram_latency
+from utils.console import SiamRAMProgressLine, siamram_latency
 from utils.utils import _iou
 
 
@@ -64,6 +64,18 @@ def _load_sequence_frame_paths(
         if name.lower().endswith(exts)
     ]
     return frame_paths
+
+
+def _tracker_visual_mode(tracker, result, is_dam: bool) -> str:
+    if not is_dam:
+        return "tracking"
+    in_occlusion = bool(result[2]) if len(result) > 2 else False
+    raw_mode = str(getattr(tracker, "visual_mode", "")).strip().lower()
+    if raw_mode == "distractor":
+        return "distractor"
+    if in_occlusion:
+        return "occluded"
+    return "tracking"
 
 
 def _confidence_color(
@@ -492,6 +504,9 @@ def run_inference(
     # Write the bbox predictions right next to the (optional) annotated video,
     # inside the same per-video folder — no separate bboxes/ sub-directory.
     bbox_file = os.path.join(head, os.path.splitext(tail)[0] + ".txt")
+    progress_name = os.path.splitext(tail)[0] or os.path.basename(
+        os.path.normpath(video_path)
+    )
 
     cap = None
     frame_paths: list[str] = []
@@ -540,7 +555,9 @@ def run_inference(
     if not output_video:
         import time
 
+        progress = SiamRAMProgressLine(progress_name, total_frames=total_frames)
         tracker.initialize(first_bgr, initial_bbox)
+        progress.update("tracking")
 
         if total_frames > 0:
             tracked_bboxes = np.empty((total_frames, 4), dtype=np.int32)
@@ -565,6 +582,7 @@ def run_inference(
                 t0 = time.perf_counter()
                 result = _update(frame)
                 frame_times.append((time.perf_counter() - t0) * 1000.0)
+                progress.update(_tracker_visual_mode(tracker, result, is_dam))
 
                 bbox = result[0]
 
@@ -583,6 +601,7 @@ def run_inference(
                 frame_idx += 1
 
         finally:
+            progress.finish()
             _release_source()
 
         if use_preallocated:
@@ -646,6 +665,7 @@ def run_inference(
         writer = cv2.VideoWriter(
             avi_path, cv2.VideoWriter_fourcc(*"XVID"), fps, (total_w, canvas_h)
         )
+        progress = SiamRAMProgressLine(progress_name, total_frames=total_frames)
 
         def _overlay_bbox(
             bb,
@@ -840,6 +860,7 @@ def run_inference(
                 distractor_hist=list(distractor_mode_hist),
             )
         writer.write(canvas)
+        progress.update("tracking")
 
         last_dyn_bbox = inner_tracker.running_dynamic_bbox.copy()
 
@@ -889,6 +910,7 @@ def run_inference(
                 times_occlusion.append(elapsed_ms)
             else:
                 times_normal.append(elapsed_ms)
+            progress.update(visual_mode)
 
             if output_video:
                 if show_velocity_overlay:
@@ -1272,6 +1294,7 @@ def run_inference(
             frame_idx += 1
 
     finally:
+        progress.finish()
         _release_source()
         if output_video:
             writer.release()

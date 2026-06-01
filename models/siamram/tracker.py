@@ -13,20 +13,18 @@ from typing import List, Optional, Tuple, TypedDict
 
 import cv2
 import numpy as np
+import torch
 from ultralytics import YOLO
 
-import torch
-
 from utils.console import siamram_log
-
 from utils.utils import (
     _cos_sim,
     _extract_descriptor,
     _extract_descriptor_async,
-    _resolve_descriptor,
-    descriptor_async_supported,
     _iou,
+    _resolve_descriptor,
     configure_descriptor_backend,
+    descriptor_async_supported,
 )
 
 from ..SiamABC.tracker.SiamABC_Tracker import SiamABCTracker
@@ -101,6 +99,8 @@ class SiamRAMExperimentTracker:
         osnet_fp16: bool = False,
         trt_compile_osnet: bool = False,
         osnet_async_overlap: bool = False,
+        trt_cache_dir: str = "",
+        trt_rebuild_cache: bool = False,
         siamese_feature_source: str = "neck",
         siamese_comparison_mode: str = "xcorr",
         descriptor_stride: int = 1,
@@ -481,6 +481,8 @@ class SiamRAMExperimentTracker:
             osnet_fp16=osnet_fp16,
             trt_compile_osnet=trt_compile_osnet,
             osnet_max_candidate_batch=osnet_max_candidate_batch,
+            trt_cache_dir=trt_cache_dir,
+            trt_rebuild_cache=trt_rebuild_cache,
         )
 
         # How often the descriptor backend (OSNet / siamese) is run on the

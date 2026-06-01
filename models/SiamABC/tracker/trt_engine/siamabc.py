@@ -51,11 +51,15 @@ Delegated / no-op:
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+from pathlib import Path
 from typing import Dict, Optional, Set, Tuple
 
 import torch
 import torch.nn as nn
+
 from utils.console import quiet_external_logs, siamram_log, silence_noisy_libraries
 
 from ...model import constants
@@ -99,6 +103,9 @@ class TRTSiamABCNet:
         opt_batch: int = 1,
         max_batch: int = 1,
         adjust_channels: int = 256,
+        engine_cache_dir: str = "",
+        cache_prefix: str = "siamabc",
+        rebuild_cache: bool = False,
     ) -> None:
 
         self._norm_lambda = norm_lambda
@@ -107,6 +114,9 @@ class TRTSiamABCNet:
         self._dtype = torch.float16 if fp16 else torch.float32
         self._template_size = template_size
         self._instance_size = instance_size
+        self._engine_cache_dir = Path(engine_cache_dir) if engine_cache_dir else None
+        self._cache_prefix = cache_prefix
+        self._rebuild_cache = bool(rebuild_cache)
 
         enabled_precisions: Set[torch.dtype] = (
             {torch.float16} if fp16 else {torch.float32}
@@ -136,17 +146,21 @@ class TRTSiamABCNet:
         _, _, h_s, w_s = s_feat_shape
 
         siamram_log("Compiling backbone engine", phase="TRT", status="build", indent=1)
-        with quiet_external_logs():
-            self._trt_feat = self._compile_feat(
-                model,
-                min_hw=template_size,
-                opt_hw=template_size,
-                max_hw=instance_size,
-                min_batch=min_batch,
-                opt_batch=opt_batch,
-                max_batch=max_batch,
-                enabled_precisions=enabled_precisions,
-            )
+        feat_cache_path = self._cache_path("features", "ts")
+        self._trt_feat = self._load_torchscript_engine(feat_cache_path)
+        if self._trt_feat is None:
+            with quiet_external_logs():
+                self._trt_feat = self._compile_feat(
+                    model,
+                    min_hw=template_size,
+                    opt_hw=template_size,
+                    max_hw=instance_size,
+                    min_batch=min_batch,
+                    opt_batch=opt_batch,
+                    max_batch=max_batch,
+                    enabled_precisions=enabled_precisions,
+                )
+            self._save_torchscript_engine(self._trt_feat, feat_cache_path)
         siamram_log("Backbone engine ready", phase="TRT", status="ready", indent=1)
 
         siamram_log("Compiling attention neck", phase="TRT", status="build", indent=1)
@@ -173,10 +187,70 @@ class TRTSiamABCNet:
                 t_feat_shape=t_feat_shape,
                 norm_lambda=norm_lambda,
                 device=self._device,
+                cache_dir=str(self._engine_cache_dir) if self._engine_cache_dir else "",
+                cache_prefix=self._cache_prefix,
+                rebuild_cache=self._rebuild_cache,
             )
         siamram_log("Connect engines ready", phase="TRT", status="ready", indent=1)
         with quiet_external_logs():
             self.get_features(torch.randn(1, 3, template_size, template_size, device=self._device))
+
+    def _cache_path(
+        self,
+        name: str,
+        suffix: str,
+    ) -> Optional[Path]:
+        if self._engine_cache_dir is None:
+            return None
+        self._engine_cache_dir.mkdir(parents=True, exist_ok=True)
+        return self._engine_cache_dir / f"{self._cache_prefix}_{name}.{suffix}"
+
+    def _load_torchscript_engine(
+        self,
+        path: Optional[Path],
+    ) -> Optional[torch.nn.Module]:
+        if path is None or self._rebuild_cache or not path.exists():
+            return None
+        try:
+            siamram_log(
+                f"Loading cached engine · {path.name}",
+                phase="TRT",
+                status="load",
+                indent=1,
+            )
+            engine = torch.jit.load(str(path), map_location=self._device).eval()
+            return engine
+        except Exception as exc:
+            siamram_log(
+                f"cached engine load failed ({path.name}): {exc}; rebuilding",
+                phase="TRT",
+                status="warn",
+                indent=1,
+            )
+            return None
+
+    def _save_torchscript_engine(
+        self,
+        engine: torch.nn.Module,
+        path: Optional[Path],
+    ) -> None:
+        if path is None:
+            return
+        try:
+            torch.jit.save(engine, str(path))
+            siamram_log(
+                f"Saved cached engine · {path.name}",
+                phase="TRT",
+                status="done",
+                indent=1,
+            )
+        except Exception as exc:
+            siamram_log(
+                f"cached engine save failed ({path.name}): {exc}",
+                phase="TRT",
+                status="warn",
+                indent=1,
+            )
 
 
     def _compile_feat(
@@ -310,6 +384,8 @@ def get_trt_tracker(
     lambda_tta: float = 0.1,
     fp16: bool = True,
     cuda_id: int = 0,
+    engine_cache_dir: str = "",
+    rebuild_cache: bool = False,
 ):
     from hydra.utils import instantiate
     from pytorch_toolbelt.utils import transfer_weights
@@ -340,6 +416,15 @@ def get_trt_tracker(
     tracking_cfg = config["tracker"]
     template_size = int(tracking_cfg["template_size"])
     instance_size = int(tracking_cfg["instance_size"])
+    cache_prefix = _siamabc_cache_prefix(
+        config=config,
+        weights_path=weights_path,
+        template_size=template_size,
+        instance_size=instance_size,
+        lambda_tta=lambda_tta,
+        fp16=fp16,
+        cuda_id=cuda_id,
+    )
 
     siamram_log(
         "Starting TensorRT compilation (first run can take 1-3 min)",
@@ -353,8 +438,50 @@ def get_trt_tracker(
         norm_lambda=lambda_tta,
         cuda_id=cuda_id,
         fp16=fp16,
+        engine_cache_dir=engine_cache_dir,
+        cache_prefix=cache_prefix,
+        rebuild_cache=rebuild_cache,
     )
     siamram_log("Compilation complete. Tracker is ready", phase="TRT", status="done")
 
     tracker: SiamABCTracker = instantiate(config["tracker"], model=trt_model)
     return tracker
+
+
+def _siamabc_cache_prefix(
+    config,
+    weights_path: str,
+    template_size: int,
+    instance_size: int,
+    lambda_tta: float,
+    fp16: bool,
+    cuda_id: int,
+) -> str:
+    weights = Path(weights_path)
+    try:
+        stat = weights.stat()
+        weight_meta = {
+            "path": str(weights.resolve()),
+            "size": int(stat.st_size),
+            "mtime_ns": int(stat.st_mtime_ns),
+        }
+    except OSError:
+        weight_meta = {"path": str(weights)}
+
+    payload = {
+        "kind": "siamabc",
+        "model_size": str(config["model"].get("model_size", "")),
+        "template_size": int(template_size),
+        "instance_size": int(instance_size),
+        "lambda_tta": float(lambda_tta),
+        "fp16": bool(fp16),
+        "cuda_id": int(cuda_id),
+        "torch": getattr(torch, "__version__", "unknown"),
+        "torch_tensorrt": getattr(torch_tensorrt, "__version__", "unknown"),
+        "weights": weight_meta,
+    }
+    digest = hashlib.sha1(
+        json.dumps(payload, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:16]
+    precision = "fp16" if fp16 else "fp32"
+    return f"siamabc_{payload['model_size']}_{precision}_{digest}"

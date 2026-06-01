@@ -36,6 +36,8 @@ Concretely, it provides six categories of helpers:
    needed arithmetic and device-management helpers.
 """
 
+import hashlib
+import json
 from pathlib import Path
 from typing import Any, Optional, Sequence, Tuple, Union
 
@@ -45,6 +47,7 @@ import torch
 from numpy._typing import NDArray
 from torch import Tensor
 from torch.nn import Module
+
 from utils.console import quiet_external_logs, siamram_log
 
 BBoxLike = Union[np.ndarray, Sequence[float], Sequence[Sequence[float]]]
@@ -118,6 +121,9 @@ class _OSNetDescriptorExtractor:
         fp16: bool = False,
         trt_compile: bool = False,
         max_batch: int = 8,
+        trt_cache_dir: str = "",
+        trt_rebuild_cache: bool = False,
+        cache_prefix: str = "osnet",
     ) -> None:
         try:
             from torchreid.utils import FeatureExtractor
@@ -172,6 +178,9 @@ class _OSNetDescriptorExtractor:
                 device=self._device,
                 input_h=self._INPUT_H,
                 input_w=self._INPUT_W,
+                cache_dir=trt_cache_dir,
+                cache_prefix=cache_prefix,
+                rebuild_cache=trt_rebuild_cache,
             )
 
         self._forward = self._engine if self._engine is not None else self._model
@@ -414,6 +423,9 @@ _OSNET_DEVICE: str = "auto"
 _OSNET_FP16: bool = False
 _TRT_COMPILE_OSNET: bool = False
 _OSNET_MAX_CANDIDATE_BATCH: int = 0
+_TRT_CACHE_DIR: str = ""
+_TRT_REBUILD_CACHE: bool = False
+_DESCRIPTOR_SETTINGS: tuple = ()
 _SUPPORTED_DESCRIPTOR_BACKENDS: tuple[str, ...] = (
     "osnet",
     "siamese",
@@ -563,6 +575,8 @@ def configure_descriptor_backend(
     osnet_fp16: bool = False,
     trt_compile_osnet: bool = False,
     osnet_max_candidate_batch: int = 0,
+    trt_cache_dir: str = "",
+    trt_rebuild_cache: bool = False,
 ) -> None:
     """
     Configure global descriptor extraction backend options.
@@ -598,25 +612,48 @@ def configure_descriptor_backend(
     global _DESCRIPTOR_BACKEND
     global _OSNET_MODEL_NAME, _OSNET_MODEL_PATH, _OSNET_PRETRAINED_CHECKPOINT
     global _OSNET_DEVICE, _OSNET_FP16, _TRT_COMPILE_OSNET, _OSNET_MAX_CANDIDATE_BATCH
+    global _TRT_CACHE_DIR, _TRT_REBUILD_CACHE, _DESCRIPTOR_SETTINGS
 
-    _DESCRIPTOR_BACKEND = _canonical_descriptor_backend(descriptor_backend)
-    _OSNET_MODEL_NAME = osnet_model_name.strip()
-    _OSNET_PRETRAINED_CHECKPOINT = osnet_pretrained_checkpoint.strip().lower()
-    _OSNET_MODEL_PATH = (
+    new_backend = _canonical_descriptor_backend(descriptor_backend)
+    new_model_name = osnet_model_name.strip()
+    new_pretrained = osnet_pretrained_checkpoint.strip().lower()
+    new_model_path = (
         _resolve_osnet_model_path(
-            osnet_model_name=_OSNET_MODEL_NAME,
+            osnet_model_name=new_model_name,
             osnet_model_path=osnet_model_path,
-            osnet_pretrained_checkpoint=_OSNET_PRETRAINED_CHECKPOINT,
+            osnet_pretrained_checkpoint=new_pretrained,
         )
-        if _DESCRIPTOR_BACKEND == "osnet"
+        if new_backend == "osnet"
         else osnet_model_path.strip()
     )
+    new_settings = (
+        new_backend,
+        new_model_name,
+        new_model_path,
+        new_pretrained,
+        osnet_device.strip().lower(),
+        bool(osnet_fp16),
+        bool(trt_compile_osnet),
+        max(0, int(osnet_max_candidate_batch)),
+        str(trt_cache_dir or ""),
+        id(siam_tracker) if new_backend == "siamese" else None,
+    )
+    settings_changed = new_settings != _DESCRIPTOR_SETTINGS
+
+    _DESCRIPTOR_BACKEND = new_backend
+    _OSNET_MODEL_NAME = new_model_name
+    _OSNET_PRETRAINED_CHECKPOINT = new_pretrained
+    _OSNET_MODEL_PATH = new_model_path
     _OSNET_DEVICE = osnet_device.strip().lower()
     _OSNET_FP16 = bool(osnet_fp16)
     _TRT_COMPILE_OSNET = bool(trt_compile_osnet)
     _OSNET_MAX_CANDIDATE_BATCH = max(0, int(osnet_max_candidate_batch))
-    _OSNET_EXTRACTOR = None
-    _SIAMESE_EXTRACTOR = None
+    _TRT_CACHE_DIR = str(trt_cache_dir or "")
+    _TRT_REBUILD_CACHE = bool(trt_rebuild_cache)
+    if settings_changed or _TRT_REBUILD_CACHE:
+        _OSNET_EXTRACTOR = None
+        _SIAMESE_EXTRACTOR = None
+    _DESCRIPTOR_SETTINGS = new_settings
     _SIAM_TRACKER_REF = siam_tracker
     _SIAMESE_FEATURE_SOURCE = (
         siamese_feature_source.strip().lower() if siamese_feature_source else "neck"
@@ -644,8 +681,50 @@ def _get_osnet_extractor() -> _OSNetDescriptorExtractor:
             fp16=_OSNET_FP16,
             trt_compile=_TRT_COMPILE_OSNET,
             max_batch=max_batch,
+            trt_cache_dir=_TRT_CACHE_DIR,
+            trt_rebuild_cache=_TRT_REBUILD_CACHE,
+            cache_prefix=_osnet_cache_prefix(device),
         )
     return _OSNET_EXTRACTOR
+
+
+def _osnet_cache_prefix(device: str) -> str:
+    if _OSNET_MODEL_PATH:
+        model_path = Path(_OSNET_MODEL_PATH)
+        try:
+            stat = model_path.stat()
+            model_meta = {
+                "path": str(model_path.resolve()),
+                "size": int(stat.st_size),
+                "mtime_ns": int(stat.st_mtime_ns),
+            }
+        except OSError:
+            model_meta = {"path": str(model_path)}
+    else:
+        model_meta = {"path": ""}
+
+    payload = {
+        "kind": "osnet",
+        "model_name": _OSNET_MODEL_NAME,
+        "model_path": model_meta,
+        "checkpoint": _OSNET_PRETRAINED_CHECKPOINT,
+        "device": str(device),
+        "fp16": bool(_OSNET_FP16),
+        "torch": getattr(torch, "__version__", "unknown"),
+    }
+    try:
+        import torch_tensorrt
+
+        payload["torch_tensorrt"] = getattr(
+            torch_tensorrt, "__version__", "unknown"
+        )
+    except Exception:
+        payload["torch_tensorrt"] = "unavailable"
+    digest = hashlib.sha1(
+        json.dumps(payload, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:16]
+    precision = "fp16" if _OSNET_FP16 else "fp32"
+    return f"osnet_{_OSNET_MODEL_NAME}_{precision}_{digest}"
 
 
 def _get_siamese_extractor() -> _SiameseDescriptorExtractor:

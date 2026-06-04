@@ -7,8 +7,14 @@ weights_path: "/home/moha/SiamRAM/checkpoints/inference_checkpoint.pth"
 trt_engine:
   # TRT-compile the SiamABC backbone. Master switch for the SiamABC engine.
   trt_compile_siamabc: True
-  # FP16 precision for the SiamABC TRT engine (build + execution).
+  # Legacy precision fallback used only when backbone_mode is left empty.
   fp16: True
+  # SiamABC backbone implementation. Keep dynamic_fp16 until the parity
+  # benchmark proves another mode meets the deployment GPU's latency budget.
+  # Options: dynamic_fp16, static_fp16, static_fp16_fp32_neck, dynamic_fp32.
+  backbone_mode: "dynamic_fp16"
+  # Diagnostic control for dynamic_fp32. False preserves TensorRT's TF32 default.
+  backbone_disable_tf32: False
   # OSNet-only descriptor acceleration. Ignored unless descriptor_backend == "osnet".
   trt_compile_osnet: True
   # OSNet-only FP16 descriptor inference. Ignored unless descriptor_backend == "osnet".

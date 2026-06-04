@@ -272,6 +272,8 @@ def _build_tracker(args: argparse.Namespace):
             lambda_tta=float(trt_cfg.get("lambda_tta", args.lambda_tta)),
             fp16=bool(trt_cfg.get("fp16", True)),
             cuda_id=int(trt_cfg.get("cuda_id", 0)),
+            backbone_mode=str(trt_cfg.get("backbone_mode", "")),
+            disable_tf32=bool(trt_cfg.get("backbone_disable_tf32", False)),
         )
     else:
         wrapped = inference.get_tracker(

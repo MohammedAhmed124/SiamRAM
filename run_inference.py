@@ -64,7 +64,13 @@ import sys
 import warnings
 from pathlib import Path
 
-from utils.console import quiet_external_logs, siamram_log, silence_noisy_libraries
+from utils.console import (
+    compile_progress,
+    quiet_external_logs,
+    siamram_log,
+    silence_noisy_libraries,
+)
+from utils.utils import configure_descriptor_backend
 
 silence_noisy_libraries()
 
@@ -310,7 +316,7 @@ def parse_args():
         dest="rebuild_trt_cache",
         help=(
             "Ignore any existing TensorRT cache and rebuild/save engines once for "
-            "this run. This is the default."
+            "this run."
         ),
     )
     trt_cache_mode.add_argument(
@@ -321,10 +327,10 @@ def parse_args():
         dest="rebuild_trt_cache",
         help=(
             "Use already-saved TensorRT engines when available instead of forcing "
-            "a rebuild at run startup."
+            "a rebuild at run startup. This is the default."
         ),
     )
-    parser.set_defaults(rebuild_trt_cache=True)
+    parser.set_defaults(rebuild_trt_cache=False)
     parser.add_argument(
         "--disable_trt_cache",
         action="store_true",
@@ -1278,6 +1284,20 @@ def main():
     ram_tracker_kwargs["trt_cache_dir"] = trt_cache_dir
     ram_tracker_kwargs["trt_rebuild_cache"] = bool(args.rebuild_trt_cache)
 
+    # One TensorRT compile progress bar for the whole setup phase: SiamABC
+    # (backbone/attention/connect) plus, when enabled, the OSNet descriptor.
+    # begin() pre-sizes the shared session so both subsystems fill a single
+    # 0-100% bar; the up-front OSNet warm below advances and closes it.
+    _descriptor_backend = str(
+        ram_tracker_kwargs.get("descriptor_backend", "osnet")
+    ).strip().lower()
+    _osnet_will_compile = _descriptor_backend == "osnet" and bool(
+        ram_tracker_kwargs.get("trt_compile_osnet", False)
+    )
+    _compile_stages = (3 if compile_siamabc else 0) + (1 if _osnet_will_compile else 0)
+    if _compile_stages:
+        compile_progress().begin(_compile_stages)
+
     if compile_siamabc:
         if get_trt_tracker is None:
             raise ModuleNotFoundError(
@@ -1291,6 +1311,8 @@ def main():
             lambda_tta=float(trt_cfg.get("lambda_tta", args.lambda_tta)),
             fp16=bool(trt_cfg.get("fp16", True)),
             cuda_id=int(trt_cfg.get("cuda_id", 0)),
+            backbone_mode=str(trt_cfg.get("backbone_mode", "")),
+            disable_tf32=bool(trt_cfg.get("backbone_disable_tf32", False)),
             engine_cache_dir=trt_cache_dir,
             rebuild_cache=bool(args.rebuild_trt_cache),
         )
@@ -1301,6 +1323,38 @@ def main():
             lambda_tta=args.lambda_tta,
             continuous=False,
         )
+
+    # Compile the OSNet descriptor engine now, contiguously after SiamABC, so the
+    # whole setup shares one progress bar. configure_descriptor_backend() builds
+    # the engine eagerly at setup (see utils.utils); the per-clip trackers later
+    # reconfigure with identical settings and reuse this warmed engine, so this
+    # changes no tracking behavior.
+    if _osnet_will_compile:
+        configure_descriptor_backend(
+            descriptor_backend=_descriptor_backend,
+            osnet_model_name=str(ram_tracker_kwargs.get("osnet_model_name", "osnet_x1_0")),
+            osnet_model_path=str(ram_tracker_kwargs.get("osnet_model_path", "")),
+            osnet_pretrained_checkpoint=str(
+                ram_tracker_kwargs.get("osnet_pretrained_checkpoint", "imagenet")
+            ),
+            osnet_device=str(ram_tracker_kwargs.get("osnet_device", "auto")),
+            siam_tracker=wrapped,
+            siamese_feature_source=str(
+                ram_tracker_kwargs.get("siamese_feature_source", "neck")
+            ),
+            siamese_comparison_mode=str(
+                ram_tracker_kwargs.get("siamese_comparison_mode", "xcorr")
+            ),
+            osnet_fp16=bool(ram_tracker_kwargs.get("osnet_fp16", False)),
+            trt_compile_osnet=bool(ram_tracker_kwargs.get("trt_compile_osnet", False)),
+            osnet_max_candidate_batch=int(
+                ram_tracker_kwargs.get("osnet_max_candidate_batch", 0)
+            ),
+            trt_cache_dir=str(ram_tracker_kwargs.get("trt_cache_dir", "")),
+            trt_rebuild_cache=bool(ram_tracker_kwargs.get("trt_rebuild_cache", False)),
+        )
+    # Close the shared bar (idempotent if the last stage already closed it).
+    compile_progress().finish()
 
     # ram_tracker_impl is kept in the config for backwards compatibility, but
     # the base tracker has been retired — SiamRAMExperimentTracker is now the
@@ -1350,9 +1404,11 @@ def main():
 
     def _ram_kwargs_for_clip(clip_index: int) -> dict:
         kwargs = dict(ram_tracker_kwargs)
-        # Fresh wrappers are constructed per clip. A forced TRT rebuild should
-        # happen only on the first wrapper, then later clips load/reuse the cache.
-        kwargs["trt_rebuild_cache"] = bool(args.rebuild_trt_cache and clip_index == 0)
+        # The OSNet descriptor engine (the only thing a fresh wrapper would TRT-
+        # compile) is already built once up front during setup, honoring
+        # --rebuild_trt_cache there. So per-clip wrappers must always reuse it —
+        # forcing a rebuild here would recompile OSNet a second time.
+        kwargs["trt_rebuild_cache"] = False
         return kwargs
 
     if args.datasets is not None:

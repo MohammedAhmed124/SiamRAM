@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import os
 from pathlib import Path
 from typing import Dict, Tuple
 
@@ -173,7 +174,8 @@ def _build_connect_engines(
                 log.info("TRTSiamABCNet: loading cached connect_model [%s]", tag)
                 loaded = torch_tensorrt.load(str(cache_path)).module()
                 with torch.no_grad():
-                    loaded(dummy_search_org, dummy_search, dummy_kernel)
+                    cached_outputs = loaded(dummy_search_org, dummy_search, dummy_kernel)
+                _validate_connect_outputs(cached_outputs)
                 engines[tag] = loaded
                 continue
             except Exception as exc:
@@ -208,18 +210,21 @@ def _build_connect_engines(
         )
 
         with torch.no_grad():
-            engine(dummy_search_org, dummy_search, dummy_kernel)
+            outputs = engine(dummy_search_org, dummy_search, dummy_kernel)
+        _validate_connect_outputs(outputs)
 
         engines[tag] = engine
         if cache_path is not None:
+            temporary = cache_path.with_name(f".{cache_path.name}.{os.getpid()}.tmp")
             try:
                 cache_path.parent.mkdir(parents=True, exist_ok=True)
                 torch_tensorrt.save(
                     engine,
-                    str(cache_path),
+                    str(temporary),
                     output_format="exported_program",
                     arg_inputs=(dummy_search_org, dummy_search, dummy_kernel),
                 )
+                os.replace(temporary, cache_path)
                 log.info(
                     "TRTSiamABCNet: cached connect_model engine [%s] saved to %s",
                     tag,
@@ -231,12 +236,26 @@ def _build_connect_engines(
                     tag,
                     exc,
                 )
+            finally:
+                temporary.unlink(missing_ok=True)
         del module, exported         
         torch.cuda.empty_cache()     
 
         log.info("TRTSiamABCNet: connect_model engine [lam=%.4f] ready.", lam_val)
 
     return engines
+
+
+def _validate_connect_outputs(outputs) -> None:
+    if not isinstance(outputs, (tuple, list)) or len(outputs) != 2:
+        raise RuntimeError("connect_model cache must return bbox and classification tensors")
+    for output in outputs:
+        if not torch.is_tensor(output):
+            raise RuntimeError("connect_model cache returned a non-tensor output")
+        if output.dtype != torch.float32:
+            raise RuntimeError(f"connect_model cache returned unexpected dtype {output.dtype}")
+        if not bool(torch.isfinite(output).all().item()):
+            raise RuntimeError("connect_model cache returned non-finite values")
 
 
 def _dispatch_connect(

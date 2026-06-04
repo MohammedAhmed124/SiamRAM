@@ -304,6 +304,124 @@ class SiamRAMProgressLine:
         return _paint(".", self._MODE_COLORS.get(mode, _GREEN))
 
 
+class _CompileProgress:
+    """Process-wide single progress line for the whole TensorRT compile phase.
+
+    A *session* spans every engine compiled up front — SiamABC (backbone,
+    attention, connect) and, when enabled, the OSNet descriptor — so the user
+    sees ONE bar from 0 % to 100 %, not one per subsystem. The line matches the
+    inference progress style: a wide, thin row of dots inside brackets that fills
+    left-to-right, with a percentage and the current stage text.
+
+        [SiamRAM][TRT] build [............              ]  50% · compiling connect engines
+
+    On a TTY the line is rewritten in place (``\\r``); when stdout is not a TTY
+    (e.g. redirected to a log file) each stage prints one plain line instead.
+
+    Lifecycle:
+        begin(total)   open a session sized to ``total`` stages (no-op if one is
+                       already open, so a caller that pre-sizes the whole phase
+                       wins over a subsystem that would otherwise self-size).
+        stage(message) announce the stage about to compile (auto-opens a 1-stage
+                       session if none is active, e.g. a lone OSNet build).
+        complete()     mark the current stage done; the final stage paints the
+                       bar green and prints "compiled successfully".
+    """
+
+    _DOT = "."
+
+    def __init__(self) -> None:
+        self.phase = "TRT"
+        self._total = 0
+        self._done = 0
+        self._active = False
+        self._message = ""
+        self._interactive = sys.stdout.isatty()
+
+    def begin(self, total: int, *, phase: str = "TRT") -> bool:
+        """Open a session of ``total`` stages. Returns False if one was open."""
+        if self._active:
+            return False
+        self.phase = phase
+        self._total = max(1, int(total))
+        self._done = 0
+        self._message = ""
+        self._active = True
+        # No initial draw: the first stage() renders the 0% frame, which keeps
+        # non-TTY logs free of an empty leading line.
+        return True
+
+    def stage(self, message: str) -> None:
+        """Announce the stage currently compiling and redraw the bar."""
+        if not self._active:
+            self.begin(1)
+        self._message = str(message or "")
+        self._draw("build", _YELLOW)
+
+    def complete(self) -> None:
+        """Mark one stage finished; close the session on the last stage."""
+        if not self._active:
+            return
+        self._done = min(self._total, self._done + 1)
+        if self._done >= self._total:
+            self._message = "compiled successfully"
+            self._draw("done", _GREEN)
+            self._close()
+        elif self._interactive:
+            # On a TTY, advance the fill in place. In a log file the per-stage
+            # stage() line already recorded progress, so skip the extra line.
+            self._draw("build", _YELLOW)
+
+    def finish(self, message: str = "compiled successfully") -> None:
+        """Force the bar to 100 % and close it (idempotent safety net)."""
+        if not self._active:
+            return
+        self._done = self._total
+        self._message = str(message or "")
+        self._draw("done", _GREEN)
+        self._close()
+
+    def _close(self) -> None:
+        if self._interactive:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+        self._active = False
+        self._done = 0
+        self._total = 0
+
+    def _draw(self, label: str, color: str) -> None:
+        prefix = (
+            f"{_paint('[SiamRAM]', _BOLD + _CYAN)}"
+            f"{_paint(f'[{self.phase}]', _DIM)}"
+        )
+        accent = _paint(label[:5].ljust(5), color)
+        pct = int(round(100 * self._done / max(1, self._total)))
+        pct_text = f"{pct:3d}%"
+        if not self._interactive:
+            # Non-TTY (log file): one clean plain line per stage, no carriage
+            # returns. Keeps captured logs readable.
+            print(f"{prefix} {accent} {pct_text} · {self._message}", flush=True)
+            return
+        term_width = max(40, shutil.get_terminal_size((100, 20)).columns - 1)
+        message = _fit_text(self._message, 40)
+        # "<prefix> <accent> [<bar>] <pct> · <message>" — the bar fills the slack.
+        fixed = _visible_len(prefix) + 1 + 5 + 1 + 1 + 1 + len(pct_text) + 3 + len(message)
+        bar_width = max(8, term_width - fixed)
+        filled = int(round(bar_width * self._done / max(1, self._total)))
+        bar = _paint(self._DOT * filled, color) + " " * (bar_width - filled)
+        line = f"{prefix} {accent} [{bar}] {pct_text} · {message}"
+        sys.stdout.write("\r" + line + "\033[K")
+        sys.stdout.flush()
+
+
+_COMPILE_PROGRESS = _CompileProgress()
+
+
+def compile_progress() -> _CompileProgress:
+    """Return the process-wide TensorRT compile progress bar (one session)."""
+    return _COMPILE_PROGRESS
+
+
 def siamram_latency(
     rows,
     *,

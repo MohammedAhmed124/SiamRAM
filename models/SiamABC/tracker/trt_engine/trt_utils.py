@@ -3,6 +3,7 @@ from typing import Tuple
 
 import torch
 import torch.nn as nn
+
 from utils.console import quiet_external_logs, silence_noisy_libraries
 
 silence_noisy_libraries()
@@ -28,6 +29,40 @@ class _FeatureExtractorModule(nn.Module):
         x: torch.Tensor,
     ) -> torch.Tensor:
         return self.neck(self.encoder(x))
+
+
+class _EncoderModule(nn.Module):
+    """Deep-copied encoder used by the hybrid FP16-encoder backbone mode."""
+
+    def __init__(
+        self,
+        net: nn.Module,
+    ) -> None:
+        super().__init__()
+        self.encoder = copy.deepcopy(net.encoder)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.encoder(x)
+
+
+class _NeckModule(nn.Module):
+    """Deep-copied neck whose dtype is independent from the source model."""
+
+    def __init__(
+        self,
+        net: nn.Module,
+    ) -> None:
+        super().__init__()
+        self.neck = copy.deepcopy(net.neck)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.neck(x)
 
 
 class _AttentionNeck(nn.Module):

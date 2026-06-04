@@ -15,12 +15,28 @@ from utils.console import siamram_log
 
 from .SiamABC_Tracker import SiamABCTracker
 
+INFERENCE_WEIGHT_PREFIXES = (
+    "encoder.",
+    "neck.",
+    "polarized_self_attention.",
+    "attention_neck.",
+    "connect_model.",
+)
+
+
+def _required_inference_prefixes(model: nn.Module) -> tuple[str, ...]:
+    prefixes = list(INFERENCE_WEIGHT_PREFIXES)
+    if getattr(model, "iou_head", None) is not None:
+        prefixes.append("iou_head.")
+    return tuple(prefixes)
+
 
 def load_model(
     model: nn.Module,
     checkpoint_path: str,
     map_location: Optional[Union[int, str]] = None,
     strict: bool = True,
+    require_inference_weights: bool = False,
 ) -> nn.Module:
     """
     Load weights from a checkpoint into a model.
@@ -30,6 +46,9 @@ def load_model(
         checkpoint_path (str): Path to the .pth checkpoint file.
         map_location (Optional[Union[int, str]]): Device to map weights to.
         strict (bool): Whether to enforce strict matching of state_dict keys.
+        require_inference_weights (bool): Require every tensor used by the
+            inference path, while still allowing optional training/quality heads
+            to be absent.
 
     Returns:
         nn.Module: The model with loaded weights.
@@ -40,6 +59,8 @@ def load_model(
         map_location=map_location,
         weights_only=False,
     )
+    if not isinstance(checkpoint, dict):
+        raise RuntimeError(f"Unexpected checkpoint format in {checkpoint_path!r}")
     raw_state = checkpoint.get("state_dict", checkpoint)
     if not isinstance(raw_state, dict):
         raise RuntimeError(f"Unexpected checkpoint format in {checkpoint_path!r}")
@@ -71,6 +92,19 @@ def load_model(
             compatible_state[key] = value
 
         missing = [key for key in model_state.keys() if key not in compatible_state]
+        required_prefixes = _required_inference_prefixes(model)
+        required_missing = [
+            key
+            for key in missing
+            if key.startswith(required_prefixes)
+        ]
+        if require_inference_weights and required_missing:
+            raise RuntimeError(
+                "Checkpoint is missing required SiamABC inference weights "
+                f"({len(required_missing)} tensors; examples: {required_missing[:5]}). "
+                f"Refusing to run with a partially initialized model: {checkpoint_path}"
+            )
+
         model.load_state_dict(compatible_state, strict=False)
 
         total = max(1, len(model_state))
@@ -126,6 +160,11 @@ def get_tracker(
 
     model = instantiate(config["model"], inference_mode=True, norm_lambda=lambda_tta)
 
-    model = load_model(model, weights_path, strict=False).cuda().eval()
+    model = load_model(
+        model,
+        weights_path,
+        strict=False,
+        require_inference_weights=True,
+    ).cuda().eval()
     tracker: SiamABCTracker = instantiate(config["tracker"], model=model)
     return tracker

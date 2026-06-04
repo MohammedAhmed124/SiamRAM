@@ -32,7 +32,12 @@ from typing import Set
 import torch
 import torch.nn as nn
 
-from utils.console import quiet_external_logs, siamram_log, silence_noisy_libraries
+from utils.console import (
+    compile_progress,
+    quiet_external_logs,
+    siamram_log,
+    silence_noisy_libraries,
+)
 
 log = logging.getLogger(__name__)
 silence_noisy_libraries()
@@ -79,70 +84,58 @@ def build_osnet_trt(
         else None
     )
 
-    if cache_path is not None and cache_path.exists() and not rebuild_cache:
-        try:
-            siamram_log(
-                f"Loading cached OSNet engine · {cache_path.name}",
-                phase="DESC",
-                status="load",
-                indent=1,
+    # Advance the shared one-time compile progress bar (the same bar SiamABC
+    # uses). stage()/complete() auto-open a lone session if SiamABC's has already
+    # closed, so OSNet still renders a clean 0-100% bar. Cache load/save are
+    # silent so they don't break the single line; failures still warn.
+    compile_progress().stage("compiling osnet descriptor engine")
+    try:
+        if cache_path is not None and cache_path.exists() and not rebuild_cache:
+            try:
+                engine = torch.jit.load(str(cache_path), map_location=device).eval()
+                with torch.no_grad():
+                    engine(dummy)
+                return engine
+            except Exception as exc:
+                siamram_log(
+                    f"cached OSNet engine load failed ({cache_path.name}): {exc}; rebuilding",
+                    phase="DESC",
+                    status="warn",
+                    indent=1,
+                )
+
+        with quiet_external_logs():
+            with torch.no_grad():
+                scripted = torch.jit.trace(mod, dummy)
+
+            engine = torch_tensorrt.compile(
+                scripted,
+                inputs=[
+                    torch_tensorrt.Input(
+                        shape=(1, 3, input_h, input_w),
+                        dtype=dtype,
+                    )
+                ],
+                enabled_precisions=enabled_precisions,
+                truncate_long_and_double=True,
             )
-            engine = torch.jit.load(str(cache_path), map_location=device).eval()
+
+            # Warm the engine so the first real frame doesn't pay the lazy-init cost.
             with torch.no_grad():
                 engine(dummy)
-            siamram_log(
-                "OSNet descriptor engine ready",
-                phase="DESC",
-                status="ready",
-                indent=1,
-            )
-            return engine
-        except Exception as exc:
-            siamram_log(
-                f"cached OSNet engine load failed ({cache_path.name}): {exc}; rebuilding",
-                phase="DESC",
-                status="warn",
-                indent=1,
-            )
 
-    siamram_log("Compiling OSNet descriptor engine", phase="DESC", status="build", indent=1)
-    with quiet_external_logs():
-        with torch.no_grad():
-            scripted = torch.jit.trace(mod, dummy)
-
-        engine = torch_tensorrt.compile(
-            scripted,
-            inputs=[
-                torch_tensorrt.Input(
-                    shape=(1, 3, input_h, input_w),
-                    dtype=dtype,
+        if cache_path is not None:
+            try:
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                torch.jit.save(engine, str(cache_path))
+            except Exception as exc:
+                siamram_log(
+                    f"cached OSNet engine save failed ({cache_path.name}): {exc}",
+                    phase="DESC",
+                    status="warn",
+                    indent=1,
                 )
-            ],
-            enabled_precisions=enabled_precisions,
-            truncate_long_and_double=True,
-        )
 
-        # Warm the engine so the first real frame doesn't pay the lazy-init cost.
-        with torch.no_grad():
-            engine(dummy)
-
-    if cache_path is not None:
-        try:
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-            torch.jit.save(engine, str(cache_path))
-            siamram_log(
-                f"Saved cached OSNet engine · {cache_path.name}",
-                phase="DESC",
-                status="done",
-                indent=1,
-            )
-        except Exception as exc:
-            siamram_log(
-                f"cached OSNet engine save failed ({cache_path.name}): {exc}",
-                phase="DESC",
-                status="warn",
-                indent=1,
-            )
-
-    siamram_log("OSNet descriptor engine ready", phase="DESC", status="ready", indent=1)
-    return engine
+        return engine
+    finally:
+        compile_progress().complete()

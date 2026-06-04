@@ -662,6 +662,15 @@ def configure_descriptor_backend(
         siamese_comparison_mode.strip().lower() if siamese_comparison_mode else "xcorr"
     )
 
+    # Compile the OSNet descriptor engine now, at setup, rather than lazily on the
+    # first frame. The engine, weights and outputs are identical — only the build
+    # *timing* moves earlier — so this changes no tracking behavior; it just folds
+    # the OSNet compile into the one-time TensorRT progress bar and removes the
+    # first-frame stall. Only the TRT-compiled OSNet backend has a compile step;
+    # the siamese / pixel backends stay lazy (nothing to build).
+    if _DESCRIPTOR_BACKEND == "osnet" and _TRT_COMPILE_OSNET:
+        _get_osnet_extractor()
+
 
 def _get_osnet_extractor() -> _OSNetDescriptorExtractor:
     global _OSNET_EXTRACTOR

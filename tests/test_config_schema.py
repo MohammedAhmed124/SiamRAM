@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from omegaconf import OmegaConf
+
 from models.siamram.config import (
     flatten_ram_tracker_config,
     flatten_subsystem_overrides,
@@ -88,3 +89,9 @@ def test_flatten_ram_tracker_config_duplicate_leaf_key_raises() -> None:
     except ValueError:
         return
     raise AssertionError("Expected ValueError for duplicate ram_tracker leaf key")
+
+
+def test_experimental_config_selects_explicit_siamabc_backbone_mode() -> None:
+    cfg = OmegaConf.load("config/inference_config_experimental.yaml")
+    assert cfg.trt_engine.backbone_mode == "dynamic_fp16"
+    assert cfg.trt_engine.backbone_disable_tf32 is False

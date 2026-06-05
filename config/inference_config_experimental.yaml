@@ -291,6 +291,110 @@ ram_tracker:
     gmc_prior_max_corner_displacement_frac: 0.25
 
   # ---------------------------------------------------------------------------
+  # drm_introspection: DAM4SAM-style introspection-based DRM anchor update
+  # (arXiv:2411.17576, Sec. 3.2.2). When enabled, the tracker writes a frame into
+  # the distractor-resolving memory (DRM) as a distractor-context anchor when its
+  # OWN response map reveals a competing distractor (the second-strongest local
+  # peak diverges from the chosen one: bbox-area ratio < theta_anc) AND tracking
+  # is currently reliable (score > theta_iou and target size within theta_area of
+  # the median over the last theta_M frames), only when the target is present and
+  # not more often than every delta frames. This sits ALONGSIDE the existing DRM
+  # write path -- it does not remove it.
+  # ---------------------------------------------------------------------------
+  drm_introspection:
+    # Master switch; when false the updater is never built, the inner SiamABC
+    # tracker never computes the secondary-peak signal, and the legacy DRM write
+    # path in AppearanceMemory is byte-for-byte unchanged.
+    drm_introspection_enabled: true
+    # theta_anc: hypothesis-divergence trigger. primary/union bbox-area ratio
+    # below this flags a competing distractor in the response map. Paper: 0.7.
+    drm_introspection_theta_anc: 0.7
+    # theta_iou: reliability gate on the predicted IoU/score; DRM is updated only
+    # during sufficiently stable tracking. Paper: 0.8.
+    drm_introspection_theta_iou: 0.8
+    # theta_area: size-stability gate; current area must be within this fraction
+    # of the median area over the last theta_M frames. Paper: 0.2 (20%).
+    drm_introspection_theta_area: 0.2
+    # theta_M: number of recent frames for the median-area stability test. Paper: 10.
+    drm_introspection_theta_M: 10
+    # delta: minimum frame spacing between DRM updates. Paper: 5.
+    drm_introspection_delta: 5
+    # Minimum secondary/primary peak strength for the secondary peak to count as a
+    # genuine competing hypothesis (rather than response-map noise). SiamRAM-only.
+    drm_introspection_secondary_min_ratio: 0.5
+    # Scale the divergence box + non-max suppression to the target's grid-cell
+    # extent instead of a fixed 3x3 box. On the coarse 16x16 response map the fixed
+    # box made the primary/union area ratio < theta_anc for ANY separated secondary
+    # peak, so theta_anc was a dead knob (telemetry: diverg never fired). Scaling
+    # makes the ratio reflect the competing peak's separation RELATIVE to target
+    # size, restoring theta_anc as a real selectivity control (faithful to the
+    # paper's mask-fitted boxes). true = scale-aware; false = legacy fixed 3x3.
+    drm_introspection_scale_aware_divergence: true
+    # Write the detected secondary-peak (distractor) descriptor into the NEGATIVE
+    # distractor bank during reliable tracking, so the gamma-weighted distractor
+    # suppression term can penalize that look-alike on occlusion/re-acquisition.
+    # This is the only DRM-introspection path that feeds the discrimination lever
+    # (the positive DRM anchors are redundant target copies). INERT unless a
+    # recovery gamma is raised: set drm_gamma (occlusion-recovery DRM, above) and/
+    # or distractor_occ_drm_gamma > 0 for it to affect scoring. Default off.
+    drm_introspection_distractor_bank_enabled: false
+
+  # ---------------------------------------------------------------------------
+  # telemetry: flag-gated diagnostics for the research features (DRM
+  # introspection). One master switch. When false there is ZERO
+  # behavioural change and effectively zero overhead. When true the tracker keeps
+  # per-video and cumulative integer counters and prints a compact summary line
+  # per video at the per-video reset point (occlusion entries; DRM secondary-peak
+  # / divergence / should-update / anchors-added, plus the should-update gate
+  # funnel).
+  # ---------------------------------------------------------------------------
+  telemetry:
+    research_telemetry_enabled: false
+
+  # ---------------------------------------------------------------------------
+  # frame_dynamics: frame-difference motion-saliency input augmentation
+  # ("A Simple Detector with Frame Dynamics is a Strong Tracker", 1st place at
+  # the 4th Anti-UAV Challenge, arXiv:2505.04917, Sec. 3.2). The paper injects
+  # short-term MOTION into the network input -- x = cat(x_t, x_t - x_{t-1},
+  # x_t - x_{t-2}) -- so the detector locks onto a moving tiny target and
+  # suppresses static background clutter (+7-9 AP on infrared tiny targets,
+  # Table 3). DEVIATION: the paper trains a 6-channel detector from scratch;
+  # SiamRAM's SiamABC backbone is a FROZEN, PRETRAINED 3-channel RGB network we
+  # must not retrain or re-channel. So instead of concatenating difference maps
+  # we compute the same |x_t - x_{t-1}| / |x_t - x_{t-2}| motion saliency between
+  # consecutive full frames, register it to the search region, and blend it
+  # ADDITIVELY into the existing 3-channel search crop. When disabled the search
+  # crop is byte-for-byte unchanged and no frame-difference work runs.
+  # ---------------------------------------------------------------------------
+  frame_dynamics:
+    # Master switch; when false the processor is never built and the search crop
+    # the frozen backbone consumes is byte-for-byte unchanged.
+    frame_dynamics_enabled: true
+    # Additive blend weight for the motion-saliency map: modified crop =
+    # crop + blend_weight * scaled_saliency (then re-clamped to 8-bit). 0.0 is an
+    # exact no-op. The paper learns this end-to-end; 0.08 is a deliberately LOW
+    # default so the motion cue does not corrupt the appearance the frozen
+    # backbone matches on (a higher weight regressed accuracy in testing).
+    frame_dynamics_blend_weight: 0.06
+    # Multiplier applied to the raw frame-difference saliency before blending;
+    # > 1 amplifies faint tiny-target motion. 1.0 keeps absolute-difference scale.
+    frame_dynamics_scale: 1.0
+    # Per-pixel upper clip on the SCALED saliency before blending, to suppress
+    # outlier difference pixels (compression noise / sudden illumination). <= 0
+    # disables clipping (no upper bound). Applied after scaling, before blending.
+    frame_dynamics_clip: -1.0
+    # Tiny-ONLY restriction. true = blend the motion cue ONLY when the target is
+    # small (bbox area fraction <= tiny_area_fraction), leaving normal/large-target
+    # crops CLEAN. This confines the augmentation to the tiny-target regime where
+    # appearance collapses (per CST Anti-UAV) and the motion cue helps, and avoids
+    # corrupting the appearance signal on the majority of frames. false = blend on
+    # every frame (the unrestricted variant that regressed in testing).
+    frame_dynamics_tiny_only: true
+    # bbox area fraction at/below which the target counts as "tiny" (only used when
+    # tiny_only is true). 0.03 mirrors roi_search.tiny.long_distance_area_fraction.
+    frame_dynamics_tiny_area_fraction: 0.001
+
+  # ---------------------------------------------------------------------------
   # roi_search: where YOLO looks for re-detection candidates.
   # ---------------------------------------------------------------------------
   roi_search:

@@ -13,6 +13,13 @@ from ..model.adaptive_batch_norm import AdaptiveBatchNorm
 from .base_tracker import Tracker
 
 
+# Process-wide latch: the DRM-introspection signal shape/sample is logged at most
+# once per process (and only when research telemetry is enabled) so a run visibly
+# confirms the secondary-peak signal is live rather than stuck at its inert 1.0
+# default. See the DRM block in track().
+_DRM_INTROSPECTION_SHAPE_LOGGED = False
+
+
 class SiamABCTracker(Tracker):
     """
     The main tracker class for SiamRAM — built on top of the SiamABC core.
@@ -245,6 +252,31 @@ class SiamABCTracker(Tracker):
         self.latest_iou_score = 1.0
         self.latest_iou_score_ema = 1.0
         self._last_iou_gate_pass = True
+
+        # Introspection-based DRM update (arXiv:2411.17576). The SiamRAM tracker
+        # sets ``_drm_introspection_enabled = True`` on this instance only when the
+        # feature is enabled; otherwise the response-map secondary-peak signal is
+        # never computed (legacy path untouched) and these inert defaults remain.
+        self._drm_introspection_enabled = False
+        # Hypothesis-divergence ratio (primary/union bbox-area) and the primary /
+        # secondary response-map peak strengths from the most recent frame.
+        self.latest_secondary_peak_ratio = 1.0
+        self.latest_primary_peak_score = 0.0
+        self.latest_secondary_peak_score = 0.0
+        # Secondary-peak (distractor) descriptor write-back into the NEGATIVE DRM
+        # bank. The SiamRAM tracker flips ``_drm_write_distractor_bank = True`` only
+        # when the distractor-bank sub-feature is enabled; otherwise the frame-space
+        # secondary-peak bbox is never computed and this inert default remains.
+        self.latest_secondary_peak_bbox = None
+        self._drm_write_distractor_bank = False
+
+        # Research telemetry (arXiv features). The SiamRAM tracker flips
+        # ``_research_telemetry_enabled = True`` and stashes a ``_tlm_inner`` dict
+        # here only when telemetry is enabled; otherwise these inert defaults mean
+        # every telemetry site (DRM secondary-peak counts) is skipped and
+        # behaviour is byte-for-byte unchanged.
+        self._research_telemetry_enabled = False
+        self._tlm_inner = None
 
         raw_floor = float(
             self.tracking_config.get("running_confidence_floor_value", 0.6)
@@ -595,6 +627,7 @@ class SiamABCTracker(Tracker):
             return
 
         best_img, best_bbox = self.all_memory_imgs[latest_idx]
+
         self.dynamic_template_features = self.get_template_features(
             best_img,
             best_bbox,
@@ -925,6 +958,92 @@ class SiamABCTracker(Tracker):
             beta * self.latest_iou_score_ema
             + (1.0 - beta) * self.latest_iou_score
         )
+
+        # Introspection-based DRM update (arXiv:2411.17576). Only when explicitly
+        # enabled on this instance: read the second-strongest local peak in the
+        # response map (the analogue of SAM2's "alternative mask") and stash the
+        # hypothesis-divergence signal for the SiamRAM tracker to consume. When
+        # disabled this block is skipped entirely (no extra compute, legacy path
+        # byte-for-byte unchanged).
+        if getattr(self, "_drm_introspection_enabled", False):
+            from models.siamram.drm_introspection import secondary_peak_divergence
+
+            target_half = None
+            if getattr(self, "_drm_scale_aware_divergence", False):
+                try:
+                    gh, gw = int(cls_score.shape[0]), int(cls_score.shape[1])
+                    inst = float(self.tracking_config["instance_size"])
+                    if gh > 0 and gw > 0 and inst > 0.0:
+                        cell_y = inst / gh
+                        cell_x = inst / gw
+                        hy = 0.5 * float(pred_bbox[3]) / cell_y
+                        hx = 0.5 * float(pred_bbox[2]) / cell_x
+                        up_y = max(1.0, gh / 2.0 - 1.0)
+                        up_x = max(1.0, gw / 2.0 - 1.0)
+                        hy = min(max(hy, 1.0), up_y)
+                        hx = min(max(hx, 1.0), up_x)
+                        target_half = (hy, hx)
+                except Exception:
+                    target_half = None
+            ratio, prim_score, sec_score, sec_rc = secondary_peak_divergence(
+                cls_score, (int(r_max), int(c_max)), target_half_cells=target_half
+            )
+            self.latest_secondary_peak_ratio = ratio
+            self.latest_primary_peak_score = prim_score
+            self.latest_secondary_peak_score = sec_score
+
+            # Distractor-bank write-back (sub-feature of DRM introspection). When
+            # enabled, map the secondary-peak grid location into a frame-space bbox
+            # so the outer SiamRAM tracker can record it in the NEGATIVE distractor
+            # bank. Gated so it costs nothing when the sub-feature is off.
+            self.latest_secondary_peak_bbox = None
+            if getattr(self, "_drm_write_distractor_bank", False) and sec_rc is not None:
+                try:
+                    gh, gw = int(cls_score.shape[0]), int(cls_score.shape[1])
+                    inst = float(self.tracking_config["instance_size"])
+                    dx = (int(sec_rc[1]) - int(c_max)) * (inst / gw)
+                    dy = (int(sec_rc[0]) - int(r_max)) * (inst / gh)
+                    sec_crop = np.array(
+                        [float(pred_bbox[0]) + dx, float(pred_bbox[1]) + dy,
+                         float(pred_bbox[2]), float(pred_bbox[3])], dtype=float)
+                    self.latest_secondary_peak_bbox = self._rescale_bbox(
+                        sec_crop, self.tracking_state.mapping)
+                except Exception:
+                    self.latest_secondary_peak_bbox = None
+
+            # One-time-per-process diagnostic so the next run visibly confirms the
+            # secondary-peak signal is now real (non-1.0) rather than stuck at the
+            # inert default. Guarded to at-most-once and only when telemetry is on;
+            # never emitted when telemetry is disabled (zero overhead off-path).
+            global _DRM_INTROSPECTION_SHAPE_LOGGED
+            if (
+                not _DRM_INTROSPECTION_SHAPE_LOGGED
+                and getattr(self, "_research_telemetry_enabled", False)
+            ):
+                _DRM_INTROSPECTION_SHAPE_LOGGED = True
+                try:
+                    from utils.console import siamram_log
+
+                    siamram_log(
+                        "[research telemetry] DRM introspection signal live: "
+                        f"cls_score.shape={tuple(cls_score.shape)} "
+                        f"(ratio={ratio:.4f}, primary={prim_score:.4f}, "
+                        f"secondary={sec_score:.4f})"
+                    )
+                except Exception:
+                    pass
+
+            # Research telemetry (inert unless the outer SiamRAM tracker enabled
+            # it and stashed _tlm_inner here). Count frames where a genuine
+            # competing secondary peak existed, and where the divergence ratio
+            # fell below the DRM-introspection theta_anc default (0.7).
+            if getattr(self, "_research_telemetry_enabled", False):
+                tlm = getattr(self, "_tlm_inner", None)
+                if tlm is not None:
+                    if sec_score > 0.0:
+                        tlm["drm_secondary_peak_frames"] += 1
+                    if ratio < 0.7:
+                        tlm["drm_divergence_below_theta"] += 1
 
         peak_cls_score = float(cls_score[r_max, c_max].item())
         gate_iou = (

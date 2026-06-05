@@ -190,6 +190,39 @@ class AppearanceMemory:
                 )
             )
 
+    def add_drm_anchor(
+        self,
+        bbox,
+        desc: np.ndarray,
+    ) -> bool:
+        """
+        Write one frame into the DRM bank as a distractor-context anchor.
+
+        This sits alongside the existing agreement-based DRM write path in
+        ``_try_promote_to_drm`` (it does not replace it) and is used by the
+        introspection-based DRM update (arXiv:2411.17576, Sec. 3.2.2): when the
+        tracker's own response map reveals a competing distractor during reliable
+        tracking, the current frame is recorded as an anchor so re-acquisition can
+        discriminate the target from that distractor.
+
+        Args:
+            bbox (NDArray): Current target bounding box.
+            desc (np.ndarray): Extracted appearance descriptor.
+
+        Returns:
+            bool: True if the anchor was appended.
+        """
+        if desc is None:
+            return False
+        self._drm.append(
+            (
+                np.array(bbox, dtype=int),
+                np.asarray(desc).copy(),
+                self._t,
+            )
+        )
+        return True
+
     def best_descriptor(
         self,
     ) -> Optional[np.ndarray]:

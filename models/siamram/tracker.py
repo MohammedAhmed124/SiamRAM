@@ -7,7 +7,9 @@ Kalman Filter (EKF) for motion modelling. It features a Dynamic Reference
 Memory (DRM) for reliable re-acquisition after long-term occlusion.
 """
 
+import atexit
 import os
+import weakref
 from collections import deque
 from typing import List, Optional, Tuple, TypedDict
 
@@ -40,6 +42,115 @@ from .tracker_state import (
     FrameRecord,
     VisualState,
 )
+
+
+# ---------------------------------------------------------------------------
+# Research-telemetry aggregation (DRM introspection).
+#
+# run_inference.py builds a FRESH tracker per clip by default (only
+# --reuse_tracker reuses a single wrapper across clips), so a per-instance
+# cumulative tally cannot span videos and per-instance atexit would emit one
+# fragmented line per clip. These module-level globals accumulate counts across
+# every tracker instance in BOTH modes, so a single aggregate prints once at
+# process exit. Live instances are held by weakref so fresh per-clip trackers
+# garbage-collect normally (no leak) after they emit their video at the clip
+# boundary; only the still-alive tracker(s) are flushed for residual at exit.
+# ---------------------------------------------------------------------------
+_TLM_KEYS: Tuple[str, ...] = (
+    "occlusion_entries_total",
+    "drm_secondary_peak_frames",
+    "drm_divergence_below_theta",
+    "drm_should_update_true",
+    "drm_anchors_added",
+    "drm_distractor_anchors_added",
+    "drm_gate_calls",
+    "drm_gate_block_not_present",
+    "drm_gate_block_not_due",
+    "drm_gate_block_reliability",
+    "drm_gate_block_size",
+    "drm_gate_block_divergence",
+    "drm_gate_block_secondary",
+    "drm_gate_pass",
+)
+_TLM_GLOBAL_TOTAL: Optional[dict] = None
+_TLM_GLOBAL_VIDEOS: int = 0
+_TLM_LIVE_INSTANCES: "weakref.WeakSet" = weakref.WeakSet()
+_TLM_DUMP_REGISTERED: bool = False
+# Compact echo of which research features were actually active (and their key
+# params), captured once from the first telemetry-enabled tracker so the
+# module-level process-exit aggregate (_tlm_global_dump) can print it even though
+# it holds no tracker reference. Stays None until set; rendered as "flags(?)" if
+# never captured so the dump never crashes.
+_TLM_ACTIVE_FLAGS: Optional[str] = None
+
+
+def _tlm_flags_str() -> str:
+    """Render the active-feature-flag echo, robust to an uncaptured value."""
+    return _TLM_ACTIVE_FLAGS if _TLM_ACTIVE_FLAGS else "flags(?)"
+
+
+def _tlm_format(counts: dict) -> str:
+    """Render one counter dict as the compact DRM telemetry string."""
+    c = counts
+    return (
+        f"{_tlm_flags_str()} "
+        f"occ_entries={c['occlusion_entries_total']} "
+        f"DRM(gate_calls={c.get('drm_gate_calls', 0)} "
+        f"pass={c.get('drm_gate_pass', 0)} "
+        f"[not_present={c.get('drm_gate_block_not_present', 0)} "
+        f"not_due={c.get('drm_gate_block_not_due', 0)} "
+        f"reliab={c.get('drm_gate_block_reliability', 0)} "
+        f"size={c.get('drm_gate_block_size', 0)} "
+        f"diverg={c.get('drm_gate_block_divergence', 0)} "
+        f"sec={c.get('drm_gate_block_secondary', 0)}] "
+        f"sec_peak={c['drm_secondary_peak_frames']} "
+        f"div<theta={c['drm_divergence_below_theta']} "
+        f"should_update={c['drm_should_update_true']} "
+        f"anchors={c['drm_anchors_added']} "
+        f"dist_anchors={c.get('drm_distractor_anchors_added', 0)})"
+    )
+
+
+def _tlm_add_video(counts: dict) -> int:
+    """Fold one finished video's counts into the module-global total.
+
+    Returns the running global video index (1-based) for per-video labelling, so
+    numbering stays consistent whether one tracker is reused or one is built per
+    clip.
+    """
+    global _TLM_GLOBAL_TOTAL, _TLM_GLOBAL_VIDEOS
+    if _TLM_GLOBAL_TOTAL is None:
+        _TLM_GLOBAL_TOTAL = {k: 0 for k in _TLM_KEYS}
+    for k in _TLM_KEYS:
+        _TLM_GLOBAL_TOTAL[k] += int(counts.get(k, 0))
+    _TLM_GLOBAL_VIDEOS += 1
+    return _TLM_GLOBAL_VIDEOS
+
+
+def _tlm_global_dump() -> None:
+    """atexit hook: flush any residual per-instance video, then print the total.
+
+    Registered exactly once, when the first telemetry-enabled tracker is built.
+    First it asks every still-live tracker (the reused wrapper, or the final
+    fresh per-clip wrapper) to emit a last unflushed video; earlier per-clip
+    trackers already emitted at their clip boundary and have been GC'd, so they
+    are correctly excluded. Then it prints one aggregate line. Never raises
+    (atexit handlers must not during interpreter shutdown).
+    """
+    try:
+        for inst in list(_TLM_LIVE_INSTANCES):
+            try:
+                inst._emit_video_telemetry()
+            except Exception:
+                pass
+        if _TLM_GLOBAL_TOTAL is None or _TLM_GLOBAL_VIDEOS == 0:
+            return
+        siamram_log(
+            f"[research telemetry] FINAL cumulative over {_TLM_GLOBAL_VIDEOS} "
+            f"video(s) {_tlm_format(_TLM_GLOBAL_TOTAL)}"
+        )
+    except Exception:
+        pass
 
 
 class DRMKwargs(TypedDict):
@@ -190,6 +301,39 @@ class SiamRAMExperimentTracker:
         long_distance_mode: bool = False,
         enter_occlusion_on_loss: bool = True,
         no_occlusion_first_n_frames: int = 0,
+        # Introspection-based DRM anchor update (arXiv:2411.17576, Sec. 3.2.2).
+        # When enabled, a DRM distractor-context anchor is written when the
+        # SiamABC response map reveals a competing secondary peak during reliable
+        # tracking. All defaults are inert: when drm_introspection_enabled is
+        # False the updater object is never built, the inner SiamABC tracker never
+        # gets the introspection flag, and the legacy DRM write path is untouched.
+        drm_introspection_enabled: bool = False,
+        drm_introspection_theta_anc: float = 0.7,
+        drm_introspection_theta_iou: float = 0.8,
+        drm_introspection_theta_area: float = 0.2,
+        drm_introspection_theta_M: int = 10,
+        drm_introspection_delta: int = 5,
+        drm_introspection_secondary_min_ratio: float = 0.5,
+        drm_introspection_scale_aware_divergence: bool = True,
+        drm_introspection_distractor_bank_enabled: bool = False,
+        # Flag-gated diagnostics for the research features (DRM
+        # introspection). When False (default) there is zero behavioural change
+        # and effectively zero overhead; when True the tracker maintains per-video
+        # and cumulative integer counters and prints a compact summary per video.
+        research_telemetry_enabled: bool = False,
+        # Frame-difference motion-saliency input augmentation (arXiv:2505.04917,
+        # Sec. 3.2). When enabled, a short-term frame-difference motion-saliency
+        # signal (|x_t - x_{t-1}| / |x_t - x_{t-2}|) is computed between
+        # consecutive full frames and blended ADDITIVELY into the search region
+        # the frozen SiamABC backbone consumes. All defaults are inert: when
+        # frame_dynamics_enabled is False the processor object is never built and
+        # the search crop is byte-for-byte unchanged (no frame-difference work).
+        frame_dynamics_enabled: bool = False,
+        frame_dynamics_blend_weight: float = 0.06,
+        frame_dynamics_scale: float = 1.0,
+        frame_dynamics_clip: float = -1.0,
+        frame_dynamics_tiny_only: bool = True,
+        frame_dynamics_tiny_area_fraction: float = 0.001,
         block_distractor_mode_on_camera_motion: bool = True,
         block_occlusion_on_camera_motion: bool = True,
         camera_motion_heavy_disp_threshold: float = 18.0,
@@ -696,6 +840,105 @@ class SiamRAMExperimentTracker:
             # _drm_kwargs["margin"] directly still gets a number, not "auto".
             self._drm_kwargs["margin"] = self._drm_margin_auto.value
 
+        # Introspection-based DRM anchor update (arXiv:2411.17576, Sec. 3.2.2).
+        # Built only when enabled; otherwise the updater stays None, the inner
+        # SiamABC tracker never gets the introspection flag (so the response-map
+        # secondary-peak signal is never computed), and the legacy DRM write path
+        # in AppearanceMemory runs untouched. Mirrors the auto-rate / auto-margin
+        # on/off convention -- the object is never constructed when disabled.
+        self._drm_introspection_enabled = bool(drm_introspection_enabled)
+        # Scale the divergence box + non-max suppression to the target's grid-cell
+        # extent (de-degenerates theta_anc on the coarse 16x16 map). Stored
+        # unconditionally so the attribute always exists, even when DRM is off.
+        self._drm_introspection_scale_aware = bool(
+            drm_introspection_scale_aware_divergence
+        )
+        # Write the detected secondary-peak (distractor) descriptor into the
+        # NEGATIVE distractor bank during reliable tracking. Sub-feature of DRM
+        # introspection; inert unless a recovery gamma is raised. Stored
+        # unconditionally so the attribute always exists.
+        self._drm_introspection_distractor_bank_enabled = bool(
+            drm_introspection_distractor_bank_enabled
+        )
+        self._drm_introspection = None
+        if self._drm_introspection_enabled:
+            from .drm_introspection import DrmIntrospectionUpdater
+
+            self._drm_introspection = DrmIntrospectionUpdater(
+                theta_anc=drm_introspection_theta_anc,
+                theta_iou=drm_introspection_theta_iou,
+                theta_area=drm_introspection_theta_area,
+                theta_M=drm_introspection_theta_M,
+                delta=drm_introspection_delta,
+                secondary_min_ratio=drm_introspection_secondary_min_ratio,
+            )
+            # The inner SiamABC tracker's introspection flag is flipped via
+            # _attach_inner_feature_state() below (single source of truth, re-run
+            # per clip) so its track() computes the secondary-peak divergence
+            # signal; when disabled the flag is never set, keeping the legacy
+            # response-map path inert.
+
+        # Flag-gated research telemetry (DRM introspection).
+        # When OFF every increment site is guarded by self._research_telemetry_enabled
+        # so there is zero behavioural change and effectively zero overhead. When ON
+        # the tracker keeps per-video counters (_tlm_video, reset each clip) and folds
+        # each finished clip into the module-global cumulative tally
+        # (_TLM_GLOBAL_TOTAL), printing one compact per-video line at the clip
+        # boundary plus one aggregate line at process exit. The DRM secondary-peak
+        # counts live on the inner SiamABC tracker and are folded in here.
+        self._research_telemetry_enabled = bool(research_telemetry_enabled)
+        # Per-video counters for THIS instance's current clip. The cumulative
+        # tally lives at module scope (_TLM_GLOBAL_TOTAL) so it spans clips even
+        # when run_inference.py builds a fresh tracker per clip (the default).
+        self._tlm_video = self._new_telemetry_counters()
+        if self._research_telemetry_enabled:
+            # The inner tracker's telemetry flag + counter dict (so it can stash
+            # DRM-introspection counts observed inside its own track()) are
+            # attached via _attach_inner_feature_state() below.
+            # Capture the active-feature-flag echo once at module scope so the
+            # process-exit aggregate dump (which holds no tracker reference) can
+            # print it. Robust: only set if not already captured.
+            global _TLM_ACTIVE_FLAGS
+            if _TLM_ACTIVE_FLAGS is None:
+                _TLM_ACTIVE_FLAGS = self._research_flag_echo()
+            # Register this instance for residual flushing at exit (weakref, so a
+            # fresh per-clip tracker GCs normally once it has emitted its video at
+            # the clip boundary), and register the single process-exit aggregate
+            # dump exactly once across all instances.
+            global _TLM_DUMP_REGISTERED
+            _TLM_LIVE_INSTANCES.add(self)
+            if not _TLM_DUMP_REGISTERED:
+                atexit.register(_tlm_global_dump)
+                _TLM_DUMP_REGISTERED = True
+
+        # Frame-difference motion-saliency input augmentation (arXiv:2505.04917,
+        # Sec. 3.2). Built only when enabled; otherwise the processor stays None,
+        # no frame-difference work runs, and the search crop fed to the frozen
+        # SiamABC backbone is byte-for-byte unchanged. Mirrors the auto-margin
+        # on/off convention -- the object is never constructed when disabled.
+        self._frame_dynamics_enabled = bool(frame_dynamics_enabled)
+        self._frame_dynamics_processor = None
+        if self._frame_dynamics_enabled:
+            from .frame_dynamics import FrameDynamicsProcessor
+
+            self._frame_dynamics_processor = FrameDynamicsProcessor(
+                enabled=True,
+                blend_weight=frame_dynamics_blend_weight,
+                scale=frame_dynamics_scale,
+                clip=frame_dynamics_clip,
+                tiny_only=frame_dynamics_tiny_only,
+                tiny_area_fraction=frame_dynamics_tiny_area_fraction,
+            )
+
+        # Single source of truth for attaching the research-feature state
+        # bundles (DRM introspection flag, telemetry flag + inner counter dict)
+        # onto the inner SiamABC tracker. The inner tracker is
+        # reset / re-initialized per clip and its own __init__ defaults these back
+        # to inert values, so this MUST also be re-run from initialize() (see the
+        # call there). Idempotent and attaches nothing for a disabled feature, so
+        # the all-off path stays byte-for-byte inert.
+        self._attach_inner_feature_state()
+
         self._drm_lam_cand_dir = drm_lam_cand_dir
 
         # Parallel occlusion-DRM params, selected by _active_drm_* when the
@@ -1115,6 +1358,47 @@ class SiamRAMExperimentTracker:
         self._camera_motion_subsystem = CameraMotionSubsystem(self)
         self._occlusion_subsystem = OcclusionRecoverySubsystem(self)
 
+    def _attach_inner_feature_state(self) -> None:
+        """(Re)attach the research-feature state onto the live inner SiamABC tracker.
+
+        Two research features attach STATE onto the inner tracker (``self.tracker``):
+        the DRM-introspection enable flag (so its track() computes the response-map
+        secondary-peak signal) and the telemetry flag + inner counter dict. The
+        inner tracker is reset / re-initialized per clip and its own __init__
+        restores these to inert defaults (``_drm_introspection_enabled=False``,
+        ``_research_telemetry_enabled=False``, ``_tlm_inner=None``). Attaching once in
+        __init__ is therefore not enough -- from the 2nd clip on the live inner
+        tracker loses them. This method is the single source of truth, called from
+        __init__ AND from initialize() (the per-clip entry) so the inner tracker used
+        to track each clip always carries the state.
+
+        Idempotent and safe to call repeatedly. Attaches NOTHING for a disabled
+        feature (leaving the attribute absent so the OFF path is byte-for-byte
+        inert). Crucially, it never blows away un-folded inner telemetry counts: a
+        fresh ``_tlm_inner`` is created only when none currently exists (i.e. it was
+        lost on a per-clip inner re-init); an existing dict is kept as-is so counts
+        that ``_emit_video_telemetry`` has not yet folded survive.
+        """
+        # DRM introspection: only set the flag when the feature is on; otherwise
+        # leave it absent so the inner track() skips the block entirely.
+        if self._drm_introspection is not None:
+            self.tracker._drm_introspection_enabled = True
+            self.tracker._drm_scale_aware_divergence = bool(
+                self._drm_introspection_scale_aware
+            )
+            self.tracker._drm_write_distractor_bank = bool(
+                self._drm_introspection_distractor_bank_enabled
+            )
+
+        # Research telemetry: flip the inner flag and ensure a valid counter dict
+        # exists -- but preserve any existing dict so counts not yet folded by
+        # _emit_video_telemetry() are not discarded. Only mint a fresh one when the
+        # inner tracker lost it (None) on a per-clip re-init.
+        if self._research_telemetry_enabled:
+            self.tracker._research_telemetry_enabled = True
+            if getattr(self.tracker, "_tlm_inner", None) is None:
+                self.tracker._tlm_inner = self._new_inner_telemetry_counters()
+
     def _restore_inner_tracker_sequence_defaults(self) -> None:
         """
         Restore SiamABC fields that SiamRAM may adapt during a sequence.
@@ -1153,6 +1437,13 @@ class SiamRAMExperimentTracker:
         initialization. Resolve/synchronize it, then intentionally drop the
         descriptor so no old-video appearance enters the fresh memory bank.
         """
+        # This is the one hook that fires at EVERY clip boundary in both run
+        # modes: the run loop's per-clip `finally` calls it after each clip
+        # (fresh-tracker mode), and initialize() calls it before each clip
+        # (reused-tracker mode). Emit the just-finished video's telemetry here so
+        # aggregation works regardless of mode. Idempotent + no-op when disabled.
+        self._emit_video_telemetry()
+
         pending = self._pending_desc
         self._pending_desc = None
         if pending is None:
@@ -1186,6 +1477,9 @@ class SiamRAMExperimentTracker:
         # A single tracker instance is reused across videos to avoid rebuilding
         # heavy models/TRT engines. Keep that warm state, but reset every adaptive
         # per-sequence accumulator so statistics cannot leak video-to-video.
+        # _discard_pending_descriptor() (above) already emitted the telemetry for
+        # the video that just finished (reused-tracker mode) before this fresh
+        # per-sequence reset; no separate flush is needed here.
         self._discard_pending_descriptor()
         self._overlap_active = None
         if self._drm_margin_auto is not None:
@@ -1193,6 +1487,10 @@ class SiamRAMExperimentTracker:
             self._drm_kwargs["margin"] = self._drm_margin_auto.value
         if self._template_rate_auto is not None:
             self._template_rate_auto.reset()
+        if self._drm_introspection is not None:
+            self._drm_introspection.reset()
+        if self._frame_dynamics_processor is not None:
+            self._frame_dynamics_processor.reset()
         self._camera_motion_adapt_linger_left = 0
         self._target_motion_adapt_linger_left = 0
         self._last_cam_motion_norm = 0.0
@@ -1222,6 +1520,14 @@ class SiamRAMExperimentTracker:
 
         self.tracker.enable_tta()
         self.tracker.initialize(proc_frame, bbox)
+        # The inner SiamABC tracker is reset / re-initialized per clip and its
+        # __init__ restores the research-feature state to inert defaults, so
+        # re-attach it onto the LIVE inner tracker now -- AFTER its (re)init for
+        # this clip and AFTER _discard_pending_descriptor() above already emitted
+        # (folded + zeroed) the previous clip's inner telemetry counts. This
+        # emit-then-reattach ordering means a freshly-minted _tlm_inner can never
+        # discard un-folded counts. No-op / attaches nothing when all features off.
+        self._attach_inner_feature_state()
         self.current_bbox = bbox.copy()
         self.held_box = bbox.copy()
         self._stable_anchor_bbox = bbox.copy()
@@ -2479,6 +2785,228 @@ class SiamRAMExperimentTracker:
         desired_n, desired_w = self._template_rate_auto.observe(motion)
         self._set_template_N_window(desired_n, desired_w)
 
+    def _research_flag_echo(self) -> str:
+        """Compact echo of which research features are ACTUALLY active + key params.
+
+        Sourced from the tracker's stored feature objects/attributes so a reader
+        can instantly tell, from any telemetry line, whether each feature was on
+        (and its key resolved param) -- even on a run where a feature is ON but
+        never fires. Pure read-only; never raises.
+        """
+        drm = "on" if self._drm_introspection is not None else "off"
+        return f"flags(drm={drm})"
+
+    @staticmethod
+    def _new_telemetry_counters() -> dict:
+        """Fresh zeroed research-telemetry counter dict (per-video or cumulative)."""
+        return {
+            "occlusion_entries_total": 0,
+            # DRM introspection.
+            "drm_secondary_peak_frames": 0,
+            "drm_divergence_below_theta": 0,
+            "drm_should_update_true": 0,
+            "drm_anchors_added": 0,
+            "drm_distractor_anchors_added": 0,
+            # DRM should_update gate funnel (which gate blocks, on confident frames).
+            "drm_gate_calls": 0,
+            "drm_gate_block_not_present": 0,
+            "drm_gate_block_not_due": 0,
+            "drm_gate_block_reliability": 0,
+            "drm_gate_block_size": 0,
+            "drm_gate_block_divergence": 0,
+            "drm_gate_block_secondary": 0,
+            "drm_gate_pass": 0,
+        }
+
+    @staticmethod
+    def _new_inner_telemetry_counters() -> dict:
+        """Fresh zeroed counters owned by the inner SiamABC tracker.
+
+        These cover signals only observable inside the inner tracker's own
+        ``track()`` (DRM secondary-peak signal). The outer SiamRAM tracker folds
+        them into its per-video / cumulative tallies at each per-video reset.
+        """
+        return {
+            "drm_secondary_peak_frames": 0,
+            "drm_divergence_below_theta": 0,
+        }
+
+    def _emit_video_telemetry(self) -> None:
+        """Emit the just-finished clip's telemetry into the module-global tally.
+
+        Folds the inner SiamABC tracker's counts in, prints one compact per-video
+        line (only when something actually fired), adds the counts to the
+        process-wide cumulative total (``_TLM_GLOBAL_TOTAL``), then zeroes this
+        instance's per-video counters and the inner tracker's.
+
+        Called at every clip boundary via ``_discard_pending_descriptor`` (the run
+        loop's per-clip ``finally`` in fresh-tracker mode, and ``initialize`` in
+        reused-tracker mode) and once more for any residual at process exit. After
+        a clip is emitted its counters are zeroed, so a repeat call is a harmless
+        no-op (no double-count). No-op unless research telemetry is enabled.
+        """
+        if not self._research_telemetry_enabled:
+            return
+
+        # Fold the inner SiamABC tracker's per-video counts in, then zero them so a
+        # repeat call cannot re-add the same counts.
+        inner = getattr(self.tracker, "_tlm_inner", None)
+        if isinstance(inner, dict):
+            for key, val in inner.items():
+                if key in self._tlm_video:
+                    self._tlm_video[key] += int(val)
+                inner[key] = 0
+
+        v = self._tlm_video
+        # Nothing fired this clip -> stay quiet and skip the global increment.
+        if not any(int(x) for x in v.values()):
+            return
+
+        idx = _tlm_add_video(v)
+        siamram_log(f"[research telemetry] video #{idx} {_tlm_format(v)}")
+
+        # Reset per-video counters for the next clip on this instance.
+        self._tlm_video = self._new_telemetry_counters()
+
+    _DRM_GATE_REASON_KEY = {
+        "not_present": "drm_gate_block_not_present",
+        "not_due": "drm_gate_block_not_due",
+        "reliability": "drm_gate_block_reliability",
+        "size": "drm_gate_block_size",
+        "divergence": "drm_gate_block_divergence",
+        "secondary": "drm_gate_block_secondary",
+        "pass": "drm_gate_pass",
+    }
+
+    def _tlm_record_drm_gate(self, reason: str) -> None:
+        """Fold one DRM should_update gate consultation into the funnel counters.
+
+        Increments the total ``drm_gate_calls``, the per-reason bucket, and -- on
+        a passing gate -- the legacy ``drm_should_update_true`` (so it is driven
+        off the same single ``evaluate`` call rather than re-evaluated). Telemetry
+        only; never affects the DRM write decision.
+        """
+        v = self._tlm_video
+        v["drm_gate_calls"] += 1
+        key = self._DRM_GATE_REASON_KEY.get(reason)
+        if key is not None:
+            v[key] += 1
+        if reason == "pass":
+            v["drm_should_update_true"] += 1
+
+    def _maybe_update_drm_introspection(
+        self,
+        pred_bbox: np.ndarray,
+        desc: np.ndarray,
+        score: float,
+        frame_idx: int,
+    ) -> None:
+        """
+        Introspection-based DRM anchor update (arXiv:2411.17576, Sec. 3.2.2).
+
+        Consumes the response-map secondary-peak signal stashed by the inner
+        SiamABC tracker plus the per-frame reliability score and target size, and
+        -- when the paper's gates fire -- writes the current confident frame into
+        DRM as a distractor-context anchor (alongside, not replacing, the existing
+        agreement-based DRM write path). No-op unless the feature is enabled.
+
+        Called on confident frames (target present) for both the immediate and the
+        deferred (overlap) descriptor-admission paths.
+        """
+        updater = self._drm_introspection
+        if updater is None or desc is None:
+            return
+
+        area = float(pred_bbox[2] * pred_bbox[3])
+        # Keep the size-stability median current on every confident frame.
+        updater.observe_size(area)
+
+        ratio = float(getattr(self.tracker, "latest_secondary_peak_ratio", 1.0))
+        prim = float(getattr(self.tracker, "latest_primary_peak_score", 0.0))
+        sec = float(getattr(self.tracker, "latest_secondary_peak_score", 0.0))
+
+        if self._research_telemetry_enabled:
+            reason = updater.evaluate(
+                frame_idx=frame_idx,
+                target_present=True,
+                divergence_ratio=ratio,
+                primary_score=prim,
+                secondary_score=sec,
+                reliability_score=float(score),
+                area=area,
+            )
+            self._tlm_record_drm_gate(reason)
+            passed = reason == "pass"
+        else:
+            passed = updater.should_update(
+                frame_idx=frame_idx,
+                target_present=True,
+                divergence_ratio=ratio,
+                primary_score=prim,
+                secondary_score=sec,
+                reliability_score=float(score),
+                area=area,
+            )
+
+        if passed:
+            if self.memory.add_drm_anchor(pred_bbox, desc):
+                updater.mark_updated(frame_idx)
+                if self._research_telemetry_enabled:
+                    self._tlm_video["drm_anchors_added"] += 1
+                if self.debug:
+                    print(
+                        f"[drm introspection] frame={frame_idx} wrote DRM anchor "
+                        f"ratio={ratio:.3f} prim={prim:.3f} sec={sec:.3f} "
+                        f"score={float(score):.3f}"
+                    )
+
+    def _maybe_write_distractor_anchor(self, frame, score: float, frame_idx: int) -> None:
+        """Write the secondary-peak (distractor) descriptor to the NEGATIVE bank.
+
+        The introspection-based DRM update (arXiv:2411.17576) detects a competing
+        secondary peak during reliable tracking. This records that distractor's
+        appearance in the negative distractor bank so the gamma-weighted suppression
+        term in drm_match / distractor-mode scoring can penalize it on re-acquisition.
+        Independent of the positive-anchor delta gate (the negative bank benefits from
+        every genuine competitor sample). No-op unless the sub-feature is enabled and
+        a competing distractor was detected this frame during reliable tracking.
+        """
+        if not self._drm_introspection_distractor_bank_enabled:
+            return
+        if frame is None or not self._use_distractor_bank:
+            return
+        updater = self._drm_introspection
+        if updater is None:
+            return
+        sec_bbox = getattr(self.tracker, "latest_secondary_peak_bbox", None)
+        if sec_bbox is None:
+            return
+        ratio = float(getattr(self.tracker, "latest_secondary_peak_ratio", 1.0))
+        prim = float(getattr(self.tracker, "latest_primary_peak_score", 0.0))
+        sec = float(getattr(self.tracker, "latest_secondary_peak_score", 0.0))
+        # Distractor detected during reliable tracking (reuse the updater thresholds;
+        # NO delta spacing / mark_updated -- the positive-anchor cadence is separate).
+        if float(score) <= updater.theta_iou:
+            return
+        if not (ratio < updater.theta_anc):
+            return
+        if (sec / max(1e-8, prim)) < updater.secondary_min_ratio:
+            return
+        bb = np.asarray(sec_bbox, dtype=float)
+        if bb.shape[0] < 4 or bb[2] <= 1.0 or bb[3] <= 1.0:
+            return
+        h, w = frame.shape[:2]
+        x = float(np.clip(bb[0], 0.0, w - 2.0))
+        y = float(np.clip(bb[1], 0.0, h - 2.0))
+        ww = float(np.clip(bb[2], 1.0, w - x))
+        hh = float(np.clip(bb[3], 1.0, h - y))
+        desc = _extract_descriptor(frame, np.array([x, y, ww, hh], dtype=float))
+        if desc is None:
+            return
+        self._add_distractor_descriptor(desc)
+        if self._research_telemetry_enabled and self._tlm_video is not None:
+            self._tlm_video["drm_distractor_anchors_added"] += 1
+
     def _resolve_pending_descriptor(self) -> None:
         """
         Finish the OSNet descriptor deferred from the previous confident frame
@@ -2499,6 +3027,40 @@ class SiamRAMExperimentTracker:
             return
 
         self.memory.try_admit(pending["pred_bbox"], desc, pending["ref_bbox"])
+        # Introspection-based DRM anchor update (arXiv:2411.17576) using the
+        # signal snapshotted when this descriptor was launched (the inner
+        # tracker's live signal now reflects a later frame). No-op when disabled.
+        if self._drm_introspection is not None and "intro_score" in pending:
+            updater = self._drm_introspection
+            area = float(pending["pred_bbox"][2] * pending["pred_bbox"][3])
+            updater.observe_size(area)
+            if self._research_telemetry_enabled:
+                reason = updater.evaluate(
+                    frame_idx=int(pending["frame_idx"]),
+                    target_present=True,
+                    divergence_ratio=float(pending["intro_ratio"]),
+                    primary_score=float(pending["intro_prim"]),
+                    secondary_score=float(pending["intro_sec"]),
+                    reliability_score=float(pending["intro_score"]),
+                    area=area,
+                )
+                self._tlm_record_drm_gate(reason)
+                passed = reason == "pass"
+            else:
+                passed = updater.should_update(
+                    frame_idx=int(pending["frame_idx"]),
+                    target_present=True,
+                    divergence_ratio=float(pending["intro_ratio"]),
+                    primary_score=float(pending["intro_prim"]),
+                    secondary_score=float(pending["intro_sec"]),
+                    reliability_score=float(pending["intro_score"]),
+                    area=area,
+                )
+            if passed:
+                if self.memory.add_drm_anchor(pending["pred_bbox"], desc):
+                    updater.mark_updated(int(pending["frame_idx"]))
+                    if self._research_telemetry_enabled:
+                        self._tlm_video["drm_anchors_added"] += 1
         if pending["sample_drm"]:
             self_score = self.memory.score_target_against_drm(
                 target_bbox=pending["pred_bbox"],
@@ -2608,6 +3170,12 @@ class SiamRAMExperimentTracker:
             else:
                 effective_heavy = False
             self._apply_camera_motion_template_adapt(effective_heavy)
+        # Frame-difference motion-saliency injection (arXiv:2505.04917). When the
+        # processor exists (master switch on) it blends short-term motion saliency
+        # into the search region of the frame before SiamABC extracts its search
+        # crop; when None this is a no-op and `frame` is passed through untouched,
+        # so the legacy crop is byte-for-byte unchanged.
+        frame = self._apply_frame_dynamics(frame)
         pred_bbox, score, _ = self.tracker.update(frame)
         pred_bbox = np.array(pred_bbox, dtype=int)
 
@@ -2698,6 +3266,8 @@ class SiamRAMExperimentTracker:
                     )
                 return pred_bbox, float(score)
 
+            if self._research_telemetry_enabled:
+                self._tlm_video["occlusion_entries_total"] += 1
             self._entry_streak = 0
             self._set_early_occlusion_mode_on_entry()
             self.in_occlusion = True
@@ -2823,11 +3393,38 @@ class SiamRAMExperimentTracker:
                     ),
                     "sample_drm": bool(sample_drm),
                     "frame_idx": self.frame_idx,
+                    # Introspection-based DRM update: snapshot this frame's score
+                    # and response-map secondary-peak signal, since by the time the
+                    # deferred admit resolves (next frame) the inner tracker's live
+                    # signal reflects a different frame. No-op when disabled.
+                    "intro_score": float(score),
+                    "intro_ratio": float(
+                        getattr(self.tracker, "latest_secondary_peak_ratio", 1.0)
+                    ),
+                    "intro_prim": float(
+                        getattr(self.tracker, "latest_primary_peak_score", 0.0)
+                    ),
+                    "intro_sec": float(
+                        getattr(self.tracker, "latest_secondary_peak_score", 0.0)
+                    ),
                 }
+                # DRM-introspection distractor-bank write-back (sub-feature). Uses
+                # the inner tracker's live secondary-peak bbox from THIS frame, so it
+                # runs immediately (not deferred). No-op unless the sub-feature is on.
+                self._maybe_write_distractor_anchor(frame, float(score), self.frame_idx)
             else:
                 desc = _extract_descriptor(frame, pred_bbox)
                 if desc is not None:
                     self.memory.try_admit(pred_bbox, desc, self.current_bbox)
+                    # Introspection-based DRM anchor update (arXiv:2411.17576).
+                    # No-op unless drm_introspection_enabled; sits alongside the
+                    # legacy DRM write inside try_admit.
+                    self._maybe_update_drm_introspection(
+                        pred_bbox, desc, float(score), self.frame_idx
+                    )
+                    self._maybe_write_distractor_anchor(
+                        frame, float(score), self.frame_idx
+                    )
                     # Adaptive drm_margin: on confident frames, sample how well
                     # the genuine target scores against its own DRM anchors and
                     # feed the estimator. No-op unless drm_margin == "auto".
@@ -4633,6 +5230,61 @@ class SiamRAMExperimentTracker:
                     f"[class filter] target class locked: {best_cls}  "
                     f"(votes={votes})"
                 )
+
+    def _apply_frame_dynamics(self, frame: np.ndarray) -> np.ndarray:
+        """Blend frame-difference motion saliency into the search region.
+
+        Frame-dynamics input augmentation (arXiv:2505.04917, Sec. 3.2). When the
+        processor is built (master switch on), compute the short-term
+        frame-difference motion saliency between consecutive full frames and blend
+        it ADDITIVELY into the search region the frozen SiamABC backbone is about
+        to crop. The processor owns the previous-frame buffer, so we always feed
+        it the current full frame (even before a bbox exists) to keep its history
+        warm. Returns a NEW frame with the search region emphasised, or the input
+        frame unchanged when the feature is disabled / no motion is available yet.
+
+        When the processor is None (feature off) this is a no-op and the original
+        frame is returned, so the legacy search crop is byte-for-byte unchanged.
+        """
+        proc = self._frame_dynamics_processor
+        if proc is None:
+            return frame
+
+        # Resolve the search window (bbox padded by the SiamABC search_context
+        # ratio) so the saliency registers with the crop. Before a bbox exists
+        # (frame 0 paths) fall back to the whole frame.
+        if self.current_bbox is not None:
+            x, y, w, h = self._tracker_search_roi(frame, self.current_bbox)
+            x0, y0, x1, y1 = int(x), int(y), int(x + w), int(y + h)
+        else:
+            h_fr, w_fr = frame.shape[:2]
+            x0, y0, x1, y1 = 0, 0, int(w_fr), int(h_fr)
+
+        h_fr, w_fr = frame.shape[:2]
+        x0 = max(0, min(w_fr, x0))
+        y0 = max(0, min(h_fr, y0))
+        x1 = max(0, min(w_fr, x1))
+        y1 = max(0, min(h_fr, y1))
+        if x1 <= x0 or y1 <= y0:
+            # Degenerate window: still advance the buffer so motion is available
+            # next frame, but make no spatial edit.
+            proc.process(frame, frame, None, None)
+            return frame
+
+        search_crop = frame[y0:y1, x0:x1]
+        modified = proc.process(
+            search_crop,
+            frame,
+            self.current_bbox,
+            (x0, y0, x1, y1),
+        )
+        # No change (disabled / zero weight / no motion yet) -> return original.
+        if modified is search_crop:
+            return frame
+
+        out = frame.copy()
+        out[y0:y1, x0:x1] = modified
+        return out
 
     def _tracker_search_roi(
         self,

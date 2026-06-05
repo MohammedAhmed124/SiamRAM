@@ -147,12 +147,91 @@ class GmcPriorConfig:
 
 
 @dataclass
+class DrmIntrospectionConfig:
+    """Introspection-based DRM anchor update (arXiv:2411.17576, Sec. 3.2.2).
+
+    Master switch ``enabled`` defaults to False so the legacy DRM write path in
+    ``AppearanceMemory`` is byte-for-byte unchanged until flipped on. When on, a
+    DRM distractor-context anchor is written when the response map reveals a
+    competing secondary peak (divergence bbox-area ratio < ``theta_anc``) during
+    reliable tracking (score > ``theta_iou`` and target area within ``theta_area``
+    of the median over the last ``theta_M`` frames), no more often than every
+    ``delta`` frames, and only when the target is present.
+    """
+
+    enabled: bool = False
+    theta_anc: float = 0.7
+    theta_iou: float = 0.8
+    theta_area: float = 0.2
+    theta_M: int = 10
+    delta: int = 5
+    secondary_min_ratio: float = 0.5
+    # Scale the divergence box + non-max suppression to the target's grid-cell
+    # extent instead of a fixed 3x3 box, de-degenerating theta_anc on the coarse
+    # 16x16 response map. True = scale-aware; False = legacy fixed 3x3.
+    scale_aware_divergence: bool = True
+    # Write the detected secondary-peak (distractor) descriptor into the NEGATIVE
+    # distractor bank during reliable tracking, so the gamma-weighted suppression
+    # term can penalize that look-alike. Inert unless a recovery gamma > 0.
+    distractor_bank_enabled: bool = False
+
+
+@dataclass
+class FrameDynamicsConfig:
+    """Frame-difference motion-saliency input augmentation (arXiv:2505.04917).
+
+    Master switch ``enabled`` defaults to False so the search crop fed to the
+    frozen SiamABC backbone is byte-for-byte unchanged until flipped on. When on,
+    a short-term frame-difference motion-saliency signal (|x_t - x_{t-1}| and
+    |x_t - x_{t-2}|) is computed between consecutive full frames and blended
+    ADDITIVELY into the search region with weight ``blend_weight`` (scaled by
+    ``scale`` and optionally clipped to ``clip`` when ``clip > 0`` to suppress
+    outlier difference pixels). This deviates from the paper's channel
+    concatenation (which assumed a from-scratch-trained 6-channel detector):
+    SiamRAM cannot retrain the frozen 3-channel backbone, so the motion cue is
+    injected via an additive 3-channel blend instead.
+
+    By default the blend is LOW-WEIGHT (``blend_weight = 0.06``) and TINY-ONLY
+    (``tiny_only = True``): it is applied only when the target is small (bbox area
+    fraction ``<= tiny_area_fraction``, default ``0.001``), leaving
+    normal/large-target crops clean.
+    This confines the augmentation to the tiny-target regime where appearance
+    collapses (per CST Anti-UAV) and the motion cue helps, avoiding corruption of
+    the appearance signal the backbone matches on for the majority of frames.
+    """
+
+    enabled: bool = False
+    blend_weight: float = 0.06
+    scale: float = 1.0
+    clip: float = -1.0
+    tiny_only: bool = True
+    tiny_area_fraction: float = 0.001
+
+
+@dataclass
+class ResearchTelemetryConfig:
+    """Flag-gated diagnostics for the three research features.
+
+    Single master switch ``research_telemetry_enabled`` (default False). When OFF
+    there is zero behavioural change and effectively zero overhead. When ON the
+    tracker maintains per-video and cumulative integer counters for the
+    DRM-introspection feature and prints a compact summary line per
+    video at the per-video reset point.
+    """
+
+    research_telemetry_enabled: bool = False
+
+
+@dataclass
 class TrackerSubsystemConfig:
     descriptor: Optional[DescriptorConfig] = None
     reacquisition: Optional[ReacquisitionConfig] = None
     spike_reject: Optional[SpikeRejectConfig] = None
     distractor_mode: Optional[DistractorModeConfig] = None
     gmc_prior: Optional[GmcPriorConfig] = None
+    drm_introspection: Optional[DrmIntrospectionConfig] = None
+    frame_dynamics: Optional[FrameDynamicsConfig] = None
+    telemetry: Optional[ResearchTelemetryConfig] = None
 
 
 def _to_mapping(value: Any) -> Mapping[str, Any]:
@@ -432,6 +511,49 @@ def flatten_subsystem_overrides(config: Any) -> tuple[dict[str, Any], dict[str, 
                     dis.drm_dist_sigma_factor
                 ),
                 "distractor_drm_bank_topk": int(dis.drm_bank_topk),
+            }
+        )
+
+    if subsystems.drm_introspection is not None:
+        dri = subsystems.drm_introspection
+        exp_overrides.update(
+            {
+                "drm_introspection_enabled": bool(dri.enabled),
+                "drm_introspection_theta_anc": float(dri.theta_anc),
+                "drm_introspection_theta_iou": float(dri.theta_iou),
+                "drm_introspection_theta_area": float(dri.theta_area),
+                "drm_introspection_theta_M": int(dri.theta_M),
+                "drm_introspection_delta": int(dri.delta),
+                "drm_introspection_secondary_min_ratio": float(
+                    dri.secondary_min_ratio
+                ),
+                "drm_introspection_scale_aware_divergence": bool(
+                    dri.scale_aware_divergence
+                ),
+                "drm_introspection_distractor_bank_enabled": bool(
+                    dri.distractor_bank_enabled
+                ),
+            }
+        )
+
+    if subsystems.frame_dynamics is not None:
+        fd = subsystems.frame_dynamics
+        exp_overrides.update(
+            {
+                "frame_dynamics_enabled": bool(fd.enabled),
+                "frame_dynamics_blend_weight": float(fd.blend_weight),
+                "frame_dynamics_scale": float(fd.scale),
+                "frame_dynamics_clip": float(fd.clip),
+                "frame_dynamics_tiny_only": bool(fd.tiny_only),
+                "frame_dynamics_tiny_area_fraction": float(fd.tiny_area_fraction),
+            }
+        )
+
+    if subsystems.telemetry is not None:
+        tel = subsystems.telemetry
+        exp_overrides.update(
+            {
+                "research_telemetry_enabled": bool(tel.research_telemetry_enabled),
             }
         )
 

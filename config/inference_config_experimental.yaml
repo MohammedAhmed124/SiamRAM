@@ -305,7 +305,7 @@ ram_tracker:
     # Master switch; when false the updater is never built, the inner SiamABC
     # tracker never computes the secondary-peak signal, and the legacy DRM write
     # path in AppearanceMemory is byte-for-byte unchanged.
-    drm_introspection_enabled: true
+    drm_introspection_enabled: false
     # theta_anc: hypothesis-divergence trigger. primary/union bbox-area ratio
     # below this flags a competing distractor in the response map. Paper: 0.7.
     drm_introspection_theta_anc: 0.7

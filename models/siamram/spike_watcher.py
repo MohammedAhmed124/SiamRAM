@@ -93,11 +93,11 @@ class SpikeWatcher:
 
         prev_bbox = np.asarray(t.current_bbox, dtype=float)
         cand_bbox = np.asarray(pred_bbox, dtype=float)
-        h_curr = t._last_H if bool(t._last_H_reliable) else None
-        speed_norm = t._camera_compensated_step_norm(
+        speed_norm, _cam_removed = t._camera_compensated_step_norm(
             prev_bbox=prev_bbox,
             curr_bbox=cand_bbox,
-            H=h_curr,
+            H=t._last_H,
+            H_reliable=t._last_H_reliable,
         )
         t._spike_debug_speed_norm = float(speed_norm)
 
@@ -109,41 +109,20 @@ class SpikeWatcher:
         t._spike_debug_baseline_norm = float(baseline_norm)
         t._spike_debug_ratio = float(ratio)
 
-        abs_norm_min_eff = t._spike_reject_abs_norm_min
-        if (
-            t._spike_reject_long_distance_abs_norm_min > 0.0
-            and t._is_long_distance(frame)
-        ):
-            abs_norm_min_eff = max(
-                abs_norm_min_eff,
-                t._spike_reject_long_distance_abs_norm_min,
-            )
-
-        if speed_norm < abs_norm_min_eff:
+        # Absolute floor (bbox-diagonal units): a spike must clear a minimum
+        # camera-compensated object motion before the relative ratio is trusted.
+        # Reuses the heavy-camera-motion norm threshold so the spike test and the
+        # camera gate speak the same units; replaces the deleted
+        # spike_reject_abs_norm_min / long_distance / camera_residual knobs.
+        if speed_norm < t._camera_motion_heavy_norm_threshold:
             return False, None, speed_norm, baseline_norm, ratio, None
         if ratio < t._spike_reject_ratio:
             return False, None, speed_norm, baseline_norm, ratio, None
 
-        if t._spike_reject_camera_residual_min_ratio > 0.0 and h_curr is not None:
-            p0x = float(prev_bbox[0] + prev_bbox[2] / 2.0)
-            p0y = float(prev_bbox[1] + prev_bbox[3] / 2.0)
-            cam_delta = t._camera_displacement_from_h_at_point(h_curr, p0x, p0y)
-            if cam_delta is not None:
-                diag = float(np.hypot(prev_bbox[2], prev_bbox[3])) + 1e-8
-                cam_norm = float(np.hypot(cam_delta[0], cam_delta[1])) / diag
-                if speed_norm < t._spike_reject_camera_residual_min_ratio * cam_norm:
-                    return False, None, speed_norm, baseline_norm, ratio, None
-
+        # Appearance is intentionally NOT checked here -- the trigger only STARTS a
+        # watch. The irreversible distractor-mode entry is gated by an appearance
+        # veto at commit time (see apply_hard_jump_rejection).
         cand_desc = _extract_descriptor(frame, pred_bbox)
-        if t._spike_reject_use_appearance:
-            ref_desc = t.memory.best_descriptor()
-            if ref_desc is not None and cand_desc is not None:
-                sim = float(_cos_sim(ref_desc, cand_desc))
-                if sim > t._spike_reject_max_sim:
-                    return False, cand_desc, speed_norm, baseline_norm, ratio, sim
-                t._spike_debug_trigger = True
-                return True, cand_desc, speed_norm, baseline_norm, ratio, sim
-
         t._spike_debug_trigger = True
         return True, cand_desc, speed_norm, baseline_norm, ratio, None
 
@@ -211,32 +190,23 @@ class SpikeWatcher:
             score = t._apply_distractor_mode_penalty(frame, pred_bbox, score)
             return pred_bbox, float(score)
 
+        # Always-on camera hard-block: when camera motion is heavy AND the
+        # homography is unreliable, the apparent jump cannot be separated from
+        # ego-motion, so refuse distractor-mode entry. This is the dominant false
+        # trigger for fast pans and small far-away targets. When H is reliable the
+        # camera motion is already removed from the spike measure, so a heavy pan
+        # with a good homography is still allowed to proceed.
         heavy_cam_motion, heavy_cam_disp = t._is_heavy_camera_motion(
             frame, bbox_hint=pred_bbox
         )
-        if (
-            t._block_distractor_mode_on_camera_motion
-            and heavy_cam_motion
-        ):
+        if heavy_cam_motion and not bool(t._last_H_reliable):
             if t._jump_watch_active:
                 self.clear_watch_state()
             if t.debug:
                 print(
-                    f"[distractor guard] frame={t.frame_idx} blocked by camera motion "
-                    f"disp={heavy_cam_disp:.2f} thr={t._camera_motion_heavy_disp_threshold:.2f}"
-                )
-            score = t._apply_distractor_mode_penalty(frame, pred_bbox, score)
-            return pred_bbox, float(score)
-
-        if (
-            t._spike_reject_disable_in_tiny_mode
-            and t._is_long_distance(frame)
-        ):
-            if t._jump_watch_active:
-                self.clear_watch_state()
-            if t.debug:
-                print(
-                    f"[distractor guard] frame={t.frame_idx} blocked by tiny-object mode"
+                    f"[distractor guard] frame={t.frame_idx} blocked: heavy camera "
+                    f"motion + unreliable H disp={heavy_cam_disp:.2f} "
+                    f"thr={t._camera_motion_heavy_disp_threshold:.2f}"
                 )
             score = t._apply_distractor_mode_penalty(frame, pred_bbox, score)
             return pred_bbox, float(score)
@@ -289,10 +259,11 @@ class SpikeWatcher:
 
             prev_watch = t._jump_watch_prev_bbox
             if prev_watch is not None:
-                step_speed_norm = t._camera_compensated_step_norm(
+                step_speed_norm, _ = t._camera_compensated_step_norm(
                     prev_bbox=np.asarray(prev_watch, dtype=float),
                     curr_bbox=np.asarray(pred_bbox, dtype=float),
                     H=t._last_H,
+                    H_reliable=t._last_H_reliable,
                 )
             else:
                 step_speed_norm = 0.0
@@ -310,7 +281,10 @@ class SpikeWatcher:
                 t._jump_watch_stable_count = 0
 
             anchor = t._jump_watch_anchor_bbox
-            if anchor is not None and _iou(pred_bbox, anchor) >= 0.50:
+            if (
+                anchor is not None
+                and _iou(pred_bbox, anchor) >= t._spike_reject_anchor_return_iou
+            ):
                 if t.debug:
                     print(
                         f"[spike-watch:cancel] frame={t.frame_idx}  "
@@ -345,6 +319,31 @@ class SpikeWatcher:
                 switched_desc = cand_desc
                 if switched_desc is None:
                     switched_desc = _extract_descriptor(frame, pred_bbox)
+
+                # Appearance commit veto: a camera pan keeps the SAME object under
+                # the box (similarity to the tracked target stays very high), while
+                # a genuine distractor switch lands on a different instance. Block
+                # the irreversible distractor-mode entry when the candidate still
+                # looks like our target.
+                ref_descs = t._target_descriptor_history()
+                if switched_desc is not None and ref_descs:
+                    max_sim = max(
+                        float(_cos_sim(d, switched_desc)) for d in ref_descs
+                    )
+                    if max_sim >= t._spike_reject_commit_same_object_sim:
+                        if t.debug:
+                            print(
+                                f"[spike-watch:appearance-veto] frame={t.frame_idx} "
+                                f"sim={max_sim:.3f} >= "
+                                f"{t._spike_reject_commit_same_object_sim:.2f} "
+                                "(same object under camera pan)"
+                            )
+                        self.clear_watch_state()
+                        score = t._apply_distractor_mode_penalty(
+                            frame, pred_bbox, score
+                        )
+                        return pred_bbox, float(score)
+
                 if switched_desc is not None and t._distractor_bank_maxlen > 0:
                     t._add_distractor_descriptor(switched_desc.copy())
 

@@ -55,41 +55,64 @@ model:
 # =============================================================================
 tracker:
   _target_: models.SiamABC.tracker.SiamABC_Tracker.SiamABCTracker
-  # Spatial prior applied to the score map ("cosine" biases picks toward the crop centre).
-  score_window_type: cosine
-  # Pixel stride between neighbouring score-grid cells.
-  score_grid_stride: 16
-  # Score-grid side length (16 means a 16x16 candidate grid).
-  score_grid_size: 16
 
-  # Allow the dynamic template to evolve across frames.
-  template_update_enabled: true
-  # Apply extra temporal smoothing on the predicted trajectory.
-  bbox_smoothing_enabled: false
-  # Offset factor when extracting the template crop around the target centre.
-  template_context_padding: 0.2
-  # Multiplier deciding how much context around target is included in search crop.
-  search_context_scale: 2
-  # Pixel size of the search crop fed to the model.
-  search_crop_size: 256
-  # Pixel size of the template crop.
-  template_crop_size: 128
-  # Frames between dynamic-template re-selection during steady-state tracking.
-  template_update_interval: 40
-  # Frames between dynamic-template re-selection during warm-up.
-  warmup_template_update_interval: 2
-  # Number of recent confident frames kept for dynamic-template selection.
-  template_memory_window: 30
-  # Confidence required before a frame can enter the dynamic-template memory.
-  template_admit_conf_threshold: 0.83
-  # Lower clamp on the running-confidence smoother.
-  running_confidence_floor: 0.50
-  # IoU required between consecutive boxes before admitting a template update.
-  template_admit_iou_threshold: 0.6
-  # First frames treated as template warm-up.
-  template_warmup_frames: 5
-  # During warm-up, consider only this many recent memory entries.
-  warmup_template_memory_window: 8
+  # Architecture / geometry knobs for SiamABC's fixed crop and score-map layout.
+  # These should usually match how the checkpoint was trained.
+  architectural_config:
+    # Pixel stride between neighbouring score-grid cells.
+    score_grid_stride: 16  # default was: 16
+    # Score-grid side length (16 means a 16x16 candidate grid).
+    score_grid_size: 16  # default was: 16
+    # Offset factor when extracting the template crop around the target centre.
+    template_context_padding: 0.2  # default was: 0.2
+    # Multiplier deciding how much context around target is included in search crop.
+    search_context_scale: 2  # default was: 2
+    # Pixel size of the search crop fed to the model.
+    search_crop_size: 256  # default was: 256
+    # Pixel size of the template crop.
+    template_crop_size: 128  # default was: 128
+
+  # Hanning-window score prior and related Siamese-tracker motion penalties.
+  # This block is intentionally separate from template updates and SiamRAM's EKF:
+  # it only shapes SiamABC's per-location score map and optional bbox-size EMA.
+  hanning_window_penalty:
+    # Master switch for blending a spatial Hanning/cosine prior into the score map.
+    enabled: true  # default was: true
+    # "cosine" builds np.hanning(score_size) x np.hanning(score_size);
+    # any other value behaves like an all-ones neutral window.
+    window_type: cosine  # default was: cosine
+    # Blend amount for the Hanning prior. 0 = raw score map, 1 = window only.
+    influence: 0.25  # default was: 0.25
+    # Apply the scale/aspect consistency penalty before the Hanning blend.
+    size_penalty_enabled: true  # default was: true
+    # Strength of the scale/aspect penalty; larger values resist size/aspect jumps.
+    size_penalty_k: 0.04  # default was: 0.04
+    # Smooth predicted bbox width/height with the previous size. Independent from
+    # the score-window penalty; keep off unless you explicitly want size EMA.
+    bbox_size_smoothing_enabled: false  # default was: false
+    # Learning-rate multiplier used only when bbox_size_smoothing_enabled is true.
+    bbox_size_smoothing_lr: 0.3  # default was: 0.3
+
+  # Dynamic-template memory and refresh policy.
+  dynamic_template:
+    # Allow the dynamic template to evolve across frames.
+    enabled: true  # default was: true
+    # Frames between dynamic-template re-selection during steady-state tracking.
+    update_interval: 40  # default was: 40
+    # Frames between dynamic-template re-selection during warm-up.
+    warmup_update_interval: 2  # default was: 2
+    # Number of recent confident frames kept for dynamic-template selection.
+    memory_window: 30  # default was: 30
+    # Confidence required before a frame can enter the dynamic-template memory.
+    admit_conf_threshold: 0.83  # default was: 0.83
+    # Lower clamp on the running-confidence smoother.
+    running_confidence_floor: 0.50  # default was: 0.50
+    # IoU required between consecutive boxes before admitting a template update.
+    admit_iou_threshold: 0.6  # default was: 0.6
+    # First frames treated as template warm-up.
+    warmup_frames: 5  # default was: 5
+    # During warm-up, consider only this many recent memory entries.
+    warmup_memory_window: 8  # default was: 8
 
 
 # =============================================================================
@@ -182,11 +205,9 @@ ram_tracker:
       # Hard-off switch for all camera-motion estimation (debug only).
       disable_camera_motion: False
 
-    # When the camera is shaking a lot, optionally skip distractor/occlusion entry
-    # to avoid false triggers caused by the camera moving rather than the target.
+    # When the camera is shaking a lot, optionally skip occlusion entry to avoid
+    # false triggers caused by the camera moving rather than the target.
     gating:
-      # Block distractor-mode entry when camera motion is heavy (avoids false jumps from shake).
-      block_distractor_mode_on_camera_motion: True
       # Block occlusion entry when camera motion is heavy (avoids fake target-loss from shake).
       block_occlusion_on_camera_motion: false
       # Camera moved more than this many px in one frame = "heavy".
@@ -539,58 +560,56 @@ ram_tracker:
       occlusion_use_ram_until_drm_full: false
 
   # ---------------------------------------------------------------------------
-  # spike_reject: detect "the tracker just jumped to a distractor" — one-frame
-  # large displacement compared to the recent baseline.
-  # ---------------------------------------------------------------------------
-  spike_reject:
-    # Master switch for the spike / hard-jump rejection workflow.
-    spike_reject_enabled: False
-    # Don't run spike detection in the first N frames (startup noise).
-    spike_reject_min_frames: 3
-    # Only run when current tracker score is at least this.
-    spike_reject_min_score: 0.0
-    # How many past frames define the "normal" motion baseline.
-    spike_reject_history_window: 40
-    # Need at least this many baseline samples before spike detection fires.
-    spike_reject_min_history: 5
-    # A frame counts as a spike when its motion is at least this × the baseline.
-    spike_reject_ratio: 2.5
-    # Plus the motion must reach this absolute (bbox-diagonal-normalised) amount.
-    spike_reject_abs_norm_min: 0.0
-    # After a spike, motion must drop below this × baseline to count as "settled".
-    spike_reject_settle_ratio: 0.7
-    # Absolute cap on motion during the settle phase.
-    spike_reject_settle_abs_norm_max: 0.3
-    # How many consecutive settled frames before committing to distractor mode.
-    spike_reject_settle_frames: 1
-    # Give up the spike-watch after this many frames if it never settles.
-    spike_reject_watch_max_frames: 8
-    # During settle, motion must drop to at least this fraction of the spike peak.
-    spike_reject_settle_from_spike_frac: 0.55
-    # Also check appearance similarity when deciding if the spike is a real switch.
-    spike_reject_use_appearance: false
-    # If appearance similarity is above this, treat as still-our-target (no spike).
-    spike_reject_max_sim: 0.65
-    # Require this many consecutive spike-triggering frames before starting the watch
-    # (1 = react immediately; >1 suppresses single-frame jitter but blocks real one-frame jumps).
-    spike_reject_confirm_frames: 1
-    # Stricter absolute floor when target is tiny — kills false positives caused
-    # by tiny bbox diagonals amplifying small camera residuals into huge step-norms.
-    spike_reject_long_distance_abs_norm_min: 0.0
-    # Treat the apparent jump as ego-motion noise when the residual is smaller than
-    # this × the raw camera motion at the target point (0 = off).
-    spike_reject_camera_residual_min_ratio: 0
-    # Hard-disable spike detection whenever the target is in tiny / long-distance mode.
-    spike_reject_disable_in_tiny_mode: false
-
-  # ---------------------------------------------------------------------------
   # distractor_mode: state we enter after a confirmed spike commit; tries to
   # tell the real target from look-alike distractors using YOLO + appearance.
   # ---------------------------------------------------------------------------
   distractor_mode:
 
+    # Detect "the tracker just jumped to a distractor" — one-frame large
+    # displacement compared to the recent baseline. A confirmed spike is the
+    # normal entry path into distractor mode.
+    spike_reject:
+      # Master switch for the spike / hard-jump rejection workflow.
+      spike_reject_enabled: False
+      # Don't run spike detection in the first N frames (startup noise).
+      spike_reject_min_frames: 3
+      # Only run when current tracker score is at least this.
+      spike_reject_min_score: 0.0
+      # How many past frames define the "normal" motion baseline.
+      spike_reject_history_window: 40
+      # Need at least this many baseline samples before spike detection fires.
+      spike_reject_min_history: 5
+      # A frame counts as a spike when its motion is at least this × the baseline.
+      spike_reject_ratio: 2.5
+      # After a spike, motion must drop below this × baseline to count as "settled".
+      spike_reject_settle_ratio: 0.7
+      # Absolute cap on motion during the settle phase.
+      spike_reject_settle_abs_norm_max: 0.3
+      # How many consecutive settled frames before committing to distractor mode.
+      spike_reject_settle_frames: 1
+      # Give up the spike-watch after this many frames if it never settles.
+      spike_reject_watch_max_frames: 8
+      # During settle, motion must drop to at least this fraction of the spike peak.
+      spike_reject_settle_from_spike_frac: 0.55
+      # Require this many consecutive spike-triggering frames before starting the watch
+      # (1 = react immediately; >1 suppresses single-frame jitter but blocks real one-frame jumps).
+      spike_reject_confirm_frames: 1
+      # Appearance commit veto: when a watch is ready to commit, BLOCK the entry if
+      # the candidate is at least THIS cosine-similar to the tracked target — that
+      # means it's the same object under a camera pan, not a real distractor switch.
+      # (Camera-induced apparent jumps keep the same object under the box at ~0.9+.)
+      spike_reject_commit_same_object_sim: 0.90
+      # IoU with the pre-spike anchor at which an in-flight watch is cancelled
+      # (the candidate has drifted back onto the original target).
+      spike_reject_anchor_return_iou: 0.50
+
     # Entry behaviour: how aggressive the per-frame penalty against known distractors is.
     entry:
+      # NOTE: the old block_distractor_mode_on_camera_motion toggle was removed.
+      # The camera hard-block is now unconditional inside spike_watcher: a distractor
+      # commit is refused whenever camera motion is heavy AND the homography is
+      # unreliable (the apparent jump can't be separated from ego-motion). When H is
+      # reliable, camera motion is already removed from the spike measure.
       # Stay in distractor mode for at least this many frames after committing.
       jump_reject_distractor_mode_frames: 12
       # Apply a per-frame score penalty against candidates matching known distractors.
@@ -604,51 +623,92 @@ ram_tracker:
       # Skip distractor mode and go straight to occlusion mode after a jump commit.
       jump_reject_force_occlusion: false
 
+    # YOLO prebank: during normal tracking, occasionally collect nearby
+    # non-target detections as future distractors. By default this is YOLO-only
+    # and descriptor work is delayed until distractor mode starts; immediate
+    # materialization below runs descriptors during normal tracking instead.
+    prebank:
+      # Master switch for strided YOLO distractor pre-collection.
+      # This is honored only when spike_reject_enabled is true and jump_reject_force_occlusion is false.
+      distractor_mode_prebank_enabled: True
+      # Run the normal-tracking YOLO prebank once every N tracker frames.
+      distractor_mode_prebank_stride: 10
+      # Maximum number of YOLO-only distractor crops/descriptors kept by this prebank.
+      distractor_mode_prebank_maxlen: 15
+      # Maximum non-target YOLO detections stored per prebank frame (0 = all).
+      distractor_mode_prebank_yolo_topk: 5
+      # Skip any YOLO box whose IoU with the current tracked target is above this.
+      # Lower = more aggressively exclude boxes that might be the real target.
+      distractor_mode_prebank_target_iou_max: 0.30
+      # If true, run one batched descriptor extraction during the strided YOLO prebank frame
+      # and make those descriptors part of the active distractor bank immediately.
+      # If false, store crops only and compute descriptors only when distractor mode starts.
+      distractor_mode_prebank_materialize_immediately: True
+
     # While in distractor mode, how we pick the real target out of YOLO candidates.
     selection:
-      # If the best candidate's similarity is below this, give up on this frame (and exit distractor mode).
-      # Restored to the a098fde baseline (0.70) — 0.55-0.60 was too loose and let the wrong object win.
+      # If every ROI candidate has appearance similarity below this value, exit distractor mode for this frame.
+      # This is checked before final winner selection; the configured value is clipped into [0, 1].
       distractor_mode_min_similarity: 0.0
-      # Required similarity for the winning candidate to be accepted this frame.
-      # If below this, the tracker holds (see below_gate_hold_frames) and then,
-      # if it never recovers, exits distractor mode (legacy a098 behavior).
-      distractor_mode_selected_min_similarity: 0.9
-      # Bounded "below-gate" motion hold: when the winning candidate's appearance
-      # is below selected_min_similarity, keep tracking the EKF/anchor motion
-      # prediction for up to this many consecutive frames instead of immediately
-      # exiting distractor mode (which hands control to the base tracker — often
-      # the distractor — and unfreezes memory). The counter resets the moment the
-      # winner clears the gate again. 0 = disabled (immediate exit, a098 behavior).
-      distractor_mode_selected_below_gate_hold_frames: 15
-      # When the below-gate hold above is exhausted (target presumed lost), force
-      # an immediate handoff to occlusion recovery instead of reverting to the
-      # base tracker (which may be confidently locked on the distractor). Still
-      # subject to the heavy-camera-motion guard. false = legacy behavior (return
-      # the base-tracker box and only enter occlusion if its score later drops).
+      # Minimum appearance similarity required for the top-ranked candidate to be accepted.
+      # If the winner is below this gate, the below-gate hold logic runs instead of committing to that candidate.
+      # Set to "auto" to learn this gate from healthy target self-similarity, like drm_margin: auto.
+      distractor_mode_selected_min_similarity: "auto"
+      # Auto selected-min lower clamp; only used when distractor_mode_selected_min_similarity: auto.
+      distractor_mode_selected_min_similarity_auto_min: 0.5
+      # Auto selected-min upper clamp; only used when distractor_mode_selected_min_similarity: auto.
+      distractor_mode_selected_min_similarity_auto_max: 1
+      # Auto selected-min sits this far below the target self-similarity EMA.
+      # Bigger = more permissive; smaller = stricter.
+      distractor_mode_selected_min_similarity_auto_delta: 0.01
+      # EMA smoothing for target self-similarity samples; higher reacts faster but is noisier.
+      distractor_mode_selected_min_similarity_auto_ema_alpha: 0.2
+      # Sample target self-similarity every N confident descriptor frames.
+      distractor_mode_selected_min_similarity_auto_n_frames: 10
+      # Gate value used before enough target self-similarity samples are collected.
+      distractor_mode_selected_min_similarity_auto_warmup: 0.98
+      # Samples required before the gate starts adapting away from warmup.
+      distractor_mode_selected_min_similarity_auto_min_samples: 5
+      # When auto mode is on, also keep the gate above known distractor similarity.
+      # This only has an effect once the distractor bank has descriptors.
+      distractor_mode_selected_min_similarity_auto_use_distractor_bank: true
+      # Extra gap above max target-vs-distractor similarity when the bank-aware auto gate is active.
+      distractor_mode_selected_min_similarity_auto_distractor_margin: 0.03
+      # Maximum consecutive below-gate frames to hold the current focus/anchor box instead of accepting the weak winner.
+      # The counter resets when the winner clears selected_min_similarity; 0 disables the hold and exits immediately.
+      distractor_mode_selected_below_gate_hold_frames: 10000
+      # When the below-gate hold is exhausted, force the normal occlusion-entry path instead of returning to base tracking.
+      # This only works when enter_occlusion_on_loss is enabled, and the usual occlusion camera-motion guard still applies.
       distractor_mode_selected_below_gate_force_occlusion: true
-      # Hard spatial leash: the selected candidate's centre must be within this many
-      # focus-bbox diagonals of the held focus point. Prevents the system from
-      # teleporting to a far-away object during distractor mode and on recovery.
-      # 1.0 ≈ within one bbox-diagonal of the held box. <= 0 disables the gate.
+      # Reject any candidate whose center is farther than this many focus-box diagonals from the current focus center.
+      # Values <= 0 disable this spatial leash; 1.0 means roughly within one focus-box diagonal.
       distractor_mode_selected_max_focus_dist_frac: -1.0
-      # Max YOLO detections considered per frame (0 = all).
+      # Maximum YOLO ROI detections sent to descriptor scoring each frame.
+      # 0 means use all detections; osnet_max_candidate_batch can still cap the final evaluated count.
       distractor_mode_yolo_topk: 8
-      # Max target descriptors stored for ROI similarity scoring.
+      # Maximum recent target descriptors read from tracker memory for ROI similarity scoring.
+      # The code enforces at least 4 descriptors and also appends the current best descriptor when available.
       distractor_mode_history_limit: 80
-      # Reuse the tracker's crop/mapping sizes when building the distractor ROI.
+      # Use the tracker search mapping size as a minimum ROI size when building the distractor-mode YOLO crop.
+      # If disabled, the ROI is based only on the focus box size plus uncertainty padding.
       distractor_mode_use_tracker_mapping: true
-      # Multiplicative expansion of the YOLO search ROI while in distractor mode.
+      # Multiplies the computed distractor-mode ROI width and height before clipping the ROI to the frame.
+      # The configured value is clamped to at least 1.0.
       distractor_mode_roi_expand: 1.2
-      # Minimum ROI side length (px) — prevents absurdly small crops.
+      # Minimum width and height, in pixels, for the distractor-mode YOLO ROI before frame clipping.
+      # The configured value is clamped to at least 8 px.
       distractor_mode_roi_min_side: 32
-      # How to label ranking mode. Both modes currently sort by the same
-      # composite score (appearance + IoU + distance + distractor-bank suppression).
-      distractor_compare_mode: "ram"
-      # Required top1 - top2 margin to actually switch identity.
+      # Selects the distractor comparison label: "drm" or "ram"; invalid values fall back to "drm".
+      # Both modes currently rank candidates by the same composite score path.
+      distractor_compare_mode: "drm"
+      # Minimum composite-score gap between the best and second-best candidates before switching to the best candidate.
+      # If the gap is smaller than this value, ambiguity-hold logic can keep the previous focus box.
       distractor_mode_switch_margin: 0.08
-      # Stick with the current pick for this many ambiguous frames.
+      # Maximum consecutive ambiguous frames to hold the previous focus box instead of committing to the top candidate.
+      # Ambiguous means top1 minus top2 composite score is below distractor_mode_switch_margin; 0 disables the hold.
       distractor_mode_ambiguity_hold_frames: 30
-      # Behaviour preset for distractor handling ("standard" or alternatives).
+      # Distractor behavior preset; valid values are "standard" and "overlap_motion_lock".
+      # "overlap_motion_lock" also enables the overlap-motion-lock behavior, while unknown values become "standard".
       distractor_mode_behavior_mode: "standard"
 
     # Composite-score weights used by distractor-mode ranking when
@@ -657,20 +717,20 @@ ram_tracker:
       # Weight on appearance similarity.
       distractor_drm_lam_app: 1.0
       # Weight on IoU with the expected focus box.
-      distractor_drm_lam_iou: 1
+      distractor_drm_lam_iou: 0.0
       # Weight on the distance-from-focus penalty (penalises candidates far from focus).
-      distractor_drm_lam_dist: 0
+      distractor_drm_lam_dist: 0.0
       # Weight on the negative-bank (known-distractor) penalty (EdgeDAM-style suppressor).
       distractor_drm_gamma: 0.5
       # Controls how quickly the distance penalty grows with offset (must be > 0).
-      distractor_drm_dist_sigma_factor: 2.5
+      distractor_drm_dist_sigma_factor: 0
       # Only use the last K stored distractors in the negative-bank penalty.
       distractor_drm_bank_topk: 5
 
     # Penalty applied when a candidate is far from the current focus point.
     focus_distance_penalty:
       # Penalise candidates that are far from the focus point.
-      distractor_focus_dist_penalty_enabled: true
+      distractor_focus_dist_penalty_enabled: False
       # Max score reduction the focus-distance penalty can apply.
       distractor_focus_dist_penalty_weight: 0.35
       # No penalty within this normalised radius of focus.
@@ -681,7 +741,7 @@ ram_tracker:
     # Motion-based gating for candidates while in distractor mode.
     motion_gate:
       # Run a Kalman filter "anchor" while in distractor mode (motion prior).
-      distractor_mode_anchor_ekf_enabled: True
+      distractor_mode_anchor_ekf_enabled: False
       # Scale extra ROI padding by EKF position uncertainty (0 = off).
       distractor_mode_anchor_uncertainty_roi_scale: 0.0
       # Cap on uncertainty-driven extra ROI padding (px).
@@ -698,7 +758,7 @@ ram_tracker:
       # Engage a motion-only lock when the winning candidate overlaps a distractor heavily.
       # Restored to the a098fde baseline (true) — provides a safety net so the system holds
       # the EKF-predicted bbox instead of flicker-switching identity when two candidates compete.
-      distractor_mode_overlap_motion_lock_enabled: True
+      distractor_mode_overlap_motion_lock_enabled: False
       # Overlap IoU at which the lock engages.
       distractor_mode_overlap_iou_enter: 0.35
       # Overlap IoU below which the lock is allowed to release.

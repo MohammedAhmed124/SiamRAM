@@ -115,7 +115,7 @@ The `track()` path (`SiamABC.py:417`) is the inference fast-path: template featu
 
 The regression map is **not** anchors. Each of the 16×16 grid cells predicts four distances — *left, top, right, bottom* — from that cell to the four edges of the box (`utils/box_coder.py:307-312`). A cell is "positive" (inside the target) when all four distances are > 0. Decoding picks the peak of the (penalized) classification map and reads the four edge-distances at that cell to reconstruct `[x,y,w,h]`. This is the FCOS dense-prediction idea adapted to tracking — it gives sub-cell, scale-flexible boxes without anchor tuning.
 
-A **cosine window** and a **scale/aspect penalty** (`penalty_k`, `window_influence`) bias the score map toward the center and toward boxes similar in size to the previous one, which is what keeps a Siamese tracker from teleporting frame-to-frame.
+A **cosine/Hanning window** and an optional **scale/aspect penalty** bias the score map toward the center and toward boxes similar in size to the previous one, which is what keeps a Siamese tracker from teleporting frame-to-frame. These are exposed under `tracker.hanning_window_penalty`: `enabled`, `window_type`, `influence`, `size_penalty_enabled`, `size_penalty_k`, `bbox_size_smoothing_enabled`, and `bbox_size_smoothing_lr`.
 
 ### 2.3 The per-frame loop and its two gates (`SiamABCTracker.update`)
 
@@ -537,11 +537,13 @@ drm_score = λ_app·app_sim + λ_iou·iou_focus − λ_dist·dist_term − γ·n
 
 The winner is `argmax drm_score`. Everything else in the ROI is, by construction, labeled a **distractor** and its descriptor is added to the negative bank — so the system actively learns what the impostors look like.
 
+An optional **prebank** can also run during normal tracking at `distractor_mode.prebank.stride`: it gathers nearby non-target YOLO detections before a distractor episode starts. In lazy mode it stores crops only and embeds them in one descriptor batch on distractor-mode entry. With `prebank_materialize_immediately` enabled, it runs one batched descriptor extraction on the strided prebank frame and exposes those descriptors through the active distractor bank immediately.
+
 ### 8.3 The four ways the winner is *not* immediately accepted
 
 This is the heart of distractor mode — a cascade of **hold/lock guards** that bias hard toward *not* switching identity on weak evidence:
 
-1. **Below-gate hold** (`best_sim < selected_min_similarity`): the top candidate's appearance dipped under the accept gate (blur/pose/partial occlusion). Instead of abandoning the target — which would hand control back to the base tracker (often sitting on the distractor!) and unfreeze memory — **ride the EKF/anchor motion prediction** for up to `below_gate_hold_frames` frames and wait for appearance to recover. The counter resets the instant the winner clears the gate.
+1. **Below-gate hold** (`best_sim < selected_min_similarity`): the top candidate's appearance dipped under the accept gate (blur/pose/partial occlusion). Instead of abandoning the target — which would hand control back to the base tracker (often sitting on the distractor!) and unfreeze memory — **ride the EKF/anchor motion prediction** for up to `below_gate_hold_frames` frames and wait for appearance to recover. The counter resets the instant the winner clears the gate. When `selected_min_similarity` is set to `"auto"`, the gate is learned like `drm_margin: auto`: sample healthy target self-similarity, keep an EMA, subtract `auto_delta`, then clamp to `[auto_min, auto_max]`. If `selected_min_similarity_auto_use_distractor_bank` is enabled and the distractor bank has descriptors, the gate is also kept at least `max_target_vs_distractor_sim + auto_distractor_margin`.
    - **If the hold is exhausted:** exit distractor mode. If `below_gate_force_occlusion` is on, **force an immediate handoff to occlusion recovery** (saturate the entry streak, report sub-threshold score, set `_pending_distractor_occlusion=True`) rather than reverting to a base tracker that may be confidently wrong. That `_pending` flag tags the occlusion episode as **distractor-origin**, which selects the **separate `distractor_occ_drm_*` weight set** in recovery (a recovery biased to avoid re-locking the very distractor we just lost to).
 
 2. **Overlap motion-lock** (`_maybe_engage_overlap_motion_lock`): when the winner heavily overlaps a distractor (IoU ≥ `overlap_iou_enter`), the two are visually fused; rather than flicker between them, engage a **motion-only lock** that holds the EKF-predicted box until the overlap clears for `overlap_clear_frames` (or `overlap_lock_max_frames` elapses).
@@ -761,8 +763,7 @@ ram_tracker:
   occlusion          → entry / detectability_probe / phase0_siam / phase1_collect /
                        phase2_final_drm{drm,distractor_occ_drm,velocity} /
                        reacquire_confirm / policy                                     §7
-  spike_reject       → jump-detection thresholds & settle logic                       §9
-  distractor_mode    → entry / selection / drm / focus_distance_penalty /
+  distractor_mode    → spike_reject / entry / selection / drm / focus_distance_penalty /
                        motion_gate / overlap_lock / exit                              §8
 ```
 
@@ -780,9 +781,11 @@ ram_tracker:
 
 **Reacquire (`reacquire_confirm`)** — `reacq_threshold`, `reacq_confirm_frames`. (Phase 0's Gate B `app_match_threshold` lives under `occlusion.phase0_siam` — it is read only by `occ_phase_siam`.)
 
-**Distractor selection (`distractor_mode.selection`)** — `min_similarity` (give-up floor), `selected_min_similarity` (accept gate), `selected_below_gate_hold_frames`, `selected_below_gate_force_occlusion`, `switch_margin`, `ambiguity_hold_frames`, `yolo_topk`, `roi_expand`. **DRM weights** under `distractor_mode.drm`; **motion gate** under `motion_gate` (Mahalanobis); **overlap lock** under `overlap_lock`; **exit** under `exit`.
+**Distractor selection (`distractor_mode.selection`)** — `min_similarity` (give-up floor), `selected_min_similarity` (accept gate, or `"auto"`), `selected_min_similarity_auto_*`, `selected_below_gate_hold_frames`, `selected_below_gate_force_occlusion`, `switch_margin`, `ambiguity_hold_frames`, `yolo_topk`, `roi_expand`. **DRM weights** under `distractor_mode.drm`; **motion gate** under `motion_gate` (Mahalanobis); **overlap lock** under `overlap_lock`; **exit** under `exit`.
 
-**Spike (`spike_reject`)** — `enabled`, `ratio`, `abs_norm_min`, `history_window`, `confirm_frames`, `settle_*`, `watch_max_frames`, plus tiny/camera-residual vetoes.
+**Distractor prebank (`distractor_mode.prebank`)** — `prebank_enabled`, `prebank_stride`, `prebank_maxlen`, `prebank_yolo_topk`, `prebank_target_iou_max`, `prebank_materialize_immediately`. Lazy mode stores crops and computes descriptors on distractor-mode entry; immediate mode computes descriptors mid-tracking and exposes them through the active distractor bank.
+
+**Distractor spike entry (`distractor_mode.spike_reject`)** — `enabled`, `ratio`, `abs_norm_min`, `history_window`, `confirm_frames`, `settle_*`, `watch_max_frames`, plus tiny/camera-residual vetoes.
 
 ---
 

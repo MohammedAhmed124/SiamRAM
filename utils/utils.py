@@ -786,6 +786,33 @@ def _extract_descriptor(
     )
 
 
+def _extract_descriptor_from_rgb_patches(
+    rgb_patches: Sequence[np.ndarray],
+) -> list[Optional[np.ndarray]]:
+    """
+    Extract descriptors from already-cropped RGB patches in one backend batch.
+
+    This is used when the caller intentionally delays descriptor work until a
+    later event, so the original full frame may no longer be available. Invalid
+    or empty patches keep their output slot as None.
+    """
+    valid_indices: list[int] = []
+    valid_patches: list[np.ndarray] = []
+    for idx, patch in enumerate(rgb_patches):
+        arr = np.asarray(patch)
+        if arr.size == 0:
+            continue
+        valid_indices.append(idx)
+        valid_patches.append(arr)
+
+    desc_batch = _compute_descriptor_batch(valid_patches)
+    output: list[Optional[np.ndarray]] = [None] * len(rgb_patches)
+    if len(desc_batch):
+        for local_i, global_i in enumerate(valid_indices):
+            output[global_i] = desc_batch[local_i]
+    return output
+
+
 def _build_patches(
     frame: np.ndarray,
     bbox: BBoxLike,

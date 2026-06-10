@@ -19,6 +19,7 @@ from ultralytics import YOLO
 from utils.console import siamram_log
 from utils.utils import (
     _cos_sim,
+    _extract_descriptor_from_rgb_patches,
     _extract_descriptor,
     _extract_descriptor_async,
     _iou,
@@ -190,7 +191,6 @@ class SiamRAMExperimentTracker:
         long_distance_mode: bool = False,
         enter_occlusion_on_loss: bool = True,
         no_occlusion_first_n_frames: int = 0,
-        block_distractor_mode_on_camera_motion: bool = True,
         block_occlusion_on_camera_motion: bool = True,
         camera_motion_heavy_disp_threshold: float = 18.0,
         camera_motion_heavy_norm_threshold: float = 0.35,
@@ -292,7 +292,16 @@ class SiamRAMExperimentTracker:
         distractor_focus_dist_soft_radius: float = 0.60,
         distractor_focus_dist_hard_radius: float = 2.00,
         distractor_mode_min_similarity: float = 0.50,
-        distractor_mode_selected_min_similarity: float = 0.0,
+        distractor_mode_selected_min_similarity: "float | str" = 0.0,
+        distractor_mode_selected_min_similarity_auto_min: float = 0.70,
+        distractor_mode_selected_min_similarity_auto_max: float = 0.98,
+        distractor_mode_selected_min_similarity_auto_delta: float = 0.03,
+        distractor_mode_selected_min_similarity_auto_ema_alpha: float = 0.2,
+        distractor_mode_selected_min_similarity_auto_n_frames: int = 10,
+        distractor_mode_selected_min_similarity_auto_warmup: float = 0.98,
+        distractor_mode_selected_min_similarity_auto_min_samples: int = 5,
+        distractor_mode_selected_min_similarity_auto_use_distractor_bank: bool = True,
+        distractor_mode_selected_min_similarity_auto_distractor_margin: float = 0.03,
         distractor_mode_selected_max_focus_dist_frac: float = -1.0,
         distractor_mode_yolo_topk: int = 2,
         distractor_mode_history_limit: int = 80,
@@ -324,6 +333,12 @@ class SiamRAMExperimentTracker:
         distractor_mode_post_exit_memory_freeze_frames: int = 8,
         distractor_mode_post_exit_template_freeze_frames: int = 8,
         distractor_mode_behavior_mode: str = "standard",
+        distractor_mode_prebank_enabled: bool = False,
+        distractor_mode_prebank_stride: int = 10,
+        distractor_mode_prebank_maxlen: int = 15,
+        distractor_mode_prebank_yolo_topk: int = 5,
+        distractor_mode_prebank_target_iou_max: float = 0.30,
+        distractor_mode_prebank_materialize_immediately: bool = False,
         distractor_mode_overlap_motion_lock_enabled: bool = False,
         distractor_mode_overlap_iou_enter: float = 0.35,
         distractor_mode_overlap_iou_exit: float = 0.15,
@@ -338,18 +353,14 @@ class SiamRAMExperimentTracker:
         spike_reject_history_window: int = 40,
         spike_reject_min_history: int = 6,
         spike_reject_ratio: float = 3.5,
-        spike_reject_abs_norm_min: float = 0.90,
         spike_reject_settle_ratio: float = 1.4,
         spike_reject_settle_abs_norm_max: float = 0.35,
         spike_reject_settle_frames: int = 2,
         spike_reject_watch_max_frames: int = 12,
         spike_reject_settle_from_spike_frac: float = 0.45,
-        spike_reject_use_appearance: bool = True,
-        spike_reject_max_sim: float = 0.65,
         spike_reject_confirm_frames: int = 1,
-        spike_reject_long_distance_abs_norm_min: float = 0.0,
-        spike_reject_camera_residual_min_ratio: float = 0.0,
-        spike_reject_disable_in_tiny_mode: bool = False,
+        spike_reject_commit_same_object_sim: float = 0.90,
+        spike_reject_anchor_return_iou: float = 0.50,
         copile_yolo=False,
         debug=True,
         disable_camera_motion: bool = False,
@@ -420,7 +431,6 @@ class SiamRAMExperimentTracker:
             long_distance_area_fraction (any): object area / frame area ratio below which long-distance mode activates
             long_distance_mode (any): force long-distance mode on regardless of area fraction
             enter_occlusion_on_loss (any): if False the tracker never enters the occlusion recovery path
-            block_distractor_mode_on_camera_motion (any): if True, suppresses distractor-mode entry during heavy camera motion
             block_occlusion_on_camera_motion (any): if True, suppresses occlusion entry during heavy camera motion
             camera_motion_heavy_disp_threshold (any): camera displacement threshold in px for heavy-motion gating
             camera_motion_heavy_norm_threshold (any): normalized camera displacement threshold (disp / bbox_diag) for heavy-motion gating, useful for tiny objects
@@ -508,8 +518,7 @@ class SiamRAMExperimentTracker:
             if (self._osnet_async_overlap and torch.cuda.is_available())
             else None
         )
-        # Holds the deferred descriptor for the previous confident frame:
-        # (handle, pred_bbox, ref_bbox, velocity, distractor_bank, sample_drm).
+        # Holds the deferred descriptor for the previous confident frame.
         self._pending_desc: Optional[dict] = None
 
         if copile_yolo:
@@ -575,9 +584,6 @@ class SiamRAMExperimentTracker:
         self.long_distance_mode = long_distance_mode
         self.recovered_early_occlusion = True
         self.enter_occlusion_on_loss = enter_occlusion_on_loss
-        self._block_distractor_mode_on_camera_motion = bool(
-            block_distractor_mode_on_camera_motion
-        )
         self._block_occlusion_on_camera_motion = bool(
             block_occlusion_on_camera_motion
         )
@@ -680,6 +686,9 @@ class SiamRAMExperimentTracker:
         # drm_margin leaves this None, so _active_drm_kwargs and the per-frame
         # estimator hook below are both no-ops and legacy behaviour is identical.
         self._drm_margin_auto = None
+        # Instantaneous (absolute) DRM self-score of the most recently sampled
+        # confident frame, surfaced next to the auto-margin EMA in the overlay.
+        self._last_drm_self_score: Optional[float] = None
         if isinstance(drm_margin, str) and drm_margin.strip().lower() == "auto":
             from .auto_margin import AutoDrmMargin
 
@@ -720,6 +729,10 @@ class SiamRAMExperimentTracker:
         )
         self._use_distractor_bank = (
             self._distractor_bank_maxlen > 0
+            or (
+                bool(distractor_mode_prebank_materialize_immediately)
+                and int(distractor_mode_prebank_maxlen) > 0
+            )
         )
         self._vel_score_min_speed = vel_score_min_speed
         self._entry_patience = max(1, entry_patience)
@@ -781,6 +794,24 @@ class SiamRAMExperimentTracker:
         self._gmc_prior_max_corner_displacement_frac = max(
             0.0, float(gmc_prior_max_corner_displacement_frac)
         )
+        self._distractor_mode_prebank_enabled = bool(
+            distractor_mode_prebank_enabled
+        )
+        self._distractor_mode_prebank_stride = max(
+            1, int(distractor_mode_prebank_stride)
+        )
+        self._distractor_mode_prebank_maxlen = max(
+            0, int(distractor_mode_prebank_maxlen)
+        )
+        self._distractor_mode_prebank_yolo_topk = max(
+            0, int(distractor_mode_prebank_yolo_topk)
+        )
+        self._distractor_mode_prebank_target_iou_max = float(
+            np.clip(distractor_mode_prebank_target_iou_max, 0.0, 1.0)
+        )
+        self._distractor_mode_prebank_materialize_immediately = bool(
+            distractor_mode_prebank_materialize_immediately
+        )
 
         self.memory = AppearanceMemory(
             capacity=mem_capacity,
@@ -808,6 +839,12 @@ class SiamRAMExperimentTracker:
         self._last_yolo: List = []
         self._yolo_cache: List = []
         self._distractor_bank: deque = deque(maxlen=distractor_bank_maxlen)
+        self._distractor_mode_prebank_patches: deque = deque(
+            maxlen=self._distractor_mode_prebank_maxlen
+        )
+        self._distractor_mode_prebank_descriptors: deque = deque(
+            maxlen=self._distractor_mode_prebank_maxlen
+        )
         self._out_of_frame: bool = False
         self._exit_edge: Optional[str] = None
         self._search_cx: Optional[float] = None
@@ -908,9 +945,38 @@ class SiamRAMExperimentTracker:
         self._distractor_mode_min_similarity = float(
             np.clip(distractor_mode_min_similarity, 0.0, 1.0)
         )
-        self._distractor_mode_selected_min_similarity = float(
-            np.clip(distractor_mode_selected_min_similarity, 0.0, 1.0)
+        self._distractor_selected_min_auto = None
+        self._last_distractor_selected_min_self_sim: Optional[float] = None
+        self._last_distractor_selected_min_neg_sim: Optional[float] = None
+        self._distractor_selected_min_auto_use_distractor_bank = bool(
+            distractor_mode_selected_min_similarity_auto_use_distractor_bank
         )
+        self._distractor_selected_min_auto_distractor_margin = max(
+            0.0,
+            float(distractor_mode_selected_min_similarity_auto_distractor_margin),
+        )
+        if (
+            isinstance(distractor_mode_selected_min_similarity, str)
+            and distractor_mode_selected_min_similarity.strip().lower() == "auto"
+        ):
+            from .auto_margin import AutoDrmMargin
+
+            self._distractor_selected_min_auto = AutoDrmMargin(
+                min_margin=distractor_mode_selected_min_similarity_auto_min,
+                max_margin=distractor_mode_selected_min_similarity_auto_max,
+                delta=distractor_mode_selected_min_similarity_auto_delta,
+                ema_alpha=distractor_mode_selected_min_similarity_auto_ema_alpha,
+                n_frames=distractor_mode_selected_min_similarity_auto_n_frames,
+                warmup=distractor_mode_selected_min_similarity_auto_warmup,
+                min_samples=distractor_mode_selected_min_similarity_auto_min_samples,
+            )
+            self._distractor_mode_selected_min_similarity = (
+                self._distractor_selected_min_auto.value
+            )
+        else:
+            self._distractor_mode_selected_min_similarity = float(
+                np.clip(distractor_mode_selected_min_similarity, 0.0, 1.0)
+            )
         self._distractor_mode_selected_max_focus_dist_frac = float(
             distractor_mode_selected_max_focus_dist_frac
         )
@@ -1016,7 +1082,6 @@ class SiamRAMExperimentTracker:
         self._spike_reject_history_window = max(2, int(spike_reject_history_window))
         self._spike_reject_min_history = max(2, int(spike_reject_min_history))
         self._spike_reject_ratio = float(spike_reject_ratio)
-        self._spike_reject_abs_norm_min = float(spike_reject_abs_norm_min)
         self._spike_reject_settle_ratio = float(spike_reject_settle_ratio)
         self._spike_reject_settle_abs_norm_max = float(
             spike_reject_settle_abs_norm_max
@@ -1026,18 +1091,14 @@ class SiamRAMExperimentTracker:
         self._spike_reject_settle_from_spike_frac = float(
             np.clip(spike_reject_settle_from_spike_frac, 0.05, 0.95)
         )
-        self._spike_reject_use_appearance = bool(spike_reject_use_appearance)
-        self._spike_reject_max_sim = float(spike_reject_max_sim)
         self._spike_reject_confirm_frames = max(1, int(spike_reject_confirm_frames))
-        self._spike_reject_long_distance_abs_norm_min = max(
-            0.0, float(spike_reject_long_distance_abs_norm_min)
+        # Appearance commit veto: a candidate whose appearance is THIS similar to
+        # the tracked target is the same object under a camera pan, not a switch.
+        self._spike_reject_commit_same_object_sim = float(
+            spike_reject_commit_same_object_sim
         )
-        self._spike_reject_camera_residual_min_ratio = max(
-            0.0, float(spike_reject_camera_residual_min_ratio)
-        )
-        self._spike_reject_disable_in_tiny_mode = bool(
-            spike_reject_disable_in_tiny_mode
-        )
+        # Anchor-return cancel threshold (formerly a hardcoded 0.50).
+        self._spike_reject_anchor_return_iou = float(spike_reject_anchor_return_iou)
 
         self._jump_watch_active: bool = False
         self._jump_watch_anchor_bbox: Optional[np.ndarray] = None
@@ -1191,6 +1252,13 @@ class SiamRAMExperimentTracker:
         if self._drm_margin_auto is not None:
             self._drm_margin_auto.reset()
             self._drm_kwargs["margin"] = self._drm_margin_auto.value
+        if self._distractor_selected_min_auto is not None:
+            self._distractor_selected_min_auto.reset()
+            self._distractor_mode_selected_min_similarity = (
+                self._distractor_selected_min_auto.value
+            )
+            self._last_distractor_selected_min_self_sim = None
+            self._last_distractor_selected_min_neg_sim = None
         if self._template_rate_auto is not None:
             self._template_rate_auto.reset()
         self._camera_motion_adapt_linger_left = 0
@@ -1254,6 +1322,8 @@ class SiamRAMExperimentTracker:
         self._search_cy = None
         self._clear_all_frame_histories()
         self.memory.reset()
+        self._distractor_mode_prebank_patches.clear()
+        self._distractor_mode_prebank_descriptors.clear()
         self._yolo_cache = []
         self._occ_frames = 0
         self._occ_phase = 0
@@ -1482,11 +1552,11 @@ class SiamRAMExperimentTracker:
         if not self._conf_history:
             return None
         prev_bbox = self._conf_history[-1].bbox
-        h_step = H if bool(H_reliable) else None
-        step = self._camera_compensated_step_norm(
+        step, _ = self._camera_compensated_step_norm(
             prev_bbox=np.asarray(prev_bbox, dtype=float),
             curr_bbox=np.asarray(new_bbox, dtype=float),
-            H=h_step,
+            H=H,
+            H_reliable=H_reliable,
         )
         if append:
             self._spike_step_norms.append(float(step))
@@ -1497,12 +1567,17 @@ class SiamRAMExperimentTracker:
         prev_bbox: np.ndarray,
         curr_bbox: np.ndarray,
         H: Optional[np.ndarray] = None,
-    ) -> float:
+        H_reliable: bool = False,
+    ) -> Tuple[float, bool]:
         """
         Normalized bbox-centre displacement after subtracting camera motion.
 
-        Uses H whenever available. Falls back to raw displacement only when
-        homography is unavailable or cannot be safely evaluated.
+        Returns ``(step_norm, cam_removed)``. Camera motion is subtracted ONLY
+        when a *reliable* homography is available; otherwise the raw apparent
+        displacement is returned with ``cam_removed=False`` so callers can refuse
+        to treat an un-compensated jump as genuine object motion. Fast camera
+        motion is exactly when H is unreliable, so silently falling back to raw
+        displacement here is what used to fool the distractor-mode entrance.
         """
         prev = np.asarray(prev_bbox, dtype=float)
         curr = np.asarray(curr_bbox, dtype=float)
@@ -1513,14 +1588,16 @@ class SiamRAMExperimentTracker:
 
         rel_dx = p1x - p0x
         rel_dy = p1y - p0y
-        if H is not None:
+        cam_removed = False
+        if H is not None and bool(H_reliable):
             cam_delta = self._camera_displacement_from_h_at_point(H, p0x, p0y)
             if cam_delta is not None:
                 rel_dx -= float(cam_delta[0])
                 rel_dy -= float(cam_delta[1])
+                cam_removed = True
 
         diag = float(np.hypot(prev[2], prev[3])) + 1e-8
-        return float(np.hypot(rel_dx, rel_dy) / diag)
+        return float(np.hypot(rel_dx, rel_dy) / diag), cam_removed
 
     @staticmethod
     def _normalized_center_distance(
@@ -1566,6 +1643,46 @@ class SiamRAMExperimentTracker:
             descs.append(np.asarray(best, dtype=float))
         return descs
 
+    def _maybe_observe_distractor_selected_min_similarity(
+        self,
+        *,
+        desc: np.ndarray,
+        refs: List[np.ndarray],
+        frame_idx: int,
+    ) -> None:
+        """
+        Feed a healthy-target appearance self-similarity sample into auto gate.
+
+        The sample is max cosine similarity between the current true-target
+        descriptor and the target descriptors that existed before this frame's
+        descriptor is admitted. That keeps the value on the same scale as
+        distractor-mode `best_sim` without trivially comparing the descriptor
+        with itself.
+        """
+        estimator = self._distractor_selected_min_auto
+        if estimator is None or not refs:
+            return
+
+        self_sim = max(float(_cos_sim(desc, ref)) for ref in refs)
+        self._last_distractor_selected_min_self_sim = float(self_sim)
+        learned_value = estimator.observe(self_sim, frame_idx)
+
+        neg_value: Optional[float] = None
+        if self._distractor_selected_min_auto_use_distractor_bank:
+            bank = self._get_active_distractor_bank()
+            if bank:
+                neg_value = max(float(_cos_sim(desc, d)) for d in bank)
+                learned_value = max(
+                    learned_value,
+                    neg_value + self._distractor_selected_min_auto_distractor_margin,
+                )
+
+        self._last_distractor_selected_min_neg_sim = neg_value
+        self._distractor_mode_selected_min_similarity = min(
+            estimator.max_margin,
+            max(estimator.min_margin, float(learned_value)),
+        )
+
     def _get_active_distractor_bank(
         self,
     ) -> List[np.ndarray]:
@@ -1578,9 +1695,176 @@ class SiamRAMExperimentTracker:
         mem_bank: List[np.ndarray] = []
         if hasattr(self.memory, "get_distractor_bank"):
             mem_bank = list(getattr(self.memory, "get_distractor_bank")())
-        if mem_bank:
-            return mem_bank
-        return list(self._distractor_bank)
+        base_bank = mem_bank if mem_bank else list(self._distractor_bank)
+        if self._distractor_mode_prebank_materialize_immediately:
+            prebank = list(self._distractor_mode_prebank_descriptors)
+            if prebank:
+                return prebank + base_bank
+        return base_bank
+
+    def _get_distractor_mode_scoring_bank(
+        self,
+    ) -> List[np.ndarray]:
+        """
+        Return negative descriptors visible to distractor-mode candidate scoring.
+
+        The lazy YOLO prebank is intentionally added only here, so those
+        descriptors do not enter the target RAM/DRM memory and do not affect
+        normal-mode penalty paths before distractor mode is active.
+        """
+        if self._distractor_mode_prebank_materialize_immediately:
+            return list(self._get_active_distractor_bank())
+        bank = list(self._distractor_mode_prebank_descriptors)
+        bank.extend(list(self._get_active_distractor_bank()))
+        return bank
+
+    def _distractor_mode_prebank_allowed(
+        self,
+    ) -> bool:
+        """
+        True when the normal-tracking YOLO prebank is allowed to collect boxes.
+        """
+        return bool(
+            self._distractor_mode_prebank_enabled
+            and self._distractor_mode_prebank_maxlen > 0
+            and self._spike_reject_enabled
+            and not self._jump_reject_force_occlusion
+        )
+
+    @staticmethod
+    def _crop_rgb_patch(
+        frame: np.ndarray,
+        bbox: np.ndarray,
+    ) -> Optional[np.ndarray]:
+        """
+        Crop one bbox from a BGR frame and return an RGB patch for descriptors.
+        """
+        h_fr, w_fr = frame.shape[:2]
+        x, y, w, h = map(int, np.asarray(bbox, dtype=float))
+        w = max(1, w)
+        h = max(1, h)
+        x1 = max(0, x)
+        y1 = max(0, y)
+        x2 = min(w_fr, x + w)
+        y2 = min(h_fr, y + h)
+        if x1 >= x2 or y1 >= y2:
+            return None
+        patch_bgr = frame[y1:y2, x1:x2]
+        if patch_bgr.size == 0:
+            return None
+        return cv2.cvtColor(patch_bgr, cv2.COLOR_BGR2RGB)
+
+    def _maybe_collect_distractor_prebank(
+        self,
+        frame: np.ndarray,
+        pred_bbox: np.ndarray,
+        score: float,
+        effective_threshold: float,
+    ) -> None:
+        """
+        Strided YOLO-only distractor collection during healthy normal tracking.
+
+        Lazy mode stores cropped patches only and delays descriptor extraction
+        until distractor mode is entered. Immediate mode runs one batched
+        descriptor extraction on this prebank frame and exposes those descriptors
+        through the active distractor bank right away.
+        """
+        if not self._distractor_mode_prebank_allowed():
+            return
+        if self._distractor_mode_active or self.in_occlusion or self._jump_watch_active:
+            return
+        if score < effective_threshold:
+            return
+        if self.frame_idx <= 0 or (
+            self.frame_idx % self._distractor_mode_prebank_stride
+        ) != 0:
+            return
+
+        roi = self._get_distractor_mode_roi(frame, focus_override=pred_bbox)
+        detections = self._yolo_detect_in_roi(frame, roi)
+        if not detections:
+            return
+
+        target = np.asarray(pred_bbox, dtype=float)
+        kept: List[np.ndarray] = []
+        for det in detections:
+            det_arr = np.asarray(det, dtype=int)
+            if _iou(det_arr, target) > self._distractor_mode_prebank_target_iou_max:
+                continue
+            kept.append(det_arr)
+
+        topk = self._distractor_mode_prebank_yolo_topk
+        if topk > 0:
+            kept = kept[:topk]
+        if not kept:
+            return
+
+        if self._distractor_mode_prebank_materialize_immediately:
+            descs = _extract_descriptor(frame, kept)
+            added = self._extend_distractor_prebank_descriptors(descs)
+            if self.debug and added:
+                print(
+                    f"[distractor-prebank:collect-desc] frame={self.frame_idx}  "
+                    f"added={added}  bank={len(self._distractor_mode_prebank_descriptors)}/"
+                    f"{self._distractor_mode_prebank_maxlen}"
+                )
+            return
+
+        added = 0
+        for det in kept:
+            patch = self._crop_rgb_patch(frame, det)
+            if patch is None:
+                continue
+            self._distractor_mode_prebank_patches.append(patch)
+            added += 1
+
+        if self.debug and added:
+            print(
+                f"[distractor-prebank:collect] frame={self.frame_idx}  "
+                f"added={added}  pending={len(self._distractor_mode_prebank_patches)}/"
+                f"{self._distractor_mode_prebank_maxlen}"
+            )
+
+    def _extend_distractor_prebank_descriptors(
+        self,
+        descs,
+    ) -> int:
+        """
+        Add descriptors to the capped prebank descriptor deque.
+        """
+        if descs is None:
+            return 0
+        desc_list = descs if isinstance(descs, list) else [descs]
+        added = 0
+        for desc in desc_list:
+            if desc is None:
+                continue
+            self._distractor_mode_prebank_descriptors.append(
+                np.asarray(desc, dtype=float).copy()
+            )
+            added += 1
+        return added
+
+    def _materialize_distractor_prebank(
+        self,
+    ) -> None:
+        """
+        Convert pending YOLO-only distractor patches into descriptors on entry.
+        """
+        if not self._distractor_mode_prebank_patches:
+            return
+
+        patches = list(self._distractor_mode_prebank_patches)
+        self._distractor_mode_prebank_patches.clear()
+        descs = _extract_descriptor_from_rgb_patches(patches)
+        added = self._extend_distractor_prebank_descriptors(descs)
+
+        if self.debug and added:
+            print(
+                f"[distractor-prebank:materialize] frame={self.frame_idx}  "
+                f"added={added}  bank={len(self._distractor_mode_prebank_descriptors)}/"
+                f"{self._distractor_mode_prebank_maxlen}"
+            )
 
     def _add_distractor_descriptor(
         self,
@@ -2211,10 +2495,11 @@ class SiamRAMExperimentTracker:
             or self.current_bbox is None
         ):
             return
-        step_norm_anchor = self._camera_compensated_step_norm(
+        step_norm_anchor, _ = self._camera_compensated_step_norm(
             prev_bbox=np.asarray(self.current_bbox, dtype=float),
             curr_bbox=np.asarray(pred_bbox, dtype=float),
             H=self._last_H,
+            H_reliable=self._last_H_reliable,
         )
         if step_norm_anchor <= self._spike_anchor_update_norm_max:
             self._stable_anchor_bbox = pred_bbox.copy()
@@ -2483,7 +2768,7 @@ class SiamRAMExperimentTracker:
         """
         Finish the OSNet descriptor deferred from the previous confident frame
         (Tier-3 overlap) and admit it to the appearance memory, replaying the
-        adaptive-drm_margin sample with the snapshot captured at launch.
+        adaptive gate samples with the snapshots captured at launch.
 
         Called right after the SiamABC forward — so the deferred OSNet forward
         has overlapped it on the side stream — and before any memory consumer.
@@ -2497,6 +2782,13 @@ class SiamRAMExperimentTracker:
         desc = _resolve_descriptor(pending["handle"])
         if desc is None:
             return
+
+        if pending.get("sample_distractor_selected_min", False):
+            self._maybe_observe_distractor_selected_min_similarity(
+                desc=desc,
+                refs=list(pending.get("target_refs", ())),
+                frame_idx=int(pending["frame_idx"]),
+            )
 
         self.memory.try_admit(pending["pred_bbox"], desc, pending["ref_bbox"])
         if pending["sample_drm"]:
@@ -2514,6 +2806,7 @@ class SiamRAMExperimentTracker:
                 gamma=self._drm_kwargs["gamma"],
             )
             if self_score is not None:
+                self._last_drm_self_score = float(self_score)
                 self._drm_margin_auto.observe(self_score, pending["frame_idx"])
 
     def _normal_update(
@@ -2798,6 +3091,15 @@ class SiamRAMExperimentTracker:
                 self._drm_margin_auto is not None
                 and self._drm_margin_auto.due(self.frame_idx)
             )
+            sample_distractor_selected_min = (
+                self._distractor_selected_min_auto is not None
+                and self._distractor_selected_min_auto.due(self.frame_idx)
+            )
+            target_refs_for_selected_min = (
+                self._target_descriptor_history()
+                if sample_distractor_selected_min
+                else []
+            )
             if self._overlap_enabled():
                 # Tier-3: queue OSNet on the side stream now and defer admission
                 # to the next frame (resolved after that frame's SiamABC forward,
@@ -2822,11 +3124,21 @@ class SiamRAMExperimentTracker:
                         else ()
                     ),
                     "sample_drm": bool(sample_drm),
+                    "sample_distractor_selected_min": bool(
+                        sample_distractor_selected_min
+                    ),
+                    "target_refs": target_refs_for_selected_min,
                     "frame_idx": self.frame_idx,
                 }
             else:
                 desc = _extract_descriptor(frame, pred_bbox)
                 if desc is not None:
+                    if sample_distractor_selected_min:
+                        self._maybe_observe_distractor_selected_min_similarity(
+                            desc=desc,
+                            refs=target_refs_for_selected_min,
+                            frame_idx=self.frame_idx,
+                        )
                     self.memory.try_admit(pred_bbox, desc, self.current_bbox)
                     # Adaptive drm_margin: on confident frames, sample how well
                     # the genuine target scores against its own DRM anchors and
@@ -2850,11 +3162,18 @@ class SiamRAMExperimentTracker:
                             gamma=self._drm_kwargs["gamma"],
                         )
                         if self_score is not None:
+                            self._last_drm_self_score = float(self_score)
                             self._drm_margin_auto.observe(
                                 self_score, self.frame_idx
                             )
 
         self._maybe_update_stable_anchor(pred_bbox)
+        self._maybe_collect_distractor_prebank(
+            frame=frame,
+            pred_bbox=pred_bbox,
+            score=float(score),
+            effective_threshold=float(effective_threshold),
+        )
 
         self.current_bbox = pred_bbox.copy()
         self.held_box = pred_bbox.copy()
@@ -3172,6 +3491,12 @@ class SiamRAMExperimentTracker:
                 "app_match": float(self.app_match_threshold),
                 "min_sim": float(self._distractor_mode_min_similarity),
                 "sel_min_sim": float(self._distractor_mode_selected_min_similarity),
+                "sel_min_sim_auto": self._distractor_selected_min_auto is not None,
+                "sel_min_sim_self": (
+                    float(self._last_distractor_selected_min_self_sim)
+                    if self._last_distractor_selected_min_self_sim is not None
+                    else float("nan")
+                ),
             },
         }
 

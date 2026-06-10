@@ -253,6 +253,49 @@ class SiamABCTracker(Tracker):
         self.latest_iou_score_ema = 1.0
         self._last_iou_gate_pass = True
 
+        # SAMURAI-style Kalman motion prior (arXiv:2411.11922, Sec. 4.1). When
+        # enabled, a constant-velocity Kalman filter tracks the target box and a
+        # KF-IoU motion-consistency score is blended into the response map before
+        # peak selection: fused = (1-w)*appearance + w*KF_IoU. The fusion only
+        # fires after the tracker has been stable for `kf_motion_stable_frames`
+        # consecutive confident frames, so it can never fight a fresh
+        # (re)initialisation. Disabled => byte-for-byte legacy behaviour.
+        self._kf_motion_enabled = bool(
+            self.tracking_config.get("kf_motion_enabled", False)
+        )
+        self._kf_motion_weight = float(
+            self.tracking_config.get("kf_motion_weight", 0.15)
+        )
+        self._kf_motion_stable_frames = int(
+            self.tracking_config.get("kf_motion_stable_frames", 15)
+        )
+        self._kf_motion_score_threshold = float(
+            self.tracking_config.get("kf_motion_score_threshold", 0.55)
+        )
+        # Center innovation beyond this multiple of the box diagonal re-seeds the
+        # filter instead of updating it (covers wrapper-forced jumps such as a
+        # reacquisition commit writing tracking_state.bbox directly).
+        self._kf_motion_reseed_dist = float(
+            self.tracking_config.get("kf_motion_reseed_dist", 2.0)
+        )
+        # Center the search crop at the KF-predicted position instead of the
+        # previous box (MOT-style predict-then-associate). Keeps fast movers
+        # inside the crop; only active under the same stability gating as the
+        # score fusion.
+        self._kf_motion_center_search = bool(
+            self.tracking_config.get("kf_motion_center_search", False)
+        )
+        self._kf_prior = None
+        self._kf_stable = 0
+        self._kf_suppress = False
+        self._kf_last_emitted = None
+        if self._kf_motion_enabled:
+            from .kalman_motion import KalmanMotionPrior
+
+            self._kf_prior = KalmanMotionPrior()
+            self._kf_prior.seed(np.asarray(rect, dtype=float))
+            self._kf_last_emitted = np.asarray(rect, dtype=float).copy()
+
         # Introspection-based DRM update (arXiv:2411.17576). The SiamRAM tracker
         # sets ``_drm_introspection_enabled = True`` on this instance only when the
         # feature is enabled; otherwise the response-map secondary-peak signal is
@@ -698,7 +741,13 @@ class SiamABCTracker(Tracker):
                   features and the stored dynamic features, providing an auxiliary
                   signal about how much the target's appearance has drifted.
         """
+        if self._kf_motion_enabled and self._kf_prior is not None:
+            self._kf_motion_begin_frame()
+
         pred_bbox, pred_score, sim_score = self.run_track(search)
+
+        if self._kf_motion_enabled and self._kf_prior is not None:
+            self._kf_motion_observe(pred_bbox, pred_score)
 
         self.tracking_state.bbox = pred_bbox
         self.tracking_state.pred_score = pred_score
@@ -756,6 +805,112 @@ class SiamABCTracker(Tracker):
 
         return pred_bbox, pred_score, sim_score
 
+    def _kf_motion_begin_frame(self) -> None:
+        """
+        Advance the Kalman motion prior to the current frame.
+
+        If something outside the per-frame loop rewrote ``tracking_state.bbox``
+        (e.g. the SiamRAM recovery pipeline committing a reacquisition), the
+        filter state is stale and possibly far away — re-seed it at the new box
+        and drop the stability streak instead of predicting from garbage.
+        """
+        current = np.asarray(self.tracking_state.bbox, dtype=float)
+        last = self._kf_last_emitted
+        externally_moved = last is None or not np.allclose(
+            current, last, atol=1.0
+        )
+        if externally_moved:
+            self._kf_prior.seed(current)
+            self._kf_stable = 0
+        else:
+            self._kf_prior.predict()
+
+    def _kf_motion_observe(self, pred_bbox, pred_score: float) -> None:
+        """
+        Feed the selected box back into the Kalman prior (measurement update).
+
+        Low-confidence frames neither update the filter (it coasts) nor count
+        toward the stability streak — mirroring SAMURAI's rule that the motion
+        score participates only after tau_kf consecutive reliable frames.
+        """
+        bbox = np.asarray(pred_bbox, dtype=float)
+        if pred_score >= self._kf_motion_score_threshold:
+            diag = float(np.hypot(max(bbox[2], 1.0), max(bbox[3], 1.0)))
+            if self._kf_prior.center_distance(bbox) > self._kf_motion_reseed_dist * diag:
+                self._kf_prior.seed(bbox)
+                self._kf_stable = 0
+            else:
+                self._kf_prior.update(bbox)
+                self._kf_stable += 1
+        else:
+            self._kf_stable = 0
+        self._kf_last_emitted = bbox.copy()
+
+    def _kf_motion_active(self) -> bool:
+        return (
+            getattr(self, "_kf_motion_enabled", False)
+            and self._kf_prior is not None
+            and not self._kf_suppress
+            and self._kf_stable >= self._kf_motion_stable_frames
+        )
+
+    def _fuse_kf_motion_prior(
+        self,
+        classification_map: torch.Tensor,
+        regression_map: torch.Tensor,
+        pred_location: Optional[torch.Tensor],
+    ):
+        """
+        Blend a KF-IoU motion-consistency score into the response map.
+
+        Every grid cell's decoded candidate box (in search-crop coordinates) is
+        IoU-scored against the Kalman-predicted box mapped into the same crop;
+        the fused map is ``(1-w)*appearance + w*KF_IoU`` (SAMURAI Eq. 7). A
+        candidate that matches appearance but breaks motion continuity — the
+        classic identity switch onto a crossing distractor — is demoted, while
+        cells consistent with the trajectory get a bounded boost.
+        """
+        kf_box = self._kf_prior.predicted_bbox()
+        mapping = self.tracking_state.mapping
+        if kf_box is None or mapping is None:
+            return classification_map, pred_location
+        map_w, map_h = float(mapping[2]), float(mapping[3])
+        if map_w <= 1.0 or map_h <= 1.0:
+            return classification_map, pred_location
+
+        inst = float(self.tracking_config["instance_size"])
+        sx, sy = inst / map_w, inst / map_h
+        kx1 = (kf_box[0] - float(mapping[0])) * sx
+        ky1 = (kf_box[1] - float(mapping[1])) * sy
+        kx2 = kx1 + kf_box[2] * sx
+        ky2 = ky1 + kf_box[3] * sy
+
+        if pred_location is None:
+            reg = regression_map.detach().float()
+            pred_location = torch.stack(
+                [
+                    self.box_coder.grid_x - reg[:, 0],
+                    self.box_coder.grid_y - reg[:, 1],
+                    self.box_coder.grid_x + reg[:, 2],
+                    self.box_coder.grid_y + reg[:, 3],
+                ],
+                dim=1,
+            )
+        loc = pred_location[0]
+
+        inter_w = (torch.minimum(loc[2], loc[2].new_tensor(kx2))
+                   - torch.maximum(loc[0], loc[0].new_tensor(kx1))).clamp(min=0)
+        inter_h = (torch.minimum(loc[3], loc[3].new_tensor(ky2))
+                   - torch.maximum(loc[1], loc[1].new_tensor(ky1))).clamp(min=0)
+        inter = inter_w * inter_h
+        cand_area = (loc[2] - loc[0]).clamp(min=0) * (loc[3] - loc[1]).clamp(min=0)
+        kf_area = max(kx2 - kx1, 0.0) * max(ky2 - ky1, 0.0)
+        kf_iou = inter / (cand_area + kf_area - inter + 1e-6)
+
+        w = self._kf_motion_weight
+        fused = classification_map * (1.0 - w) + kf_iou * w
+        return fused, pred_location
+
     def run_track(
         self,
         search,
@@ -798,8 +953,23 @@ class SiamABCTracker(Tracker):
                 - sim_score (float): The similarity score between the current search
                   and the stored dynamic context features.
         """
+        search_center_bbox = self.tracking_state.bbox
+        if (
+            getattr(self, "_kf_motion_center_search", False)
+            and self._kf_motion_active()
+        ):
+            kf_box = self._kf_prior.predicted_bbox()
+            if kf_box is not None:
+                cur = np.asarray(self.tracking_state.bbox, dtype=float)
+                kf_cx = kf_box[0] + kf_box[2] / 2.0
+                kf_cy = kf_box[1] + kf_box[3] / 2.0
+                # Shift only the crop center; size stays the tracker's own
+                # estimate so crop geometry and prev_size are unaffected.
+                search_center_bbox = np.array(
+                    [kf_cx - cur[2] / 2.0, kf_cy - cur[3] / 2.0, cur[2], cur[3]]
+                )
         search_features, search_bbox, search_context = self.get_search_features(
-            search, self.tracking_state.bbox
+            search, search_center_bbox
         )
         self.tracking_state.mapping = search_context
         self.tracking_state.prev_size = search_bbox[2:]
@@ -931,6 +1101,17 @@ class SiamABCTracker(Tracker):
         classification_map, penalty, pred_location = self._confidence_postprocess(
             cls_score=cls_score, regression_map=regression_map
         )
+
+        # SAMURAI-style motion-consistency fusion (arXiv:2411.11922): demote
+        # response-map cells that contradict the Kalman-predicted trajectory
+        # before peak selection. Only active after a stable-tracking streak and
+        # never during recovery candidate verification (_kf_suppress).
+        if self._kf_motion_active():
+            classification_map, pred_location = self._fuse_kf_motion_prior(
+                classification_map=classification_map,
+                regression_map=regression_map,
+                pred_location=pred_location,
+            )
 
         decoded_info: TrackerDecodeResult = self.box_coder.decode(
             classification_map=classification_map,
@@ -1134,11 +1315,17 @@ class SiamABCTracker(Tracker):
         saved_bbox = self.tracking_state.bbox
 
         try:
+            # Hypothesis injection must be judged on appearance alone — the
+            # Kalman prior would unfairly demote candidates far from the stale
+            # pre-occlusion trajectory, which is exactly where a reacquired
+            # target tends to be.
+            self._kf_suppress = True
             self.tracking_state.bbox = candidate_bbox.copy()
             self.tracking_state.mapping = padded_context.copy()
 
             return self.run_track(search)
         finally:
+            self._kf_suppress = False
             self.tracking_state.bbox = saved_bbox
 
     def set_tta(

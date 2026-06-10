@@ -301,6 +301,7 @@ class SiamRAMExperimentTracker:
         long_distance_mode: bool = False,
         enter_occlusion_on_loss: bool = True,
         no_occlusion_first_n_frames: int = 0,
+        occlusion_emit_held_box: bool = False,
         # Introspection-based DRM anchor update (arXiv:2411.17576, Sec. 3.2.2).
         # When enabled, a DRM distractor-context anchor is written when the
         # SiamABC response map reveals a competing secondary peak during reliable
@@ -969,6 +970,10 @@ class SiamRAMExperimentTracker:
         # Grace period: refuse to enter occlusion for this many initial frames
         # (warm-up). 0 = no restriction.
         self._no_occlusion_first_n_frames = max(0, int(no_occlusion_first_n_frames))
+        # During occlusion, emit the EKF-predicted held box instead of zeros.
+        # The competition metric scores a zero box as a guaranteed miss while a
+        # wrong box costs nothing extra, so a best-guess box strictly dominates.
+        self._occlusion_emit_held_box = bool(occlusion_emit_held_box)
         # Alternate occlusion-entry patience used while camera motion is heavy.
         # < 1 disables it (always use _entry_patience). Meant as a softer
         # alternative to block_occlusion_on_camera_motion: set that False and set
@@ -1723,6 +1728,11 @@ class SiamRAMExperimentTracker:
 
         if self.in_occlusion:
             self._sync_visual_state()
+            if self._occlusion_emit_held_box and self.held_box is not None:
+                held_out = np.round(
+                    np.array(self.held_box, dtype=float) * scale_inv
+                ).astype(int)
+                return held_out, 0.0, True, self._last_yolo
             return np.zeros(4, dtype=int), 0.0, True, self._last_yolo
 
         bbox_out = np.round(np.array(bbox, dtype=float) * scale_inv).astype(int)

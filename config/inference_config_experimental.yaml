@@ -91,6 +91,29 @@ tracker:
   # During warm-up, consider only this many recent memory entries.
   warmup_template_memory_window: 8
 
+  # --- SAMURAI-style Kalman motion prior (arXiv:2411.11922, Sec. 4.1) ---
+  # Blend a constant-velocity KF-IoU motion-consistency score into the response
+  # map before peak selection: fused = (1-w)*appearance + w*KF_IoU. Targets
+  # identity switches onto crossing look-alike distractors. Online/causal and
+  # O(score_grid) per frame — edge-safe. false => legacy byte-for-byte.
+  kf_motion_enabled: true
+  # Motion-score blend weight (SAMURAI ablation: 0.15 best, 0.5 too strong).
+  # Local sweep: 0.2/stable=8 scored 0.7838 vs 0.7836 here — a tie; kept the
+  # conservative paper-aligned values (slower engagement = lower switch risk).
+  kf_motion_weight: 0.15
+  # Consecutive confident frames required before the prior participates.
+  kf_motion_stable_frames: 15
+  # Peak score at/above which a frame counts as confident (KF update + streak).
+  kf_motion_score_threshold: 0.55
+  # Center innovation beyond this multiple of the box diagonal re-seeds the
+  # filter (covers reacquisition jumps) instead of polluting the state.
+  kf_motion_reseed_dist: 2.0
+  # Center the search crop at the KF-predicted position instead of the previous
+  # box (MOT-style predict-then-associate; FocusTrack motivation). Keeps fast
+  # movers (uav2/uav7-style, ~1 box-width/frame) inside the search crop. Same
+  # stability gating as the score fusion.
+  kf_motion_center_search: true
+
 
 # =============================================================================
 # ram_tracker: SiamRAM config (grouped, single source of truth).
@@ -488,6 +511,11 @@ ram_tracker:
       # the entry streak is held at 0 so it cannot fire the instant the window
       # ends. 0 = no restriction.
       no_occlusion_first_n_frames: 18
+      # During occlusion frames, emit the EKF-predicted held box instead of an
+      # all-zero box. A zero box always scores 0 on AUC/NormPrec while a wrong
+      # guess is never penalized beyond that, so emitting the motion-model
+      # prediction strictly dominates under the competition metric.
+      occlusion_emit_held_box: true
       # Small corrective blend toward the predicted state when drifting (0 = off).
       nudge_alpha: 0.0
 
@@ -570,7 +598,10 @@ ram_tracker:
         drm_gamma: 0
         # Weight on appearance similarity in the composite score.
         drm_lam_app: 1
-        # Weight on spatial distance penalty.
+        # Weight on spatial distance penalty. MEASURED NET NEGATIVE at 0.3
+        # (2026-06-10: 0.7789 -> 0.7675): fixed person19_3 +0.29 / group2_1 +0.06
+        # but broke RcCar4 -0.52, truck -0.29, jogging2 -0.28 — targets that
+        # genuinely reappear far from the EKF prediction. Keep at 0.0.
         drm_lam_dist: 0.0
         # Weight on candidate-direction consistency.
         drm_lam_cand_dir: 0.0
@@ -604,6 +635,7 @@ ram_tracker:
         # Weight on appearance similarity in the composite score.
         distractor_occ_drm_lam_app: 1
         # Weight on spatial distance penalty (raise to avoid re-locking the distractor).
+        # Kept in sync with drm_lam_dist (measured net negative at 0.3; see there).
         distractor_occ_drm_lam_dist: 0.0
         # Weight on candidate-direction consistency.
         distractor_occ_drm_lam_cand_dir: 0.0

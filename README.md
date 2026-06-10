@@ -132,9 +132,9 @@ an immediate identity switch. The mode includes below-gate motion holds,
 overlap motion locks, stable-exit confirmation, and an optional forced handoff
 to occlusion recovery when the real target appears lost.
 
-> The current inference config keeps this machinery available but sets
-> `spike_reject_enabled: false`, so spike-triggered distractor-mode entry is
-> disabled by default.
+> The current inference config keeps this machinery available under
+> `ram_tracker.distractor_mode.spike_reject` and enables spike-triggered
+> distractor-mode entry by default.
 
 ### Occlusion Recovery
 
@@ -186,14 +186,16 @@ Important current defaults:
 | `trt_engine.trt_compile_siamabc` | `true` | Use the TensorRT SiamABC wrapper |
 | `trt_engine.backbone_mode` | `dynamic_fp16` | Dynamic-shape FP16 SiamABC backbone |
 | `trt_engine.trt_compile_osnet` | `true` | Compile the OSNet descriptor engine |
+| `tracker.hanning_window_penalty.enabled` | `true` | Bias SiamABC score-map peaks toward the search center |
+| `tracker.hanning_window_penalty.influence` | `1` | Strength of the Hanning/cosine score prior |
 | `ram_tracker.camera_motion.core.homography_mode` | `classic` | Fast GMC estimator |
 | `ram_tracker.gmc_prior.gmc_prior_enabled` | `true` | Warp the previous bbox into SiamABC's search prior |
-| `ram_tracker.camera_motion.gating.block_distractor_mode_on_camera_motion` | `true` | Suppress false jump-switches during heavy camera motion |
+| `ram_tracker.distractor_mode.entry.block_distractor_mode_on_camera_motion` | `true` | Suppress false jump-switches during heavy camera motion |
 | `ram_tracker.camera_motion.gating.block_occlusion_on_camera_motion` | `false` | Allow low-confidence occlusion entry during heavy motion |
 | `ram_tracker.occlusion.detectability_probe.yolo_detectability_enabled` | `true` | Select SiamABC-only versus YOLO+DRM recovery |
 | `ram_tracker.occlusion.phase1_collect.cand_collection_frames` | `1` | Number of YOLO collection frames |
 | `ram_tracker.occlusion.reacquire_confirm.reacq_confirm_frames` | `1` | Verification frames before committing recovery |
-| `ram_tracker.spike_reject.spike_reject_enabled` | `false` | Spike-triggered distractor entry is off |
+| `ram_tracker.distractor_mode.spike_reject.spike_reject_enabled` | `true` | Spike-triggered distractor entry is on |
 | `ram_tracker.yolo.copile_yolo` | `false` | Ultralytics YOLO engine export is off |
 
 ---

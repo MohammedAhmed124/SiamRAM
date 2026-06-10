@@ -749,6 +749,16 @@ class SiamABCTracker(Tracker):
         if self._kf_motion_enabled and self._kf_prior is not None:
             self._kf_motion_observe(pred_bbox, pred_score)
 
+        # Promote the primary-track classification maps (raw + after penalty)
+        # captured in _postprocess() to the display slots read by the video
+        # visualiser. Done here (not in _postprocess) so candidate/recovery
+        # forwards that run later in the frame can't overwrite the map shown for
+        # the accepted prediction. Gated by _viz_capture so the no-video fast
+        # path pays nothing.
+        if getattr(self, "_viz_capture", False):
+            self.viz_cls_map = getattr(self, "_viz_cls_latest", None)
+            self.viz_cls_pen_map = getattr(self, "_viz_cls_pen_latest", None)
+
         self.tracking_state.bbox = pred_bbox
         self.tracking_state.pred_score = pred_score
         self.tracking_state.paths.append(pred_bbox)
@@ -1248,6 +1258,24 @@ class SiamABCTracker(Tracker):
 
         sim_score_raw = track_result[constants.TRACKER_TARGET_SEARCH_SIM_SCORE]
         sim_score = sim_score_raw.item() if sim_score_raw is not None else 0.0
+
+        # Stash the classification head map before and after the scale/Hanning
+        # penalty, for the bottom-left video insets. "Before" is the raw
+        # per-location sigmoid (cls_score, already numpy [H, W]); "after" is
+        # classification_map from _confidence_postprocess() -- which equals the
+        # raw map when the hanning_window_penalty block is disabled. Both are
+        # already computed for decoding, so this only adds a squeeze/copy, and
+        # only when capture is enabled (so the no-video fast path pays nothing).
+        # update() promotes these "latest" buffers to its display slots.
+        if getattr(self, "_viz_capture", False):
+            self._viz_cls_latest = cls_score  # numpy [H, W] in [0, 1], pre-penalty
+            if classification_map is not None:
+                self._viz_cls_pen_latest = (
+                    classification_map.detach().float().squeeze().cpu().numpy()
+                )
+            else:
+                self._viz_cls_pen_latest = None
+
         return (
             pred_bbox,
             peak_cls_score,

@@ -280,8 +280,9 @@ class Tracker(ABC):
         prev_size = self.tracking_state.prev_size
         assert prev_size is not None
         r_max, c_max = decoded_info.pred_coords[0]
+        smooth_lr = float(self.tracking_config.get("lr", 0.3))
         lr = (
-            penalty[r_max, c_max] * cls_score[r_max, c_max] * self.tracking_config["lr"]
+            penalty[r_max, c_max] * cls_score[r_max, c_max] * smooth_lr
         ).item()
 
         pred_size = np.array(pred_bbox[2:])
@@ -294,43 +295,68 @@ class Tracker(ABC):
         cls_score: NDArray,
         regression_map: torch.Tensor,
     ) -> tuple[NDArray, None, None] | tuple[Any, NDArray, Tensor]:
-        if not self.tracking_config.get("smooth", False):
+        bbox_size_smoothing = bool(self.tracking_config.get("smooth", False))
+        hanning_enabled = bool(
+            self.tracking_config.get("hanning_window_enabled", bbox_size_smoothing)
+        )
+        window_influence = float(
+            np.clip(
+                float(self.tracking_config.get("window_influence", 0.0)),
+                0.0,
+                1.0,
+            )
+        )
+        window_active = hanning_enabled and window_influence > 0.0
+        size_penalty_enabled = bool(
+            self.tracking_config.get("size_penalty_enabled", bbox_size_smoothing)
+        )
+        penalty_k = float(self.tracking_config.get("penalty_k", 0.0))
+        size_penalty_active = size_penalty_enabled and penalty_k > 0.0
+
+        if not (bbox_size_smoothing or window_active or size_penalty_active):
             return cls_score, None, None
-        prev_size = self.tracking_state.prev_size
-        assert prev_size is not None
 
-        pred_location_ = torch.stack(
-            [
-                self.box_coder.grid_x - regression_map[:, 0],
-                self.box_coder.grid_y - regression_map[:, 1],
-                self.box_coder.grid_x + regression_map[:, 2],
-                self.box_coder.grid_y + regression_map[:, 3],
-            ],
-            dim=1,
-        )
+        pred_location_ = None
+        penalty = torch.ones_like(cls_score.squeeze())
 
-        pred_location = pred_location_[0]
+        if size_penalty_active:
+            prev_size = self.tracking_state.prev_size
+            assert prev_size is not None
 
-        s_c = limit(
-            squared_size(
-                pred_location[2] - pred_location[0], pred_location[3] - pred_location[1]
+            pred_location_ = torch.stack(
+                [
+                    self.box_coder.grid_x - regression_map[:, 0],
+                    self.box_coder.grid_y - regression_map[:, 1],
+                    self.box_coder.grid_x + regression_map[:, 2],
+                    self.box_coder.grid_y + regression_map[:, 3],
+                ],
+                dim=1,
             )
-            / (squared_size(prev_size[0], prev_size[1]))
-        )
 
-        r_c = limit(
-            (prev_size[0] / prev_size[1])
-            / (
-                (pred_location[2] - pred_location[0])
-                / (pred_location[3] - pred_location[1])
+            pred_location = pred_location_[0]
+
+            s_c = limit(
+                squared_size(
+                    pred_location[2] - pred_location[0],
+                    pred_location[3] - pred_location[1],
+                )
+                / (squared_size(prev_size[0], prev_size[1]))
             )
-        )
 
-        penalty = torch.exp(-(r_c * s_c - 1) * self.tracking_config["penalty_k"])
+            r_c = limit(
+                (prev_size[0] / prev_size[1])
+                / (
+                    (pred_location[2] - pred_location[0])
+                    / (pred_location[3] - pred_location[1])
+                )
+            )
+
+            penalty = torch.exp(-(r_c * s_c - 1) * penalty_k)
+
         pscore = penalty * cls_score
 
-        pscore = (
-            pscore * (1 - self.tracking_config["window_influence"])
-            + self.window * self.tracking_config["window_influence"]
-        )
+        if window_active:
+            window = self.window.to(device=pscore.device, dtype=pscore.dtype)
+            pscore = pscore * (1 - window_influence) + window * window_influence
+
         return pscore, penalty.cpu().numpy(), pred_location_

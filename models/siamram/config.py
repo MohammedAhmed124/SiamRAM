@@ -74,9 +74,6 @@ class SpikeRejectConfig:
     history_window: int = 40
     min_history: int = 5
     ratio: float = 2.5
-    abs_norm_min: float = 0.0
-    use_appearance: bool = False
-    max_sim: float = 0.65
     watch_max_frames: int = 8
     settle: SpikeSettleConfig = field(default_factory=SpikeSettleConfig)
     anchor: SpikeAnchorConfig = field(default_factory=SpikeAnchorConfig)
@@ -90,7 +87,16 @@ class DistractorModeConfig:
     jump_penalty_sim_floor: float = 0.55
     jump_penalty_bank_topk: int = 5
     min_similarity: float = 0.70
-    selected_min_similarity: float = 0.70
+    selected_min_similarity: Any = 0.70
+    selected_min_similarity_auto_min: float = 0.70
+    selected_min_similarity_auto_max: float = 0.98
+    selected_min_similarity_auto_delta: float = 0.03
+    selected_min_similarity_auto_ema_alpha: float = 0.2
+    selected_min_similarity_auto_n_frames: int = 10
+    selected_min_similarity_auto_warmup: float = 0.98
+    selected_min_similarity_auto_min_samples: int = 5
+    selected_min_similarity_auto_use_distractor_bank: bool = True
+    selected_min_similarity_auto_distractor_margin: float = 0.03
     yolo_topk: int = 8
     history_limit: int = 80
     use_tracker_mapping: bool = True
@@ -115,6 +121,12 @@ class DistractorModeConfig:
     post_exit_memory_freeze_frames: int = 8
     post_exit_template_freeze_frames: int = 8
     behavior_mode: str = "standard"
+    prebank_enabled: bool = False
+    prebank_stride: int = 10
+    prebank_maxlen: int = 15
+    prebank_yolo_topk: int = 5
+    prebank_target_iou_max: float = 0.30
+    prebank_materialize_immediately: bool = False
     overlap_motion_lock_enabled: bool = True
     overlap_iou_enter: float = 0.35
     overlap_iou_exit: float = 0.15
@@ -125,7 +137,6 @@ class DistractorModeConfig:
     focus_dist_soft_radius: float = 0.60
     focus_dist_hard_radius: float = 2.00
     force_occlusion_on_commit: bool = False
-    block_on_camera_motion: bool = True
     drm_lam_app: float = 1.0
     drm_lam_iou: float = 0.25
     drm_lam_dist: float = 1.0
@@ -401,9 +412,6 @@ def flatten_subsystem_overrides(config: Any) -> tuple[dict[str, Any], dict[str, 
                 "spike_reject_history_window": int(spike.history_window),
                 "spike_reject_min_history": int(spike.min_history),
                 "spike_reject_ratio": float(spike.ratio),
-                "spike_reject_abs_norm_min": float(spike.abs_norm_min),
-                "spike_reject_use_appearance": bool(spike.use_appearance),
-                "spike_reject_max_sim": float(spike.max_sim),
                 "spike_reject_watch_max_frames": int(spike.watch_max_frames),
                 "spike_reject_settle_ratio": float(spike.settle.ratio),
                 "spike_reject_settle_abs_norm_max": float(spike.settle.abs_norm_max),
@@ -433,8 +441,33 @@ def flatten_subsystem_overrides(config: Any) -> tuple[dict[str, Any], dict[str, 
                     dis.jump_penalty_bank_topk
                 ),
                 "distractor_mode_min_similarity": float(dis.min_similarity),
-                "distractor_mode_selected_min_similarity": float(
-                    dis.selected_min_similarity
+                "distractor_mode_selected_min_similarity": dis.selected_min_similarity,
+                "distractor_mode_selected_min_similarity_auto_min": float(
+                    dis.selected_min_similarity_auto_min
+                ),
+                "distractor_mode_selected_min_similarity_auto_max": float(
+                    dis.selected_min_similarity_auto_max
+                ),
+                "distractor_mode_selected_min_similarity_auto_delta": float(
+                    dis.selected_min_similarity_auto_delta
+                ),
+                "distractor_mode_selected_min_similarity_auto_ema_alpha": float(
+                    dis.selected_min_similarity_auto_ema_alpha
+                ),
+                "distractor_mode_selected_min_similarity_auto_n_frames": int(
+                    dis.selected_min_similarity_auto_n_frames
+                ),
+                "distractor_mode_selected_min_similarity_auto_warmup": float(
+                    dis.selected_min_similarity_auto_warmup
+                ),
+                "distractor_mode_selected_min_similarity_auto_min_samples": int(
+                    dis.selected_min_similarity_auto_min_samples
+                ),
+                "distractor_mode_selected_min_similarity_auto_use_distractor_bank": bool(
+                    dis.selected_min_similarity_auto_use_distractor_bank
+                ),
+                "distractor_mode_selected_min_similarity_auto_distractor_margin": float(
+                    dis.selected_min_similarity_auto_distractor_margin
                 ),
                 "distractor_mode_yolo_topk": int(dis.yolo_topk),
                 "distractor_mode_history_limit": int(dis.history_limit),
@@ -482,6 +515,16 @@ def flatten_subsystem_overrides(config: Any) -> tuple[dict[str, Any], dict[str, 
                     dis.post_exit_template_freeze_frames
                 ),
                 "distractor_mode_behavior_mode": str(dis.behavior_mode),
+                "distractor_mode_prebank_enabled": bool(dis.prebank_enabled),
+                "distractor_mode_prebank_stride": int(dis.prebank_stride),
+                "distractor_mode_prebank_maxlen": int(dis.prebank_maxlen),
+                "distractor_mode_prebank_yolo_topk": int(dis.prebank_yolo_topk),
+                "distractor_mode_prebank_target_iou_max": float(
+                    dis.prebank_target_iou_max
+                ),
+                "distractor_mode_prebank_materialize_immediately": bool(
+                    dis.prebank_materialize_immediately
+                ),
                 "distractor_mode_overlap_motion_lock_enabled": bool(
                     dis.overlap_motion_lock_enabled
                 ),
@@ -500,9 +543,6 @@ def flatten_subsystem_overrides(config: Any) -> tuple[dict[str, Any], dict[str, 
                 "distractor_focus_dist_soft_radius": float(dis.focus_dist_soft_radius),
                 "distractor_focus_dist_hard_radius": float(dis.focus_dist_hard_radius),
                 "jump_reject_force_occlusion": bool(dis.force_occlusion_on_commit),
-                "block_distractor_mode_on_camera_motion": bool(
-                    dis.block_on_camera_motion
-                ),
                 "distractor_drm_lam_app": float(dis.drm_lam_app),
                 "distractor_drm_lam_iou": float(dis.drm_lam_iou),
                 "distractor_drm_lam_dist": float(dis.drm_lam_dist),

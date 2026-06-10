@@ -262,6 +262,82 @@ def _draw_legend(
         )
 
 
+# Same colormap + scale for both cls panels so the raw-vs-penalised score maps
+# are directly comparable (the penalty's spatial reweighting shows as a change
+# within one colour space, not a difference in palette).
+_CMAP_CLS = cv2.COLORMAP_JET
+
+
+def _draw_heatmap_panel(
+    canvas: np.ndarray,
+    x: int,
+    y: int,
+    size: int,
+    data,
+    label: str,
+    colormap: int,
+    normalize: bool,
+    peak_text: str | None = None,
+) -> None:
+    """
+    Draw a small labelled heatmap inset onto the composite canvas in place.
+
+    Inputs:
+        canvas    - np.ndarray (H x W x 3) full composite frame, drawn into in place
+        x, y      - int top-left corner of the panel (header included)
+        size      - int side length (px) of the square heatmap below the header
+        data      - 2D array-like map (e.g. classification or attention) or None
+        label     - str header text stamped on the dark title bar
+        colormap  - cv2 colormap id applied to the normalised map
+        normalize - bool min-max stretch the map for contrast (use for attention,
+                    whose units are arbitrary); when False the data is assumed to
+                    already be in [0, 1] (the sigmoid classification map)
+        peak_text - optional str drawn at the panel's bottom-right (e.g. peak conf)
+
+    What it does:
+        Stamps a 16px dark header bar with the label, then renders the map as a
+        colour heatmap resized to size x size with INTER_NEAREST (so the true
+        low-res map grid stays visible). Missing/degenerate maps show a flat
+        "n/a" panel rather than crashing.
+
+    Why / where:
+        Called once per frame in run_inference (output_video branch) to surface
+        the SiamABC classification head and search attention map as two insets
+        in the bottom-left of the frame, for debugging tracker behaviour.
+    """
+    header_h = 16
+    x2 = x + size
+    y2 = y + header_h + size
+    cv2.rectangle(canvas, (x, y), (x2, y + header_h), (30, 30, 30), -1)
+    cv2.putText(
+        canvas, label, (x + 4, y + 12), FONT, 0.36, (235, 235, 235), 1, cv2.LINE_AA
+    )
+
+    arr = np.asarray(data, dtype=np.float32) if data is not None else None
+    if arr is None or arr.ndim != 2 or arr.size == 0:
+        cv2.rectangle(canvas, (x, y + header_h), (x2, y2), (45, 45, 45), -1)
+        cv2.putText(
+            canvas, "n/a", (x + size // 2 - 14, y + header_h + size // 2),
+            FONT, 0.45, (160, 160, 160), 1, cv2.LINE_AA,
+        )
+    else:
+        if normalize:
+            lo = float(arr.min())
+            hi = float(arr.max())
+            arr = (arr - lo) / (hi - lo) if hi - lo > 1e-8 else np.zeros_like(arr)
+        u8 = np.clip(arr * 255.0, 0, 255).astype(np.uint8)
+        u8 = cv2.resize(u8, (size, size), interpolation=cv2.INTER_NEAREST)
+        heat = cv2.applyColorMap(u8, colormap)
+        canvas[y + header_h: y2, x:x2] = heat
+        if peak_text:
+            (tw, _), _ = cv2.getTextSize(peak_text, FONT, 0.36, 1)
+            cv2.putText(
+                canvas, peak_text, (x2 - tw - 3, y2 - 5),
+                FONT, 0.36, (255, 255, 255), 1, cv2.LINE_AA,
+            )
+    cv2.rectangle(canvas, (x, y), (x2, y2), (90, 90, 90), 1)
+
+
 def _draw_velocity_curves(
     canvas: np.ndarray,
     x: int,
@@ -627,6 +703,10 @@ def run_inference(
         C_STATUS_OK = (0, 180, 0)
         C_STATUS_DIST = (0, 0, 255)
         C_STATUS_TEXT = (255, 255, 255)
+        # Ask the SiamABC tracker to stash its classification head map (raw and
+        # after the scale/Hanning penalty) each primary forward, for the
+        # bottom-left heatmap insets below.
+        inner_tracker._viz_capture = True
         show_velocity_overlay = bool(
             is_dam
             and (
@@ -660,6 +740,41 @@ def run_inference(
         vel_plot_y = top_h + vel_strip_gap
         vel_plot_w = max(40, total_w - 16)
         vel_plot_h = max(30, vel_strip_h - 2)
+
+        # Bottom-left heatmap insets: SiamABC classification head, raw vs after
+        # the scale/Hanning penalty. Sized from the frame width so two squares fit
+        # side by side; skipped on frames too narrow to hold them legibly.
+        viz_pad = 8
+        viz_label_h = 16
+        viz_sz = int(min(112, max(56, (w - 3 * viz_pad) // 2)))
+        viz_y = y_off + h - viz_sz - viz_label_h - viz_pad
+        viz_x_raw = viz_pad
+        viz_x_pen = viz_pad + viz_sz + viz_pad
+        viz_enabled = (w >= 2 * 56 + 3 * viz_pad) and (viz_y >= y_off)
+
+        def _viz_peak(m) -> str | None:
+            try:
+                return f"max {float(np.max(m)):.2f}" if m is not None else None
+            except (ValueError, TypeError):
+                return None
+
+        def _draw_viz_panels() -> None:
+            """Draw the classification-head heatmaps (raw vs after the scale/Hanning
+            penalty) bottom-left, from the maps the SiamABC tracker stashed during
+            its last primary forward. Same colormap + scale so the penalty's
+            spatial reweighting is directly comparable across the two panels."""
+            if not viz_enabled:
+                return
+            raw_map = getattr(inner_tracker, "viz_cls_map", None)
+            pen_map = getattr(inner_tracker, "viz_cls_pen_map", None)
+            _draw_heatmap_panel(
+                canvas, viz_x_raw, viz_y, viz_sz, raw_map,
+                "CLS RAW", _CMAP_CLS, normalize=False, peak_text=_viz_peak(raw_map),
+            )
+            _draw_heatmap_panel(
+                canvas, viz_x_pen, viz_y, viz_sz, pen_map,
+                "CLS PENALTY", _CMAP_CLS, normalize=False, peak_text=_viz_peak(pen_map),
+            )
 
         avi_path = os.path.splitext(output_path)[0] + "_tmp.avi"
         writer = cv2.VideoWriter(
@@ -859,6 +974,7 @@ def run_inference(
                 actual_hist=list(actual_speed_hist),
                 distractor_hist=list(distractor_mode_hist),
             )
+        _draw_viz_panels()
         writer.write(canvas)
         progress.update("tracking")
 
@@ -1257,16 +1373,60 @@ def run_inference(
                 auto_margin = getattr(tracker, "_drm_margin_auto", None) if is_dam else None
                 if auto_margin is not None:
                     ema = auto_margin.ema
+                    # Absolute DRM self-score of the current frame, shown right next
+                    # to the EMA so you can see the instantaneous value behind it.
+                    cur = getattr(tracker, "_last_drm_self_score", None)
+                    cur_txt = "--" if cur is None else f"{cur:.3f}"
                     m_l2 = (
-                        "(auto, warmup)"
+                        f"(auto, warmup) cur={cur_txt}"
                         if ema is None
-                        else f"(auto) ema={ema:.3f} n={auto_margin.samples}"
+                        else f"(auto) ema={ema:.3f} cur={cur_txt} n={auto_margin.samples}"
                     )
                     stack_y = _stack_box(
                         stack_y, f"DRM margin: {auto_margin.value:.3f}", m_l2, (0, 220, 220)
                     )
 
-                # (2) Dynamic-template update rate (N / window). Always shown; the
+                # (2) Adaptive distractor selected-min similarity gate. This is
+                # the auto-tuned accept gate used by distractor-mode selection.
+                auto_sel = (
+                    getattr(tracker, "_distractor_selected_min_auto", None)
+                    if is_dam
+                    else None
+                )
+                if auto_sel is not None:
+                    try:
+                        d_n = len(tracker._get_distractor_mode_scoring_bank())
+                    except Exception:
+                        d_n = len(getattr(tracker, "_distractor_bank", ()))
+                    ema = auto_sel.ema
+                    cur = getattr(
+                        tracker, "_last_distractor_selected_min_self_sim", None
+                    )
+                    neg = getattr(
+                        tracker, "_last_distractor_selected_min_neg_sim", None
+                    )
+                    cur_txt = "--" if cur is None else f"{cur:.3f}"
+                    neg_txt = "--" if neg is None else f"{neg:.3f}"
+                    s_l2 = (
+                        f"(warmup) cur={cur_txt} neg={neg_txt}"
+                        if ema is None
+                        else f"ema={ema:.3f} cur={cur_txt} neg={neg_txt} n={auto_sel.samples}"
+                    )
+                    sel_value = float(
+                        getattr(
+                            tracker,
+                            "_distractor_mode_selected_min_similarity",
+                            auto_sel.value,
+                        )
+                    )
+                    stack_y = _stack_box(
+                        stack_y,
+                        f"Dist sel: {sel_value:.3f}  d_n={d_n}",
+                        s_l2,
+                        (0, 0, 255),
+                    )
+
+                # (3) Dynamic-template update rate (N / window). Always shown; the
                 # second line says whether template_rate_auto is driving it this
                 # frame (and the smoothed 0..1 motion) or it's a fixed rate.
                 if is_dam:
@@ -1289,6 +1449,7 @@ def run_inference(
                         stack_y, f"Tmpl rate: N={n_cur} win={win_cur}", tr_l2, (0, 210, 140)
                     )
 
+                _draw_viz_panels()
                 writer.write(canvas)
 
             frame_idx += 1

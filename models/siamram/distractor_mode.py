@@ -90,6 +90,7 @@ class DistractorModeSubsystem:
         anchor_bbox: np.ndarray,
     ) -> None:
         self._host._distractor_mode_active = True
+        self._host._materialize_distractor_prebank()
         self._host._distractor_focus_bbox = np.array(anchor_bbox, dtype=int).copy()
         self._host._stable_anchor_bbox = np.array(anchor_bbox, dtype=int).copy()
         self._host._distractor_mode_roi_size = None
@@ -242,7 +243,7 @@ class DistractorModeSubsystem:
             * max(1.0, float(max(focus_bbox_arr[2], focus_bbox_arr[3])))
         )
     
-        distractor_bank = self._host._get_active_distractor_bank()
+        distractor_bank = self._host._get_distractor_mode_scoring_bank()
         if distractor_bank:
             distractor_bank = distractor_bank[-self._host._distractor_drm_bank_topk:]
     

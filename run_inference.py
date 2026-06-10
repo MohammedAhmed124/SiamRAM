@@ -763,6 +763,43 @@ TRACKER_CONFIG_ALIASES = {
     "warmup_template_memory_window": "warmup_window_size",
 }
 
+HANNING_WINDOW_PENALTY_ALIASES = {
+    "enabled": "hanning_window_enabled",
+    "window_type": "windowing",
+    "influence": "window_influence",
+    "size_penalty_enabled": "size_penalty_enabled",
+    "size_penalty_k": "penalty_k",
+    "bbox_size_smoothing_enabled": "smooth",
+    "bbox_size_smoothing_lr": "lr",
+}
+
+ARCHITECTURAL_CONFIG_ALIASES = {
+    "score_grid_stride": "total_stride",
+    "score_grid_size": "score_size",
+    "template_context_padding": "template_bbox_offset",
+    "search_context_scale": "search_context",
+    "search_crop_size": "instance_size",
+    "template_crop_size": "template_size",
+}
+
+DYNAMIC_TEMPLATE_ALIASES = {
+    "enabled": "dynamic_update",
+    "update_interval": "N",
+    "warmup_update_interval": "warm_up_n",
+    "memory_window": "memory_window_size",
+    "admit_conf_threshold": "dynamic_update_threshold",
+    "running_confidence_floor": "running_confidence_floor_value",
+    "admit_iou_threshold": "iou_threshold",
+    "warmup_frames": "warmup_frames",
+    "warmup_memory_window": "warmup_window_size",
+}
+
+
+def _apply_tracker_aliases(tracker_cfg, source_cfg, aliases) -> None:
+    for friendly_key, legacy_key in aliases.items():
+        if friendly_key in source_cfg:
+            tracker_cfg[legacy_key] = source_cfg[friendly_key]
+
 
 def _normalize_tracker_config_aliases(config) -> None:
     """
@@ -772,9 +809,25 @@ def _normalize_tracker_config_aliases(config) -> None:
     if "tracker" not in config:
         return
     tracker_cfg = config.tracker
-    for friendly_key, legacy_key in TRACKER_CONFIG_ALIASES.items():
-        if friendly_key in tracker_cfg:
-            tracker_cfg[legacy_key] = tracker_cfg[friendly_key]
+    _apply_tracker_aliases(tracker_cfg, tracker_cfg, TRACKER_CONFIG_ALIASES)
+
+    penalty_cfg = tracker_cfg.get("hanning_window_penalty", None)
+    if penalty_cfg is not None:
+        _apply_tracker_aliases(
+            tracker_cfg, penalty_cfg, HANNING_WINDOW_PENALTY_ALIASES
+        )
+
+    architectural_cfg = tracker_cfg.get("architectural_config", None)
+    if architectural_cfg is not None:
+        _apply_tracker_aliases(
+            tracker_cfg, architectural_cfg, ARCHITECTURAL_CONFIG_ALIASES
+        )
+
+    dynamic_template_cfg = tracker_cfg.get("dynamic_template", None)
+    if dynamic_template_cfg is not None:
+        _apply_tracker_aliases(
+            tracker_cfg, dynamic_template_cfg, DYNAMIC_TEMPLATE_ALIASES
+        )
 
 
 SUBMISSION_COLUMNS = ["id", "x", "y", "w", "h"]

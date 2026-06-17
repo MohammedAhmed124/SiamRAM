@@ -32,7 +32,7 @@ With `bbox_smoothing_enabled: false` (the tuned competition config), `_confidenc
 
 ## 2. Mechanism
 
-New module [`models/SiamABC/tracker/kalman_motion.py`](../../models/SiamABC/tracker/kalman_motion.py): constant-velocity Kalman filter over `[cx, cy, w, h, vx, vy, vw, vh]` with MOT-standard h-scaled noise. Hooks in [`SiamABC_Tracker.py`](../../models/SiamABC/tracker/SiamABC_Tracker.py):
+New module `models/SiamABC/tracker/kalman_motion.py`: constant-velocity Kalman filter over `[cx, cy, w, h, vx, vy, vw, vh]` with MOT-standard h-scaled noise. Hooks in [`SiamABC_Tracker.py`](../../models/SiamABC/tracker/SiamABC_Tracker.py):
 
 1. **`update()`**: `_kf_motion_begin_frame()` advances the filter (or re-seeds it when something external — e.g. a reacquisition commit — rewrote `tracking_state.bbox`); after `run_track()`, `_kf_motion_observe()` feeds the selected box back as a measurement when `score ≥ kf_motion_score_threshold`, else the stability streak resets and the filter coasts.
 2. **`_postprocess()`**: before `box_coder.decode()`, the KF-predicted box (mapped into search-crop coordinates) is IoU'd against all 256 grid-cell candidate boxes and blended: `fused = (1−w)·cls_map + w·KF_IoU` (SAMURAI Eq. 7). The *reported* peak score still reads from the raw appearance map, so occlusion-entry thresholds see unchanged semantics.

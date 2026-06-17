@@ -19,6 +19,35 @@ from utils.utils import (
 )
 
 
+def _aggregate_drm_anchor_scores(
+    scores: List[float],
+    score_aggregation: str,
+    topk: Optional[int] = None,
+) -> float:
+    """Collapse per-anchor DRM scores into one candidate score.
+
+    "max"  -> best anchor wins.
+    "mean" -> average of anchors. When ``topk`` is a positive int smaller than
+              the anchor count, only the ``topk`` highest-scoring anchors are
+              averaged (top-k mean); ``None`` (or a value >= the anchor count)
+              averages every anchor (global mean). ``topk`` is ignored for "max".
+    """
+    if not scores:
+        return -np.inf
+    mode = str(score_aggregation or "max").strip().lower()
+    if mode == "max":
+        return float(max(scores))
+    if mode == "mean":
+        if topk is not None and 0 < topk < len(scores):
+            top_scores = sorted(scores, reverse=True)[:topk]
+            return float(np.mean(top_scores))
+        return float(np.mean(scores))
+    raise ValueError(
+        f"Unsupported DRM score aggregation '{score_aggregation}'. "
+        "Expected 'max' or 'mean'."
+    )
+
+
 class AppearanceMemory:
     """
     Manages short-term and long-term target appearance descriptors.
@@ -259,6 +288,8 @@ class AppearanceMemory:
         dist_sigma: Optional[float] = None,
         lam_dist: float = 0.15,
         lam_cand_dir: float = 0.15,
+        score_aggregation: str = "max",
+        score_aggregation_topk: Optional[int] = None,
     ) -> List[Tuple[np.ndarray, float]]:
         """
         Perform complex DRM matching for re-acquisition.
@@ -282,6 +313,9 @@ class AppearanceMemory:
             dist_sigma (float): Sigma for spatial distance penalty.
             lam_dist (float): Weight for distance penalty.
             lam_cand_dir (float): Weight for direction consistency.
+            score_aggregation (str): How to combine per-anchor scores ("max" or "mean").
+            score_aggregation_topk (Optional[int]): For "mean", average only the
+                top-k anchors; None averages all anchors (global mean).
 
         Returns:
             List[Tuple[np.ndarray, float]]: Scored candidates.
@@ -343,7 +377,11 @@ class AppearanceMemory:
                 raw = s_iou + s_app + s_mot_time
                 anchor_scores.append(raw)
 
-            cand_score = max(anchor_scores) if anchor_scores else -np.inf
+            cand_score = _aggregate_drm_anchor_scores(
+                anchor_scores,
+                score_aggregation,
+                score_aggregation_topk,
+            )
 
             if (
                 search_cx is not None
@@ -390,6 +428,8 @@ class AppearanceMemory:
         lam_time: float = 0.10,
         alpha: float = 0.05,
         gamma: float = 0.30,
+        score_aggregation: str = "max",
+        score_aggregation_topk: Optional[int] = None,
     ) -> Optional[float]:
         """
         Score the *current genuine target* as if it were a re-acquisition
@@ -398,8 +438,9 @@ class AppearanceMemory:
 
         This exists purely to feed the adaptive ``drm_margin="auto"`` estimator
         (see ``auto_margin.AutoDrmMargin``); ``drm_match`` is left untouched.
-        Mirrors the per-candidate scoring of ``drm_match`` (max over DRM anchors
-        of IoU + appearance + motion/time, minus the distractor penalty); the
+        Mirrors the per-candidate scoring of ``drm_match`` (configured
+        max/mean aggregation over DRM anchors of IoU + appearance + motion/time,
+        minus the distractor penalty); the
         spatial-distance penalty and direction term are skipped because for the
         live target the search centre coincides with the target (penalty ~0) and
         the candidate/ref displacement is degenerate.
@@ -422,7 +463,7 @@ class AppearanceMemory:
         )
         cand_desc = np.asarray(target_desc, dtype=np.float64)
 
-        best = -np.inf
+        anchor_scores: List[float] = []
         for dk_bbox, dk_desc, rho_k in list(self._drm):
             dk_cx = dk_bbox[0] + dk_bbox[2] / 2.0
             dk_cy = dk_bbox[1] + dk_bbox[3] / 2.0
@@ -437,12 +478,13 @@ class AppearanceMemory:
             s_iou = lam_iou * _iou(dk_bbox, target_bbox)
             s_app = lam_app * _cos_sim(dk_desc, cand_desc)
             raw = s_iou + s_app + s_mot_time
-            if raw > best:
-                best = raw
+            anchor_scores.append(float(raw))
 
-        if best == -np.inf:
+        if not anchor_scores:
             return None
-        return float(best)
+        return _aggregate_drm_anchor_scores(
+            anchor_scores, score_aggregation, score_aggregation_topk
+        )
 
     def drm_size(
         self,

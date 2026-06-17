@@ -1236,6 +1236,7 @@ def main():
     # Parse and normalise all input paths
     # ------------------------------------------------------------------
     args = parse_args()
+
     if args.split is not None:
         args.run_split = "public_lb" if args.split == "test" else args.split
 
@@ -1254,6 +1255,23 @@ def main():
     config = OmegaConf.load(args.yaml_config_path)
     _normalize_tracker_config_aliases(config)
     ram_tracker_kwargs = flatten_ram_tracker_config(config)
+
+    runtime_cfg = config.get("runtime", {}) or {}
+    raw_cudnn_benchmark = runtime_cfg.get(
+        "cudnn_benchmark", config.get("cudnn_benchmark", False)
+    )
+    if isinstance(raw_cudnn_benchmark, str):
+        cudnn_benchmark = raw_cudnn_benchmark.strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+    else:
+        cudnn_benchmark = bool(raw_cudnn_benchmark)
+    import torch
+
+    torch.backends.cudnn.benchmark = cudnn_benchmark
 
     resolved_weights_path = _resolve_weights_path(args.weights_path)
     yolo_weights_cfg = str(

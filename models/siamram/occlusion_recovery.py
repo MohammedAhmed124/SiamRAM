@@ -213,15 +213,23 @@ class OcclusionRecoverySubsystem:
         held_box = self._host.held_box
         assert held_box is not None
 
-        # Adaptive YOLO-detectability policy: if the target was found to be
-        # YOLO-detectable, do NOT let SiamABC reacquire on its own. Skip the
-        # phase-0 seed+commit entirely and fall straight through to YOLO
-        # candidate collection + DRM ranking (phase 1).
-        if self._host._detectability_policy_active() and self._host._yolo_detectable:
+        # Adaptive YOLO-detectability policy: once the probe has a verdict, do
+        # NOT let SiamABC reacquire on its own from the EKF-centred seed. Skip
+        # the phase-0 seed+commit entirely and fall straight through to YOLO
+        # candidate collection + DRM ranking (phase 1). Detectable targets are
+        # collected at the normal yolo_conf; NOT-detectable targets are collected
+        # at the lower yolo_undetectable_conf (see _yolo_detect) so they still
+        # surface candidate boxes for DRM to rank.
+        if self._host._detectability_policy_active():
             if self._host.debug:
+                regime = (
+                    "YOLO-detectable → YOLO+DRM"
+                    if self._host._yolo_detectable
+                    else "NOT YOLO-detectable → low-conf YOLO+DRM"
+                )
                 print(
                     f"[occ frame {self._host._occ_frames}] phase=siam  "
-                    f"SKIP (YOLO-detectable → rely on YOLO+DRM)"
+                    f"SKIP ({regime})"
                 )
             self._host._cand_frames = []
             self._host._occ_cam_vels = []
@@ -264,7 +272,7 @@ class OcclusionRecoverySubsystem:
                 self._host.tracker.tracking_state.bbox = held_box.copy()
                 self._host._cand_frames = []
                 self._host._occ_cam_vels = []
-                self._host._occ_phase = self._host._phase_after_failed_siam()
+                self._host._occ_phase = 1
                 return self._host.held_box, score
             pred_desc = _extract_descriptor(frame, pred_bbox)
 
@@ -299,6 +307,10 @@ class OcclusionRecoverySubsystem:
                 skip_threshold=self._host._active_drm_kwargs["skip_threshold"],
                 lam_dist=self._host._active_drm_kwargs["lam_dist"],
                 lam_cand_dir=self._host._active_drm_kwargs["lam_cand_dir"],
+                score_aggregation=self._host._active_drm_kwargs["score_aggregation"],
+                score_aggregation_topk=self._host._active_drm_kwargs[
+                    "score_aggregation_topk"
+                ],
             )
 
             drm_score = occ_match_results[0][1] if occ_match_results else -1.0
@@ -328,7 +340,7 @@ class OcclusionRecoverySubsystem:
 
         self._host._cand_frames = []
         self._host._occ_cam_vels = []
-        self._host._occ_phase = self._host._phase_after_failed_siam()
+        self._host._occ_phase = 1
         return self._host.held_box, score
 
 
@@ -420,6 +432,8 @@ class OcclusionRecoverySubsystem:
         skip_threshold: float,
         lam_dist: float,
         lam_cand_dir: float,
+        score_aggregation: str = "max",
+        score_aggregation_topk: Optional[int] = None,
     ) -> Tuple[List[Tuple[np.ndarray, float]], str]:
         """
         Unified occlusion matcher:
@@ -452,6 +466,8 @@ class OcclusionRecoverySubsystem:
             skip_threshold=skip_threshold,
             lam_dist=lam_dist,
             lam_cand_dir=lam_cand_dir,
+            score_aggregation=score_aggregation,
+            score_aggregation_topk=score_aggregation_topk,
         )
         return drm_results, "drm"
 
@@ -587,6 +603,10 @@ class OcclusionRecoverySubsystem:
             skip_threshold=self._host._active_drm_kwargs["skip_threshold"],
             lam_dist=self._host._active_drm_kwargs["lam_dist"],
             lam_cand_dir=self._host._active_drm_kwargs["lam_cand_dir"],
+            score_aggregation=self._host._active_drm_kwargs["score_aggregation"],
+            score_aggregation_topk=self._host._active_drm_kwargs[
+                "score_aggregation_topk"
+            ],
         )
 
         if self._host.debug:

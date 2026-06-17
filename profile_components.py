@@ -416,6 +416,11 @@ def _print_report(
 
 def main() -> None:
     args = parse_args()
+
+    # Match the production runtime: autotune cuDNN kernels for our fixed input
+    # shapes so profiling reflects the same kernel selection as run_inference.
+    torch.backends.cudnn.benchmark = True
+
     profiler = ComponentProfiler()
     patches = install_profile_patches(profiler)
 

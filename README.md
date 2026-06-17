@@ -143,9 +143,9 @@ Recovery then follows this policy:
 The current config uses one collection frame and one confirmation frame, so
 both values can be increased without changing the recovery implementation.
 
-For deeper design notes, see
-[SIAMRAM_THEORY_AND_ARCHITECTURE.md](docs/SIAMRAM_THEORY_AND_ARCHITECTURE.md)
-and the [System Description](docs/system_description.pdf). The source modules
+For deeper design notes, see the
+[SiamRAM theory and architecture guide](docs/architecture/SIAMRAM_THEORY_AND_ARCHITECTURE.md)
+and the [System Description](docs/architecture/system_description.pdf). The source modules
 and `config/inference_config_experimental.yaml` are the authoritative behavior.
 
 ---
@@ -182,8 +182,8 @@ Important current defaults:
 
 Depending on whether your machine has a GPU, follow one of these guides:
 
-- [CUDA / GPU Installation Guide](docs/install-CUDA.md) — Native Docker, VSCode Devcontainer, or local `uv` with CUDA
-- [CPU-only Installation Guide](docs/install-CPU.md) — Native Docker, VSCode Devcontainer, or local `uv` without a GPU
+- [CUDA / GPU Installation Guide](docs/getting-started/install-CUDA.md) — Native Docker, VSCode Devcontainer, or local `uv` with CUDA
+- [CPU-only Installation Guide](docs/getting-started/install-CPU.md) — Native Docker, VSCode Devcontainer, or local `uv` without a GPU
 
 The primary inference config currently enables TensorRT for SiamABC and OSNet,
 so the commands below assume a CUDA environment. For CPU inference, set
@@ -461,10 +461,12 @@ SiamRAM/
 │   ├── docker-compose.cpu.yml
 │   └── test.py
 ├── docs/
-│   ├── install-CUDA.md
-│   ├── install-CPU.md
-│   ├── system_description.pdf
-│   └── system_diagram.png
+│   ├── README.md
+│   ├── getting-started/          # CPU/CUDA installation guides
+│   ├── architecture/             # System overview, diagram, and architecture report
+│   ├── learning/                 # Theory course and teaching-oriented guides
+│   ├── optimization/             # Jetson/performance audits and reports
+│   └── experiments/              # Experiment design notes
 ├── data/                         # Raw videos, annotations, manifest, and extracted frames (img/ subfolders)
 ├── checkpoints/                  # Model weights and download scripts
 │   ├── download_checkpoints.py

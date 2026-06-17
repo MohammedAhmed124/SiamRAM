@@ -1,0 +1,383 @@
+# =============================================================================
+# Parity config: reproduce repo BEHAVIOR at commit 944f2b8 as closely as the
+# CURRENT code allows.
+#
+# This file uses the CURRENT (refactored) config schema / key names, but every
+# value has been set to match what 944f2b8 ran with. Lines that differ from the
+# committed config/inference_config_experimental.yaml are marked  # [944f2b8].
+#
+# Two behaviors at 944f2b8 CANNOT be restored from config alone because the code
+# changed — see the "UNRESOLVABLE FROM CONFIG" notes near the relevant sections.
+# =============================================================================
+
+# Path to the trained SiamABC checkpoint loaded at startup.
+weights_path: "/home/moha/SiamRAM/checkpoints/inference_checkpoint.pth"
+
+# =============================================================================
+# trt_engine: all TensorRT / FP16 options (GPU-only), grouped in one place.
+# =============================================================================
+trt_engine:
+  # TRT-compile the SiamABC backbone. Master switch for the SiamABC engine.
+  trt_compile_siamabc: False          # [944f2b8] was True (current default False)
+  # Legacy precision fallback used only when backbone_mode is left empty.
+  fp16: True
+  # SiamABC backbone implementation. Keep dynamic_fp16 until the parity
+  # benchmark proves another mode meets the deployment GPU's latency budget.
+  # Options: dynamic_fp16, static_fp16, static_fp16_fp32_neck, dynamic_fp32.
+  backbone_mode: "dynamic_fp16"
+  # Diagnostic control for dynamic_fp32. False preserves TensorRT's TF32 default.
+  backbone_disable_tf32: False
+  # OSNet-only descriptor acceleration. Ignored unless descriptor_backend == "osnet".
+  trt_compile_osnet: False            # [944f2b8] was True (current default False)
+  # OSNet-only FP16 descriptor inference. Ignored unless descriptor_backend == "osnet".
+  osnet_fp16: True
+  # OSNet-only async overlap. Pixel descriptors are CPU-only and synchronous.
+  osnet_async_overlap: True
+  # Test-time-augmentation blend factor inside the SiamABC TRT wrapper.
+  lambda_tta: 0.1
+  # GPU device index to build / run engines on.
+  cuda_id: 0
+
+# Which SiamRAM implementation to use. Kept for backwards compatibility;
+# run_inference currently always uses SiamRAMExperimentTracker.
+ram_tracker_impl: "experiment"
+
+# =============================================================================
+# runtime: process-level PyTorch switches.
+# =============================================================================
+runtime:
+  # Let cuDNN autotune convolution kernels. Faster for fixed shapes, but less
+  # predictable for variable ROI crops and can slightly perturb eager behavior.
+  cudnn_benchmark: false
+
+
+# =============================================================================
+# model: how the SiamABC neural network itself is built.
+# =============================================================================
+model:
+  # Python import path of the model class Hydra should instantiate.
+  _target_: models.SiamABC.model.SiamABC.SiamABCNet
+  # Start from ImageNet pretrained weights for backbone layers that support it.
+  # NOTE: at inference the checkpoint is loaded right after init (strict=False),
+  # so this only changes the pre-checkpoint init; baseline ran with true.
+  pretrained: true                   # [944f2b8] was true (current default False)
+  # Conv block flavour used across stages (sep_conv = depthwise separable).
+  conv_block: sep_conv
+  # Number of stacked tower blocks in the prediction head.
+  towernum: 2
+  # Preset model size (S / M / L) controlling channel depth.
+  model_size: M
+  # How many backbone stages to keep — caps depth of feature extraction.
+  max_layer: 4
+  # Build the auxiliary IoU prediction head on top.
+  build_iou_head: False
+
+
+# =============================================================================
+# tracker: per-frame SiamABC tracking hyperparameters.
+# =============================================================================
+tracker:
+  _target_: models.SiamABC.tracker.SiamABC_Tracker.SiamABCTracker
+
+  architectural_config:
+    # Pixel stride between neighbouring score-grid cells.
+    score_grid_stride: 16
+    # Score-grid side length (16 means a 16x16 candidate grid).
+    score_grid_size: 16
+    # Offset factor when extracting the template crop around the target centre.
+    template_context_padding: 0.2
+    # Multiplier deciding how much context around target is included in search crop.
+    search_context_scale: 2
+    # Pixel size of the search crop fed to the model.
+    search_crop_size: 256
+    # Pixel size of the template crop.
+    template_crop_size: 128
+
+  hanning_window_penalty:
+    # NOTE: this whole block is INERT here because bbox_size_smoothing_enabled is
+    # false (the cosine penalty / window blend only runs when smoothing is on).
+    # 944f2b8 also ran with smoothing off, so behavior matches regardless.
+    enabled: False
+    window_type: cosine
+    influence: 0.25
+    size_penalty_enabled: false
+    size_penalty_k: 0.04
+    bbox_size_smoothing_enabled: false
+    bbox_size_smoothing_lr: 0.3
+
+  dynamic_template:
+    # Allow the dynamic template to evolve across frames.
+    enabled: true
+    # Frames between dynamic-template re-selection during steady-state tracking.
+    update_interval: 40
+    # Number of recent confident frames kept for dynamic-template selection.
+    memory_window: 30
+    # Confidence required before a frame can enter the dynamic-template memory.
+    admit_conf_threshold: 0.83
+    # Lower clamp on the running-confidence smoother.
+    running_confidence_floor: 0.50
+    # IoU required between consecutive boxes before admitting a template update.
+    admit_iou_threshold: 0.6
+    # First frames treated as template warm-up.
+    warmup_frames: 5                 # [944f2b8] was 5 (current 6)
+    # Frames between dynamic-template re-selection during warm-up.
+    warmup_update_interval: 2
+    # During warm-up, consider only this many recent memory entries.
+    warmup_memory_window: 8
+    # Blur gate did NOT exist at 944f2b8 — disable to match baseline.
+    blur_gate_enabled: False         # [944f2b8] feature added later; off for parity
+    blur_gate_ratio: 1.3
+    blur_gate_ema_alpha: 1
+    blur_gate_update_ema_on_selected_only: True
+
+
+# =============================================================================
+# ram_tracker: SiamRAM config (grouped, single source of truth).
+# =============================================================================
+ram_tracker:
+
+  # ---------------------------------------------------------------------------
+  # runtime: general-purpose switches.
+  # ---------------------------------------------------------------------------
+  runtime:
+    # Print verbose diagnostics from the tracker (useful when debugging).
+    debug: False
+    # Downscale every input frame so its long edge is at most this many px.
+    max_proc_long_edge: 1280         # [944f2b8] was 1280 (current 10000)
+
+  # ---------------------------------------------------------------------------
+  # yolo: re-detector used for occlusion recovery.
+  # ---------------------------------------------------------------------------
+  yolo:
+    yolo_weights: "checkpoints/yolo11n.pt"
+    yolo_conf: 0.30
+    yolo_imgsz: 320                  # [944f2b8] was 320 (current 640)
+    yolo_augment: false
+    yolo_filter_class: false
+    yolo_class_detect_frames: 5
+    copile_yolo: false
+    yolo_warmup_frames: 0
+    yolo_warmup_center_scale: 0.4
+    yolo_search_expand: 100
+
+  # ---------------------------------------------------------------------------
+  # descriptor: which appearance model is used for re-ID & DRM ranking.
+  # ---------------------------------------------------------------------------
+  descriptor:
+    descriptor_backend: "osnet"
+    siamese_feature_source: "neck"
+    siamese_comparison_mode: "similarity"
+    osnet_model_name: "osnet_x0_25"
+    osnet_pretrained_checkpoint: ""
+    osnet_model_path: ""
+    osnet_device: "auto"
+    osnet_max_candidate_batch: 5
+    descriptor_stride: 2
+
+  # ---------------------------------------------------------------------------
+  # template_drm_gate: DID NOT EXIST at 944f2b8 (no DRM template-admit gate).
+  # Disable so dynamic-template admission uses only the inner score/IoU gates.
+  # ---------------------------------------------------------------------------
+  template_drm_gate:
+    dynamic_template_drm_admit_enabled: False   # [944f2b8] feature added later; off for parity
+    dynamic_template_drm_admit_margin: auto
+
+  # ---------------------------------------------------------------------------
+  # camera_motion: estimating and reacting to the camera moving between frames.
+  # ---------------------------------------------------------------------------
+  # >>> UNRESOLVABLE FROM CONFIG (#1) <<<
+  # At 944f2b8 camera_motion also contained a target_motion_adapt block with
+  # target_motion_template_adapt_enabled: True (px_threshold 22, N 10, window 10),
+  # which swapped the dynamic-template cadence/window when the OBJECT moved fast.
+  # The current code REMOVED that feature entirely (the kwargs are no longer
+  # read), so it cannot be restored from config. This is the main behavioral gap
+  # vs 944f2b8. (The camera_motion_template_adapt and template_rate blocks were
+  # OFF at 944f2b8, so dropping them is harmless.)
+  camera_motion:
+    core:
+      homography_mode: "classic"
+      disable_camera_motion: False
+    gating:
+      # NOTE: 944f2b8 also had block_distractor_mode_on_camera_motion: True, but
+      # distractor mode is gone from the current code (and was unreachable at
+      # 944f2b8 anyway since spike_reject_enabled was False), so it is omitted.
+      block_occlusion_on_camera_motion: false
+      camera_motion_heavy_disp_threshold: 20.0
+      camera_motion_heavy_norm_threshold: 0.3
+
+  # ---------------------------------------------------------------------------
+  # gmc_prior: warp the previous bbox forward by camera motion.
+  # ---------------------------------------------------------------------------
+  # NOTE: 944f2b8 had gmc_prior_skip_in_distractor_mode: true here; distractor
+  # mode is gone from current code so that key is dropped (no behavior change).
+  gmc_prior:
+    gmc_prior_enabled: true
+    gmc_prior_require_reliable_h: true
+    gmc_prior_max_translation_frac: 0.25
+    gmc_prior_min_scale: 0.7
+    gmc_prior_max_scale: 1.4
+    gmc_prior_max_rotation_deg: 25.0
+    gmc_prior_max_corner_displacement_frac: 0.25
+
+  # ---------------------------------------------------------------------------
+  # roi_search: where YOLO looks for re-detection candidates.
+  # ---------------------------------------------------------------------------
+  roi_search:
+    normal:
+      roi_start_expand: 20
+      search_expand_growth_factor: 1.4
+      search_expand_growth_every: 150
+      search_expand_max: 500.0
+
+    tiny:
+      long_distance_area_fraction: 0.03
+      tiny_roi_start_expand: 8.0
+      tiny_yolo_search_expand: 20.0
+      tiny_search_expand_growth_factor: 1.3
+      tiny_search_expand_growth_every: 150
+      tiny_search_expand_max: 40.0
+
+    out_of_frame:
+      out_of_frame_roi_edge_pin_enabled: true
+      out_of_frame_roi_use_tiny_params: false
+      out_of_frame_roi_skip_when_past_edge_mult: 2.0
+      out_of_frame_roi_start_expand: -1.0
+      out_of_frame_yolo_search_expand: -1.0
+      out_of_frame_search_expand_growth_factor: -1.0
+      out_of_frame_search_expand_growth_every: -1
+
+    # explore_burst DID NOT EXIST at 944f2b8 — disable for parity.
+    explore_burst:
+      occ_explore_burst_enabled: False   # [944f2b8] feature added later; off for parity
+      occ_explore_burst_every: 20
+      occ_explore_burst_mult: 2.0
+
+    # provisional_emit DID NOT EXIST at 944f2b8 — disable so occlusion frames
+    # emit a zero bbox (legacy behavior), matching baseline output.
+    provisional_emit:
+      occ_emit_provisional: False        # [944f2b8] feature added later; off for parity
+      occ_provisional_select: nearest
+
+  # ---------------------------------------------------------------------------
+  # memory_history: rolling buffers used by occlusion recovery & analysis.
+  # ---------------------------------------------------------------------------
+  memory_history:
+    mem_capacity: 50
+    history_decay: 0.1
+    conf_history_len: 200
+    size_history_len: 200
+    history_skip_last: 8
+    shrinkage_max_lookback: 30
+
+  # ---------------------------------------------------------------------------
+  # occlusion: the lost-target recovery lifecycle.
+  # ---------------------------------------------------------------------------
+  occlusion:
+
+    entry:
+      # 944f2b8 used a FIXED threshold of 0.5 (not "auto"). A numeric value here
+      # makes the conf_threshold_auto_* knobs below dormant.
+      conf_threshold: 0.5            # [944f2b8] fixed 0.5 (current "auto")
+      conf_threshold_auto_in_min: 0.60
+      conf_threshold_auto_in_max: 1
+      conf_threshold_auto_out_min: 0.4
+      conf_threshold_auto_out_max: 0.75
+      conf_threshold_auto_ema_alpha: 0.01
+      conf_threshold_auto_warmup: 0.50
+      conf_threshold_auto_n_frames: 1
+      conf_threshold_auto_min_samples: 1
+      entry_patience: 1
+      entry_patience_high_motion: 1
+      enter_occlusion_on_loss: True
+      no_occlusion_first_n_frames: 18
+      nudge_alpha: 0.0
+
+    # >>> UNRESOLVABLE FROM CONFIG (#2) <<<
+    # detectability_probe is enabled in both 944f2b8 and now, but the
+    # NOT-DETECTABLE recovery path was reworked in code:
+    #   944f2b8: not detectable -> rely solely on phase0_siam; YOLO collection
+    #            was SKIPPED (no yolo_undetectable_conf existed).
+    #   current: not detectable -> skip phase-0 siam seed and run YOLO at the
+    #            lower yolo_undetectable_conf to surface candidates for DRM.
+    # This is a code-flow difference config cannot revert. yolo_undetectable_conf
+    # is set equal to yolo_conf below to minimize divergence, but the path still
+    # differs whenever the probe judges the target not-detectable.
+    detectability_probe:
+      yolo_detectability_enabled: true   # [944f2b8] was true (current False)
+      yolo_detectability_probe_attempts: 12
+      yolo_detectability_probe_stride: 10
+      yolo_detectability_min_hits: 1
+      yolo_detectability_iou_thr: 0.3
+      yolo_undetectable_conf: 0.30       # set = yolo_conf to reduce divergence (see note)
+
+    phase0_siam:
+      # 944f2b8 used FIXED values (not "auto"); numeric disables the auto_* knobs.
+      occ_siam_reacq_threshold: 0.8  # [944f2b8] fixed 0.8 (current "auto")
+      occ_siam_reacq_threshold_auto_min: 0.65
+      occ_siam_reacq_threshold_auto_max: 0.8
+      occ_siam_reacq_threshold_auto_delta: 0.05
+      occ_siam_reacq_threshold_auto_ema_alpha: 0.2
+      occ_siam_reacq_threshold_auto_n_frames: 10
+      occ_siam_reacq_threshold_auto_warmup: 0.80
+      occ_siam_reacq_threshold_auto_min_samples: 5
+      occ_siam_margin: 0.5           # [944f2b8] was 0.5 (current 0.0)
+      app_match_threshold: 0.6       # [944f2b8] fixed 0.6 (current "auto")
+      app_match_threshold_auto_min: 0.55
+      app_match_threshold_auto_max: 0.80
+      app_match_threshold_auto_delta: 0.10
+      app_match_threshold_auto_ema_alpha: 0.2
+      app_match_threshold_auto_n_frames: 10
+      app_match_threshold_auto_warmup: 0.72
+      app_match_threshold_auto_min_samples: 5
+
+    phase1_collect:
+      cand_collection_frames: 1
+
+    phase2_final_drm:
+
+      drm:
+        drm_tau_sim: 0.75
+        drm_mmin: 3
+        drm_capacity: 50
+        drm_margin: auto             # baseline also "auto"
+        drm_margin_auto_min: 0.5
+        drm_margin_auto_max: 0.80    # [944f2b8] was 0.80 (current 0.76)
+        drm_margin_auto_delta: 0.05
+        drm_margin_auto_ema_alpha: 0.2   # [944f2b8] was 0.2 (current 0.3)
+        drm_margin_auto_n_frames: 10
+        drm_margin_auto_warmup: 0.70
+        drm_margin_auto_min_samples: 5
+        drm_skip_threshold: 23
+        drm_top_k: 3
+        # 944f2b8 had no aggregation knob; behavior was the legacy "max".
+        drm_score_aggregation: "max"     # [944f2b8] legacy max (current "mean")
+        drm_score_aggregation_topk: 3
+        drm_gamma: 0
+        drm_lam_app: 1
+        drm_lam_dist: 0.0
+        drm_lam_cand_dir: 0.0
+        drm_lam_time: 0.0
+        drm_lam_iou: 0.0
+        drm_lam_mot: 0.0
+
+      velocity:
+        vel_score_min_speed: 0.5
+        vel_dir_hard_gate: 0.4
+        velocity_window_average: 200
+
+    reacquire_confirm:
+      # 944f2b8 used a FIXED 0.7 (not "auto"); numeric disables the auto_* knobs.
+      reacq_threshold: 0.7           # [944f2b8] fixed 0.7 (current "auto")
+      reacq_threshold_auto_min: 0.7
+      reacq_threshold_auto_max: 0.8
+      reacq_threshold_auto_delta: 0.05
+      reacq_threshold_auto_ema_alpha: 0.02
+      reacq_threshold_auto_n_frames: 1
+      reacq_threshold_auto_warmup: 0.70
+      reacq_threshold_auto_min_samples: 1
+      reacq_confirm_frames: 1
+
+    policy:
+      early_occlusion_entry_n_frames: -1
+      early_occlusion_max_frames: -1
+      occlusion_use_ram_until_drm_full: false

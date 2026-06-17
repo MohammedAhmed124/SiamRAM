@@ -77,7 +77,10 @@ silence_noisy_libraries()
 import pandas as pd
 from omegaconf import OmegaConf
 
-from models.SiamABC.tracker.tracker_setup import get_tracker
+from models.SiamABC.tracker.tracker_setup import (
+    get_tracker,
+    normalize_tracker_config_aliases,
+)
 from models.siamram.config import (
     OSNET_CHECKPOINT_CHOICES,
     flatten_ram_tracker_config,
@@ -763,18 +766,50 @@ TRACKER_CONFIG_ALIASES = {
     "warmup_template_memory_window": "warmup_window_size",
 }
 
+HANNING_WINDOW_PENALTY_ALIASES = {
+    "enabled": "hanning_window_enabled",
+    "window_type": "windowing",
+    "influence": "window_influence",
+    "size_penalty_enabled": "size_penalty_enabled",
+    "size_penalty_k": "penalty_k",
+    "bbox_size_smoothing_enabled": "smooth",
+    "bbox_size_smoothing_lr": "lr",
+}
+
+ARCHITECTURAL_CONFIG_ALIASES = {
+    "score_grid_stride": "total_stride",
+    "score_grid_size": "score_size",
+    "template_context_padding": "template_bbox_offset",
+    "search_context_scale": "search_context",
+    "search_crop_size": "instance_size",
+    "template_crop_size": "template_size",
+}
+
+DYNAMIC_TEMPLATE_ALIASES = {
+    "enabled": "dynamic_update",
+    "update_interval": "N",
+    "warmup_update_interval": "warm_up_n",
+    "memory_window": "memory_window_size",
+    "admit_conf_threshold": "dynamic_update_threshold",
+    "running_confidence_floor": "running_confidence_floor_value",
+    "admit_iou_threshold": "iou_threshold",
+    "warmup_frames": "warmup_frames",
+    "warmup_memory_window": "warmup_window_size",
+}
+
+
+def _apply_tracker_aliases(tracker_cfg, source_cfg, aliases) -> None:
+    for friendly_key, legacy_key in aliases.items():
+        if friendly_key in source_cfg:
+            tracker_cfg[legacy_key] = source_cfg[friendly_key]
+
 
 def _normalize_tracker_config_aliases(config) -> None:
     """
     Let inference YAML use readable tracker keys while keeping SiamABC internals
     compatible with the original short/legacy names.
     """
-    if "tracker" not in config:
-        return
-    tracker_cfg = config.tracker
-    for friendly_key, legacy_key in TRACKER_CONFIG_ALIASES.items():
-        if friendly_key in tracker_cfg:
-            tracker_cfg[legacy_key] = tracker_cfg[friendly_key]
+    normalize_tracker_config_aliases(config)
 
 
 SUBMISSION_COLUMNS = ["id", "x", "y", "w", "h"]

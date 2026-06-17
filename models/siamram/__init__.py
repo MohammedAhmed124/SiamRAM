@@ -5,11 +5,9 @@ from .config import (
     flatten_ram_tracker_config,
     flatten_subsystem_overrides,
 )
-from .spike_watcher import SpikeWatcher
 
 __all__ = [
     "OSNET_CHECKPOINT_CHOICES",
     "flatten_ram_tracker_config",
     "flatten_subsystem_overrides",
-    "SpikeWatcher",
 ]

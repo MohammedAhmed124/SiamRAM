@@ -104,8 +104,6 @@ class CameraMotionSubsystem:
         self,
         frame: np.ndarray,
     ) -> None:
-        if self._host._gmc_prior_skip_in_distractor_mode and self._host._distractor_mode_active:
-            return
         if self._host.current_bbox is None:
             return
         if self._host._last_H is None:
@@ -160,8 +158,6 @@ class CameraMotionSubsystem:
         weighted_norm = weighted_disp / ref_diag
         inst_norm = inst_disp / ref_diag
         max_norm = max(weighted_norm, inst_norm)
-        # Publish the bbox-relative camera-motion magnitude for the adaptive
-        # template-rate controller (template_rate_auto) and debug overlays.
         self._host._last_cam_motion_norm = float(max_norm)
 
         has_px_gate = self._host._camera_motion_heavy_disp_threshold > 0.0

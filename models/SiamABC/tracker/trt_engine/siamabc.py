@@ -534,7 +534,9 @@ def get_trt_tracker(
     from hydra.utils import instantiate
 
     from ..SiamABC_Tracker import SiamABCTracker
+    from ..tracker_setup import normalize_tracker_config_aliases
 
+    normalize_tracker_config_aliases(config)
     siamram_log("Loading model weights", phase="TRT", status="load")
     # Building the torchvision backbone with the legacy `pretrained=` argument
     # emits harmless UserWarnings from native/3rd-party code; keep the load step

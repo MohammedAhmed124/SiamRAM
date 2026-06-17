@@ -70,9 +70,6 @@ def _tracker_visual_mode(tracker, result, is_dam: bool) -> str:
     if not is_dam:
         return "tracking"
     in_occlusion = bool(result[2]) if len(result) > 2 else False
-    raw_mode = str(getattr(tracker, "visual_mode", "")).strip().lower()
-    if raw_mode == "distractor":
-        return "distractor"
     if in_occlusion:
         return "occluded"
     return "tracking"
@@ -223,7 +220,6 @@ def _draw_legend(
     canvas: np.ndarray,
     x: int,
     y: int,
-    include_distractor: bool = False,
 ) -> None:
     """
     Inputs:
@@ -252,175 +248,12 @@ def _draw_legend(
         (C_SEARCH, "Search region"),
         ((0, 165, 255), "YOLO ROI"),
     ]
-    if include_distractor:
-        entries.insert(4, ((0, 0, 255), "Pred  distractor reject"))
     for i, (color, text) in enumerate(entries):
         iy = y + i * 16
         cv2.rectangle(canvas, (x, iy - 9), (x + 12, iy + 3), color, -1)
         cv2.putText(
             canvas, text, (x + 16, iy), FONT, 0.35, (210, 210, 210), 1, cv2.LINE_AA
         )
-
-
-def _draw_velocity_curves(
-    canvas: np.ndarray,
-    x: int,
-    y: int,
-    w: int,
-    h: int,
-    expected_hist: List[float],
-    actual_hist: List[float],
-    distractor_hist: List[bool] | None = None,
-) -> None:
-    """
-    Draw overlapping spike-logic curves.
-
-    expected_hist is the spike baseline norm history.
-    actual_hist is the current camera-compensated step norm history.
-    NaN values are allowed and are treated as gaps in the line.
-    """
-    if w < 40 or h < 30:
-        return
-
-    x1 = int(max(0, x))
-    y1 = int(max(0, y))
-    x2 = int(min(canvas.shape[1] - 1, x + w))
-    y2 = int(min(canvas.shape[0] - 1, y + h))
-    if x2 <= x1 + 2 or y2 <= y1 + 2:
-        return
-
-    pw = x2 - x1
-    ph = y2 - y1
-
-    C_BG = (22, 22, 22)
-    C_GRID = (55, 55, 55)
-    C_AXIS = (110, 110, 110)
-    C_EXPECTED = (255, 190, 0)
-    C_ACTUAL = (255, 120, 220)
-    C_TEXT = (220, 220, 220)
-
-    cv2.rectangle(canvas, (x1, y1), (x2, y2), C_BG, -1)
-    cv2.rectangle(canvas, (x1, y1), (x2, y2), C_AXIS, 1)
-
-    n_grid = 4
-    for i in range(1, n_grid):
-        gy = y1 + int(i * ph / n_grid)
-        cv2.line(canvas, (x1 + 1, gy), (x2 - 1, gy), C_GRID, 1)
-
-    if distractor_hist:
-        n_mask = min(len(distractor_hist), len(expected_hist), len(actual_hist))
-        if n_mask >= 2:
-            mask = list(distractor_hist)[-n_mask:]
-            i = 0
-            while i < n_mask:
-                if not mask[i]:
-                    i += 1
-                    continue
-                j = i
-                while j + 1 < n_mask and mask[j + 1]:
-                    j += 1
-                t0 = float(i) / float(n_mask - 1)
-                t1 = float(j) / float(n_mask - 1)
-                sx = x1 + int(t0 * (pw - 1))
-                ex = x1 + int(t1 * (pw - 1))
-                cv2.rectangle(canvas, (sx, y1 + 1), (ex, y2 - 1), (0, 180, 210), -1)
-                i = j + 1
-
-    valid_vals = [
-        float(v)
-        for v in list(expected_hist) + list(actual_hist)
-        if np.isfinite(v) and float(v) >= 0.0
-    ]
-    # Use full-range scaling so extreme velocity spikes remain visible
-    # instead of being compressed by percentile capping.
-    vmax = max(1.0, float(max(valid_vals)) * 1.08) if valid_vals else 1.0
-
-    title = "Spike Curves (norm)"
-    cv2.putText(
-        canvas,
-        title,
-        (x1 + 6, y1 + 14),
-        FONT,
-        0.38,
-        C_TEXT,
-        1,
-        cv2.LINE_AA,
-    )
-
-    def _plot_series(vals: List[float], color) -> None:
-        n = len(vals)
-        if n < 2:
-            return
-        prev_pt = None
-        for i in range(n):
-            v = float(vals[i])
-            if not np.isfinite(v):
-                prev_pt = None
-                continue
-            t = 0.0 if n == 1 else float(i) / float(n - 1)
-            px = x1 + int(t * (pw - 1))
-            py = y2 - 1 - int(np.clip(v / vmax, 0.0, 1.0) * (ph - 1))
-            pt = (px, py)
-            if prev_pt is not None:
-                cv2.line(canvas, prev_pt, pt, color, 2, cv2.LINE_AA)
-            prev_pt = pt
-
-    _plot_series(expected_hist, C_EXPECTED)
-    _plot_series(actual_hist, C_ACTUAL)
-
-    cv2.line(canvas, (x1 + 7, y2 - 14), (x1 + 22, y2 - 14), C_EXPECTED, 2, cv2.LINE_AA)
-    cv2.putText(
-        canvas,
-        "Baseline",
-        (x1 + 26, y2 - 10),
-        FONT,
-        0.34,
-        C_TEXT,
-        1,
-        cv2.LINE_AA,
-    )
-    cv2.line(canvas, (x1 + 94, y2 - 14), (x1 + 109, y2 - 14), C_ACTUAL, 2, cv2.LINE_AA)
-    cv2.putText(
-        canvas,
-        "Step",
-        (x1 + 113, y2 - 10),
-        FONT,
-        0.34,
-        C_TEXT,
-        1,
-        cv2.LINE_AA,
-    )
-    cv2.rectangle(canvas, (x1 + 166, y2 - 18), (x1 + 179, y2 - 9), (0, 180, 210), -1)
-    cv2.putText(
-        canvas,
-        "Distractor",
-        (x1 + 183, y2 - 10),
-        FONT,
-        0.34,
-        C_TEXT,
-        1,
-        cv2.LINE_AA,
-    )
-
-    exp_now = float(expected_hist[-1]) if expected_hist and np.isfinite(expected_hist[-1]) else np.nan
-    act_now = float(actual_hist[-1]) if actual_hist and np.isfinite(actual_hist[-1]) else np.nan
-    ratio_now = (
-        float(act_now / (exp_now + 1e-6))
-        if np.isfinite(exp_now) and np.isfinite(act_now)
-        else np.nan
-    )
-    ratio_txt = f"{ratio_now:.2f}" if np.isfinite(ratio_now) else "n/a"
-    cv2.putText(
-        canvas,
-        f"B:{exp_now:.2f}  S:{act_now:.2f}  R:{ratio_txt}  max:{vmax:.2f}",
-        (x1 + 6, y1 + 30),
-        FONT,
-        0.34,
-        C_TEXT,
-        1,
-        cv2.LINE_AA,
-    )
-
 
 def _refresh_panels(
     tracker,
@@ -619,30 +452,13 @@ def run_inference(
 
     if output_video:
         C_OCCLUDED = (0, 0, 220)
-        C_DISTRACTOR = (0, 0, 255)
-        C_REAL_HYP = (0, 255, 0)
         C_YOLO_CANDIDATE = (0, 200, 255)
-        C_YOLO_DISTRACTOR = (0, 0, 180)
         C_STATUS_OCC = (0, 0, 200)
         C_STATUS_OK = (0, 180, 0)
-        C_STATUS_DIST = (0, 0, 255)
         C_STATUS_TEXT = (255, 255, 255)
-        show_velocity_overlay = bool(
-            is_dam
-            and (
-                hasattr(tracker, "_spike_reject_enabled")
-                or hasattr(tracker, "_jump_reject_enabled")
-            )
-        )
-        vel_strip_h = 190
-        vel_strip_gap = 8
-        expected_speed_hist = deque(maxlen=320)
-        actual_speed_hist = deque(maxlen=320)
-        distractor_mode_hist = deque(maxlen=320)
 
         top_h = max(h, PANEL_W * 3 + GAP * 2)
-        extra_h = (vel_strip_gap + vel_strip_h) if show_velocity_overlay else 0
-        canvas_h = top_h + extra_h
+        canvas_h = top_h
         total_w = w + PANEL_W
         y_off = (top_h - h) // 2
 
@@ -656,11 +472,6 @@ def run_inference(
             PANEL_W * 2 + GAP * 2: PANEL_W * 3 + GAP * 2,
             w: total_w,
         ]
-        vel_plot_x = 8
-        vel_plot_y = top_h + vel_strip_gap
-        vel_plot_w = max(40, total_w - 16)
-        vel_plot_h = max(30, vel_strip_h - 2)
-
         avi_path = os.path.splitext(output_path)[0] + "_tmp.avi"
         writer = cv2.VideoWriter(
             avi_path, cv2.VideoWriter_fourcc(*"XVID"), fps, (total_w, canvas_h)
@@ -687,12 +498,12 @@ def run_inference(
             """
             Inputs:
                 canvas       - np.ndarray (H x W x 3) the full composite canvas
-                mode - str status mode: "tracking", "occluded", or "distractor"
+                mode - str status mode: "tracking" or "occluded"
 
             What it does:
                 Draws a rounded-rectangle pill badge in the top-left corner of the
-                frame area. The pill is red for occlusion recovery, yellow for
-                distractor rejection, and green for normal tracking. Uses three draw
+                frame area. The pill is red for occlusion recovery and green
+                for normal tracking. Uses three draw
                 calls — a rectangle for the body and two circles for the caps — to
                 approximate rounded corners without requiring a custom shape routine.
 
@@ -709,9 +520,6 @@ def run_inference(
             if m == "occluded":
                 label = "OCCLUDED"
                 color = C_STATUS_OCC
-            elif m == "distractor":
-                label = "DISTRACTOR"
-                color = C_STATUS_DIST
             else:
                 label = "TRACKING"
                 color = C_STATUS_OK
@@ -775,45 +583,6 @@ def run_inference(
                 cv2.LINE_AA,
             )
 
-        def _draw_target_motion_pill(
-            canvas: np.ndarray,
-            fast: bool,
-            speed: float,
-        ) -> None:
-            """
-            Draws a pill directly below the camera-motion pill (top-right)
-            reporting target speed (on-screen px/frame) and a fast/slow verdict,
-            mirroring _draw_camera_motion_pill's style. "Fast" uses the same
-            speed-vs-bbox-diagonal reference the adaptive template-rate controller
-            uses, so the verdict matches what template_rate_auto reacts to.
-            """
-            if fast:
-                label = "TARGET FAST"
-                color = (0, 0, 255)
-            else:
-                label = "TARGET SLOW"
-                color = C_STATUS_OK
-            label = f"{label}  {speed:.0f}px/f"
-            ph = 28
-            (tw, th), _ = cv2.getTextSize(label, FONT, 0.50, 1)
-            pw = max(150, tw + 28)
-            px = max(8, w - pw - 8)
-            py = y_off + 8 + ph + 6
-            r = ph // 2
-            cv2.rectangle(canvas, (px + r, py), (px + pw - r, py + ph), color, -1)
-            cv2.circle(canvas, (px + r, py + r), r, color, -1)
-            cv2.circle(canvas, (px + pw - r, py + r), r, color, -1)
-            cv2.putText(
-                canvas,
-                label,
-                (px + (pw - tw) // 2, py + (ph + th) // 2 - 1),
-                FONT,
-                0.50,
-                C_STATUS_TEXT,
-                1,
-                cv2.LINE_AA,
-            )
-
         tracker.initialize(first_bgr, initial_bbox)
         _refresh_panels(
             inner_tracker,
@@ -836,29 +605,7 @@ def run_inference(
         cv2.putText(
             canvas, "F:0  INIT", (156, y_off + 22), FONT, 0.45, C_FRAME, 1, cv2.LINE_AA
         )
-        if not show_velocity_overlay:
-            _draw_legend(canvas, w + 4, canvas_h - 90)
-        if show_velocity_overlay:
-            expected_speed_hist.append(np.nan)
-            actual_speed_hist.append(np.nan)
-            distractor_mode_hist.append(False)
-            cv2.line(
-                canvas,
-                (0, top_h + vel_strip_gap // 2),
-                (total_w - 1, top_h + vel_strip_gap // 2),
-                (90, 90, 90),
-                1,
-            )
-            _draw_velocity_curves(
-                canvas,
-                x=vel_plot_x,
-                y=vel_plot_y,
-                w=vel_plot_w,
-                h=vel_plot_h,
-                expected_hist=list(expected_speed_hist),
-                actual_hist=list(actual_speed_hist),
-                distractor_hist=list(distractor_mode_hist),
-            )
+        _draw_legend(canvas, w + 4, canvas_h - 90)
         writer.write(canvas)
         progress.update("tracking")
 
@@ -897,9 +644,7 @@ def run_inference(
             visual_details = ""
             if is_dam and hasattr(tracker, "visual_mode"):
                 raw_mode = str(getattr(tracker, "visual_mode", "")).strip().lower()
-                if raw_mode == "distractor":
-                    visual_mode = "distractor"
-                elif not in_occlusion and raw_mode == "tracking":
+                if not in_occlusion and raw_mode == "tracking":
                     visual_mode = raw_mode
                 visual_reason = str(getattr(tracker, "visual_reason", "")).strip()
                 visual_details = str(getattr(tracker, "visual_details", "")).strip()
@@ -913,18 +658,6 @@ def run_inference(
             progress.update(visual_mode)
 
             if output_video:
-                if show_velocity_overlay:
-                    expected_speed = float(
-                        getattr(tracker, "_spike_debug_baseline_norm", np.nan)
-                    )
-                    actual_speed = float(
-                        getattr(tracker, "_spike_debug_speed_norm", np.nan)
-                    )
-
-                    expected_speed_hist.append(expected_speed)
-                    actual_speed_hist.append(actual_speed)
-                    distractor_mode_hist.append(visual_mode == "distractor")
-
                 cur_dyn_bbox = inner_tracker.running_dynamic_bbox
                 cur_dyn_obj = inner_tracker.running_dynamic_image
                 template_updated = not np.array_equal(cur_dyn_bbox, last_dyn_bbox)
@@ -982,70 +715,22 @@ def run_inference(
                     )
 
                 if in_occlusion and yolo_dets:
-                    held = tracker.held_box if is_dam else None
                     for det in yolo_dets:
                         dx, dy, dw, dh = map(int, det)
-                        is_dist = (
-                            held is not None and _iou(det, held) >= tracker.tau_occ
-                        )
-                        color = C_YOLO_DISTRACTOR if is_dist else C_YOLO_CANDIDATE
                         cv2.rectangle(
                             canvas,
                             (dx, dy + y_off),
                             (dx + dw, dy + dh + y_off),
-                            color,
+                            C_YOLO_CANDIDATE,
                             1,
                         )
                         cv2.putText(
                             canvas,
-                            "D" if is_dist else "Y",
+                            "Y",
                             (dx + 2, dy + y_off + 12),
                             FONT,
                             0.38,
-                            color,
-                            1,
-                            cv2.LINE_AA,
-                        )
-                elif visual_mode == "distractor" and is_dam:
-                    real_hyps = list(getattr(tracker, "_distractor_mode_visual_reals", []))
-                    dist_hyps = list(
-                        getattr(tracker, "_distractor_mode_visual_distractors", [])
-                    )
-                    for bb in real_hyps:
-                        rx, ry, rw_, rh_ = _overlay_bbox(bb, overlay_scale)
-                        cv2.rectangle(
-                            canvas,
-                            (rx, ry + y_off),
-                            (rx + rw_, ry + rh_ + y_off),
-                            C_REAL_HYP,
-                            2,
-                        )
-                        cv2.putText(
-                            canvas,
-                            "REAL",
-                            (rx + 2, max(12, ry + y_off - 4)),
-                            FONT,
-                            0.40,
-                            C_REAL_HYP,
-                            1,
-                            cv2.LINE_AA,
-                        )
-                    for bb in dist_hyps:
-                        dx, dy, dw_, dh_ = _overlay_bbox(bb, overlay_scale)
-                        cv2.rectangle(
-                            canvas,
-                            (dx, dy + y_off),
-                            (dx + dw_, dy + dh_ + y_off),
-                            C_DISTRACTOR,
-                            2,
-                        )
-                        cv2.putText(
-                            canvas,
-                            "D",
-                            (dx + 2, max(12, dy + y_off - 4)),
-                            FONT,
-                            0.40,
-                            C_DISTRACTOR,
+                            C_YOLO_CANDIDATE,
                             1,
                             cv2.LINE_AA,
                         )
@@ -1053,8 +738,6 @@ def run_inference(
                 bx, by, bw, bh = map(int, bbox)
                 if visual_mode == "occluded":
                     pred_color = C_OCCLUDED
-                elif visual_mode == "distractor":
-                    pred_color = C_REAL_HYP
                 else:
                     pred_color = _confidence_color(score)
                 cv2.rectangle(
@@ -1078,45 +761,9 @@ def run_inference(
                         heavy=bool(getattr(tracker, "_last_heavy_cam_motion", False)),
                         disp=float(getattr(tracker, "_last_heavy_cam_disp", 0.0)),
                     )
-                    # Target speed pill, mirroring the camera-motion pill. velocity
-                    # is in processed-frame px/frame; overlay_scale maps it back to
-                    # on-screen px/frame, and the bbox diagonal (display coords)
-                    # gives the same fast/slow reference template_rate_auto uses.
-                    tgt_speed_disp = (
-                        float(np.linalg.norm(getattr(tracker, "velocity", np.zeros(2))))
-                        * overlay_scale
-                    )
-                    tgt_diag = max(
-                        1.0, float(np.hypot(float(bbox[2]), float(bbox[3])))
-                    )
-                    # When the binary target-motion adapt is on, "fast" is the
-                    # absolute px/frame threshold it gates on; otherwise fall back
-                    # to template_rate_auto's bbox-diagonal reference.
-                    if getattr(
-                        tracker, "_target_motion_template_adapt_enabled", False
-                    ):
-                        tm_thr = float(
-                            getattr(tracker, "_target_motion_high_px_threshold", 0.0)
-                        )
-                        tgt_fast = tm_thr > 0.0 and tgt_speed_disp >= tm_thr
-                    else:
-                        tgt_ref_norm = float(
-                            getattr(
-                                tracker, "_template_rate_auto_target_ref_norm", 0.15
-                            )
-                        )
-                        tgt_fast = (
-                            tgt_ref_norm > 0.0
-                            and tgt_speed_disp >= tgt_ref_norm * tgt_diag
-                        )
-                    _draw_target_motion_pill(
-                        canvas, fast=bool(tgt_fast), speed=tgt_speed_disp
-                    )
 
                 if visual_mode == "occluded":
                     hud = f"F:{frame_idx}  [DAM RECOVERY]"
-                elif visual_mode == "distractor":
-                    hud = f"F:{frame_idx}  [DISTRACTOR REJECT]"
                 elif template_updated:
                     hud = f"F:{frame_idx}  [TMPL UPDATE]"
                 else:
@@ -1124,37 +771,7 @@ def run_inference(
                 cv2.putText(
                     canvas, hud, (156, y_off + 22), FONT, 0.45, C_FRAME, 1, cv2.LINE_AA
                 )
-                if visual_mode == "distractor":
-                    if visual_reason:
-                        cv2.putText(
-                            canvas,
-                            visual_reason,
-                            (156, y_off + 40),
-                            FONT,
-                            0.42,
-                            C_DISTRACTOR,
-                            1,
-                            cv2.LINE_AA,
-                        )
-                    if visual_details:
-                        cv2.putText(
-                            canvas,
-                            visual_details,
-                            (156, y_off + 58),
-                            FONT,
-                            0.36,
-                            C_DISTRACTOR,
-                            1,
-                            cv2.LINE_AA,
-                        )
-
-                if not show_velocity_overlay:
-                    _draw_legend(
-                        canvas,
-                        w + 4,
-                        canvas_h - 90,
-                        include_distractor=(visual_mode == "distractor"),
-                    )
+                _draw_legend(canvas, w + 4, canvas_h - 90)
 
                 if is_dam and in_occlusion:
                     proc_frame = (
@@ -1181,58 +798,11 @@ def run_inference(
                         1,
                         cv2.LINE_AA,
                     )
-                elif is_dam and visual_mode == "distractor":
-                    d_roi = getattr(tracker, "_distractor_mode_roi", None)
-                    if d_roi is not None and len(d_roi) >= 4:
-                        rx, ry, rw, rh = _overlay_bbox(d_roi[:4], overlay_scale)
-                        cv2.rectangle(
-                            canvas,
-                            (rx, ry + y_off),
-                            (rx + rw, ry + rh + y_off),
-                            (0, 165, 255),
-                            1,
-                        )
-                        cv2.putText(
-                            canvas,
-                            "DIST ROI",
-                            (rx + 2, ry + y_off + 12),
-                            FONT,
-                            0.38,
-                            (0, 165, 255),
-                            1,
-                            cv2.LINE_AA,
-                        )
-
-                if show_velocity_overlay:
-                    cv2.line(
-                        canvas,
-                        (0, top_h + vel_strip_gap // 2),
-                        (total_w - 1, top_h + vel_strip_gap // 2),
-                        (90, 90, 90),
-                        1,
-                    )
-                    _draw_velocity_curves(
-                        canvas,
-                        x=vel_plot_x,
-                        y=vel_plot_y,
-                        w=vel_plot_w,
-                        h=vel_plot_h,
-                        expected_hist=list(expected_speed_hist),
-                        actual_hist=list(actual_speed_hist),
-                        distractor_hist=list(distractor_mode_hist),
-                    )
-
                 # Right-column readout stack, drawn LAST so the full-width
-                # velocity strip can't paint over it. Bottom-anchored: each box
-                # stacks upward from there. Pinned to the bottom of the velocity
-                # strip when present, else just below the side panels.
+                # panels stay readable. Bottom-anchored: each box stacks upward.
                 stack_x0 = w + 4
                 stack_x1 = total_w - 4
-                stack_y = (
-                    canvas_h - 6
-                    if show_velocity_overlay
-                    else min(canvas_h - 6, PANEL_W * 3 + GAP * 2 + 92)
-                )
+                stack_y = min(canvas_h - 6, PANEL_W * 3 + GAP * 2 + 92)
 
                 def _stack_box(y_bottom, line1, line2, fg):
                     y_top = y_bottom - 40
@@ -1257,36 +827,53 @@ def run_inference(
                 auto_margin = getattr(tracker, "_drm_margin_auto", None) if is_dam else None
                 if auto_margin is not None:
                     ema = auto_margin.ema
+                    cur = getattr(tracker, "_last_drm_self_score", None)
+                    cur_txt = "--" if cur is None else f"{float(cur):.3f}"
                     m_l2 = (
-                        "(auto, warmup)"
+                        f"(auto, warmup) cur={cur_txt}"
                         if ema is None
-                        else f"(auto) ema={ema:.3f} n={auto_margin.samples}"
+                        else f"(auto) ema={ema:.3f} cur={cur_txt} n={auto_margin.samples}"
                     )
                     stack_y = _stack_box(
                         stack_y, f"DRM margin: {auto_margin.value:.3f}", m_l2, (0, 220, 220)
                     )
 
-                # (2) Dynamic-template update rate (N / window). Always shown; the
-                # second line says whether template_rate_auto is driving it this
-                # frame (and the smoothed 0..1 motion) or it's a fixed rate.
-                if is_dam:
-                    n_cur = int(getattr(inner_tracker, "N", 0))
-                    win_cur = int(getattr(inner_tracker, "memory_window_size", 0))
-                    tr_auto = getattr(tracker, "_template_rate_auto", None)
-                    if tr_auto is not None:
-                        tr_l2 = f"(auto) motion={tr_auto.motion:.2f}"
-                    elif getattr(
-                        tracker, "_target_motion_template_adapt_enabled", False
-                    ):
-                        spd = float(getattr(tracker, "_last_target_motion_px", 0.0))
-                        thr = float(
-                            getattr(tracker, "_target_motion_high_px_threshold", 0.0)
-                        )
-                        tr_l2 = f"(tgt) {spd:.0f}>={thr:.0f}px/f"
-                    else:
-                        tr_l2 = "(fixed)"
+                auto_reacq = (
+                    getattr(tracker, "_reacq_threshold_auto", None) if is_dam else None
+                )
+                if auto_reacq is not None:
+                    ema = auto_reacq.ema
+                    cur = getattr(tracker, "_last_reacq_threshold_score", None)
+                    cur_txt = "--" if cur is None else f"{float(cur):.3f}"
+                    r_l2 = (
+                        f"(auto, warmup) cur={cur_txt}"
+                        if ema is None
+                        else f"(auto) ema={ema:.3f} cur={cur_txt} n={auto_reacq.samples}"
+                    )
                     stack_y = _stack_box(
-                        stack_y, f"Tmpl rate: N={n_cur} win={win_cur}", tr_l2, (0, 210, 140)
+                        stack_y,
+                        f"Reacq thr: {auto_reacq.value:.3f}",
+                        r_l2,
+                        (80, 190, 255),
+                    )
+
+                auto_conf = (
+                    getattr(tracker, "_conf_threshold_auto", None) if is_dam else None
+                )
+                if auto_conf is not None:
+                    ema = auto_conf.ema
+                    cur = getattr(tracker, "_last_conf_threshold_score", None)
+                    cur_txt = "--" if cur is None else f"{float(cur):.3f}"
+                    c_l2 = (
+                        f"(auto, warmup) cur={cur_txt}"
+                        if ema is None
+                        else f"(auto) ema={ema:.3f} cur={cur_txt} n={auto_conf.samples}"
+                    )
+                    stack_y = _stack_box(
+                        stack_y,
+                        f"Occ entry: {auto_conf.value:.3f}",
+                        c_l2,
+                        (255, 180, 80),
                     )
 
                 writer.write(canvas)

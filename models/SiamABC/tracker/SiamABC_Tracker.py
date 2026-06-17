@@ -1,6 +1,7 @@
 from collections import deque
 from typing import Dict, Optional, Tuple, Union
 
+import cv2
 import numpy as np
 import torch
 from numpy._typing import NDArray
@@ -198,6 +199,14 @@ class SiamABCTracker(Tracker):
 
         self.all_memory_imgs = deque([[image, rect]], maxlen=self.memory_window_size)
         self.classification_scores = deque([0.5], maxlen=self.memory_window_size)
+
+        dyn_cfg = self.tracking_config.get("dynamic_template", {}) or {}
+        self._blur_gate_enabled = bool(dyn_cfg.get("blur_gate_enabled", False))
+        self._blur_gate_ratio = float(dyn_cfg.get("blur_gate_ratio", 0.6))
+        self._blur_gate_ema_alpha = float(dyn_cfg.get("blur_gate_ema_alpha", 0.1))
+        self._template_sharpness_ema = (
+            self._crop_sharpness(image, rect) if self._blur_gate_enabled else None
+        )
 
         self.running_dynamic_image = image
         self.running_dynamic_bbox = rect
@@ -495,6 +504,36 @@ class SiamABCTracker(Tracker):
                 self._best_score = pred_score
                 self._best_idx = len(self.classification_scores) - 1
 
+    @staticmethod
+    def _crop_sharpness(image: np.ndarray, bbox: np.ndarray) -> float:
+        x, y, w, h = (int(round(float(v))) for v in bbox[:4])
+        ih, iw = image.shape[:2]
+        x0 = max(0, min(x, iw - 1))
+        y0 = max(0, min(y, ih - 1))
+        x1 = max(x0 + 1, min(x + max(1, w), iw))
+        y1 = max(y0 + 1, min(y + max(1, h), ih))
+        crop = image[y0:y1, x0:x1]
+        if crop.size == 0:
+            return 0.0
+        crop = cv2.resize(crop, (64, 64), interpolation=cv2.INTER_AREA)
+        if crop.ndim == 3:
+            crop = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
+        return float(cv2.Laplacian(crop, cv2.CV_64F).var())
+
+    def _blur_admit_ok(self, sharpness: float) -> bool:
+        ref = self._template_sharpness_ema
+        ok = True
+        if ref is not None and ref > 0.0:
+            ok = sharpness >= self._blur_gate_ratio * ref
+        if self._template_sharpness_ema is None:
+            self._template_sharpness_ema = sharpness
+        else:
+            a = min(1.0, max(0.0, self._blur_gate_ema_alpha))
+            self._template_sharpness_ema = (
+                (1.0 - a) * self._template_sharpness_ema + a * sharpness
+            )
+        return ok
+
     def _maybe_store_frame(
         self,
         search: np.ndarray,
@@ -690,7 +729,13 @@ class SiamABCTracker(Tracker):
                 iou_ok = self._compute_iou(
                     pred_bbox, self._prev_bbox
                 ) >= self.tracking_config.get("iou_threshold", 0.3)
-                if iou_ok:
+                blur_ok = True
+                if iou_ok and self._blur_gate_enabled:
+                    sharpness = self._crop_sharpness(search, pred_bbox)
+                    blur_ok = self._blur_admit_ok(sharpness)
+                drm_gate = getattr(self, "_template_admit_drm_gate", None)
+                drm_ok = drm_gate is None or bool(drm_gate())
+                if iou_ok and blur_ok and drm_ok:
                     self._maybe_store_frame(search, pred_bbox, pred_score)
 
             self._prev_bbox = pred_bbox.copy()

@@ -51,7 +51,7 @@ All three are config-gated under `ram_tracker:` in `config/inference_config_expe
 
 | Concern | `frame_dynamics` | `size_adaptive_gate` | `trajectory_filter` |
 |---|---|---|---|
-| Standalone module | [`models/siamram/frame_dynamics.py`](../../models/siamram/frame_dynamics.py) → `FrameDynamicsProcessor` | [`models/siamram/size_adaptive_gate.py`](../models/siamram/size_adaptive_gate.py) → `SizeAdaptiveGate` | [`models/siamram/trajectory_filter.py`](../models/siamram/trajectory_filter.py) → `TrajectoryConstraintFilter` |
+| Standalone module | `models/siamram/frame_dynamics.py` → `FrameDynamicsProcessor` | `models/siamram/size_adaptive_gate.py` → `SizeAdaptiveGate` | `models/siamram/trajectory_filter.py` → `TrajectoryConstraintFilter` |
 | Construction (when enabled) | `tracker.py:949` | `tracker.py:968` | `tracker.py:988` |
 | Host wiring | `tracker.py` → `_apply_frame_dynamics()` (~L5330), called before `self.tracker.update(frame)` at L3249 | `tracker.py` → `_size_adaptive_lam_app()` (~L5385), called at DRM sites `occlusion_recovery.py:293` and `:583` | `observe()` at `tracker.py:1605`/`3535`, `reset()` at `1560`, `filter_candidates()` gate at `tracker.py:3751` |
 | Config dataclass | `config.py` → `FrameDynamicsConfig` | `config.py` → `SizeAdaptiveGateConfig` | `config.py` → `TrajectoryFilterConfig` |

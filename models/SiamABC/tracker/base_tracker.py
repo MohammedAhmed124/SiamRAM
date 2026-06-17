@@ -9,9 +9,8 @@ track of historical frames and bounding boxes.
 import math
 from abc import ABC, abstractmethod
 from collections import deque
-from typing import Any, Callable, Deque, Optional, Tuple, Union
+from typing import Any, Deque, Optional, Tuple, Union
 
-import albumentations as albu
 import numpy as np
 import torch
 import torch.nn as nn
@@ -104,15 +103,9 @@ class Tracker(ABC):
         self.net = model
         self.box_coder = self.get_box_coder(tracking_config, cuda_id)
         self._template_features = None
-        self._template_transform = self._get_default_transform(
-            img_size=tracking_config["template_size"]
-        )
-        self._search_transform = self._get_default_transform(
-            img_size=tracking_config["instance_size"]
-        )
-        self._dynamic_search_transform = self._get_default_transform(
-            img_size=tracking_config["instance_size"]
-        )
+        # Image normalization is done on-GPU in _preprocess_image; the previous
+        # albumentations transforms were built here but never applied (the
+        # transform arg was ignored), so they are dropped entirely.
         self.window = self._get_tracking_window(
             tracking_config["windowing"], tracking_config["score_size"]
         )
@@ -172,24 +165,6 @@ class Tracker(ABC):
             )
         return torch.ones(int(score_size), int(score_size))
 
-    @staticmethod
-    def _get_default_transform(
-        img_size,
-    ):
-        pipeline = albu.Compose(
-            [
-                albu.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-            ]
-        )
-
-        def process(
-            a,
-        ):
-            r = pipeline(image=a)
-            return r["image"]
-
-        return process
-
     def _rescale_bbox(
         self,
         bbox: np.array,
@@ -214,7 +189,6 @@ class Tracker(ABC):
     def _preprocess_image(
         self,
         image: np.ndarray,
-        transform: Optional[Callable[..., Any]] = None,
     ) -> torch.Tensor:
 
         x = torch.from_numpy(image[:, :, :3]).permute(2, 0, 1).unsqueeze(0).float()

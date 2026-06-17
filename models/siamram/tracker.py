@@ -56,6 +56,10 @@ class DRMKwargs(TypedDict):
         skip_threshold (float): Score above which re-verification is skipped.
         lam_dist (float): Weight for spatial distance penalty.
         lam_cand_dir (float): Weight for candidate direction consistency.
+        score_aggregation (str): How to combine scores across DRM anchors
+            ("max" or "mean").
+        score_aggregation_topk (Optional[int]): For "mean", average only the
+            top-k anchors; None averages all anchors (global mean).
     """
 
     lam_iou: float
@@ -69,6 +73,8 @@ class DRMKwargs(TypedDict):
     skip_threshold: float
     lam_dist: float
     lam_cand_dir: float
+    score_aggregation: str
+    score_aggregation_topk: Optional[int]
 
 
 class SiamRAMExperimentTracker:
@@ -111,7 +117,18 @@ class SiamRAMExperimentTracker:
         conf_threshold_auto_warmup: float = 0.50,
         conf_threshold_auto_n_frames: int = 1,
         conf_threshold_auto_min_samples: int = 1,
-        occ_siam_reacq_threshold=0.8,
+        occ_siam_reacq_threshold: "float | str" = 0.8,
+        # Adaptive phase-0 SiamABC reacquisition gate, active only when
+        # occ_siam_reacq_threshold == "auto". Tracks the live SiamABC confidence
+        # distribution (the same signal reacq_threshold:auto observes) but with
+        # its own, deliberately stricter band. A numeric value ignores these.
+        occ_siam_reacq_threshold_auto_min: float = 0.65,
+        occ_siam_reacq_threshold_auto_max: float = 0.90,
+        occ_siam_reacq_threshold_auto_delta: float = 0.05,
+        occ_siam_reacq_threshold_auto_ema_alpha: float = 0.2,
+        occ_siam_reacq_threshold_auto_n_frames: int = 10,
+        occ_siam_reacq_threshold_auto_warmup: float = 0.80,
+        occ_siam_reacq_threshold_auto_min_samples: int = 5,
         reacq_threshold: "float | str" = 0.55,
         reacq_threshold_auto_min: float = 0.50,
         reacq_threshold_auto_max: float = 0.85,
@@ -125,7 +142,18 @@ class SiamRAMExperimentTracker:
         yolo_iou: float = 0.45,
         yolo_imgsz: int = 320,
         yolo_augment: bool = False,
-        app_match_threshold: float = 0.72,
+        app_match_threshold: "float | str" = 0.72,
+        # Adaptive phase-0 DRM acceptance gate, active only when
+        # app_match_threshold == "auto". Tracks the target's DRM composite
+        # self-score (the same signal drm_margin:auto observes) with its own
+        # band. A numeric value ignores these.
+        app_match_threshold_auto_min: float = 0.55,
+        app_match_threshold_auto_max: float = 0.80,
+        app_match_threshold_auto_delta: float = 0.10,
+        app_match_threshold_auto_ema_alpha: float = 0.2,
+        app_match_threshold_auto_n_frames: int = 10,
+        app_match_threshold_auto_warmup: float = 0.72,
+        app_match_threshold_auto_min_samples: int = 5,
         occ_siam_margin=0.2,
         nudge_alpha: float = 0.30,
         tau_occ: float = 0.40,
@@ -158,6 +186,11 @@ class SiamRAMExperimentTracker:
         drm_dist_sigma_factor: float = 2.5,
         drm_lam_cand_dir: float = 0.15,
         drm_lam_cand_vel: float = 0.20,
+        # How per-anchor DRM scores collapse into one candidate score: "max"
+        # (best anchor wins, legacy behaviour) or "mean" (average; with
+        # drm_score_aggregation_topk set, average only the top-k anchors).
+        drm_score_aggregation: str = "max",
+        drm_score_aggregation_topk: Optional[int] = None,
         # Adaptive DRM acceptance margin, active only when drm_margin == "auto".
         # All defaults reproduce a fixed margin until enough samples accrue, and
         # a numeric drm_margin ignores every one of these knobs.
@@ -185,6 +218,11 @@ class SiamRAMExperimentTracker:
         search_expand_growth_factor: float = 1.2,
         search_expand_growth_every: int = 5,
         search_expand_max: float = 15.0,
+        occ_explore_burst_enabled: bool = False,
+        occ_explore_burst_every: int = 10,
+        occ_explore_burst_mult: float = 3.0,
+        occ_emit_provisional: bool = False,
+        occ_provisional_select: str = "nearest",
         long_distance_conf_threshold: float = 0.35,
         long_distance_area_fraction: float = 0.004,
         long_distance_mode: bool = False,
@@ -226,6 +264,7 @@ class SiamRAMExperimentTracker:
         yolo_detectability_probe_stride: int = 3,
         yolo_detectability_min_hits: int = 1,
         yolo_detectability_iou_thr: float = 0.3,
+        yolo_undetectable_conf: Optional[float] = None,
         copile_yolo=False,
         debug=True,
         disable_camera_motion: bool = False,
@@ -271,6 +310,8 @@ class SiamRAMExperimentTracker:
             drm_gamma (any): DRM temporal decay exponent
             drm_margin (any): DRM acceptance margin above the distractor bank score
             drm_top_k (any): number of top DRM candidates forwarded to tracker verification
+            drm_score_aggregation (any): how to collapse per-anchor DRM scores ("max" or "mean")
+            drm_score_aggregation_topk (any): for "mean", average only the top-k anchors (None = all)
             drm_skip_threshold (any): DRM score above which a candidate is accepted without verification
             drm_lam_dist (any): weight of the Gaussian distance penalty in the DRM score
             drm_dist_sigma_factor (any): scales the Gaussian sigma by max(obj_w, obj_h)
@@ -291,6 +332,11 @@ class SiamRAMExperimentTracker:
             search_expand_growth_factor (any): how much the ROI grows per growth interval during occlusion
             search_expand_growth_every (any): number of occlusion frames between each ROI growth step
             search_expand_max (any): maximum ROI expansion factor for normal-size objects
+            occ_explore_burst_enabled (any): if True, periodically widen the occlusion search ROI for a single frame to boost exploration
+            occ_explore_burst_every (any): stride N — apply the exploration burst every Nth occlusion frame
+            occ_explore_burst_mult (any): factor by which the ROI expansion is multiplied on a burst frame (applied past the normal cap)
+            occ_emit_provisional (any): if True, during occlusion emit a provisional bbox (best YOLO detection, else EKF held_box) instead of a zero bbox, so the track stays continuous and shows as a red box in the viz
+            occ_provisional_select (any): how to pick the provisional YOLO detection — "nearest" (appearance-weighted closest to the EKF held_box, reusing the nudge ranking) or "held" (always the EKF held_box, ignoring detections)
             long_distance_conf_threshold (any): score threshold used instead of conf_threshold when target is tiny/far
             long_distance_area_fraction (any): object area / frame area ratio below which long-distance mode activates
             long_distance_mode (any): force long-distance mode on regardless of area fraction
@@ -386,12 +432,18 @@ class SiamRAMExperimentTracker:
         # (handle, pred_bbox, ref_bbox, velocity, distractor_bank, sample_drm).
         self._pending_desc: Optional[dict] = None
 
+        self.yolo_conf = yolo_conf
+        self.yolo_iou_thr = yolo_iou
+        self.yolo_imgsz = max(32, int(yolo_imgsz))
+        self.yolo_augment = bool(yolo_augment)
+
+        self.debug = debug
         if copile_yolo:
             self.yolo = self.load_yolo_compiled(yolo_weights)
         else:
             self.yolo = YOLO(yolo_weights)
 
-        self.debug = debug
+        self._warmup_yolo()
         self._conf_threshold_auto = None
         self._last_conf_threshold_score: Optional[float] = None
         if isinstance(conf_threshold, str) and conf_threshold.strip().lower() == "auto":
@@ -428,11 +480,53 @@ class SiamRAMExperimentTracker:
             self.reacq_threshold = self._reacq_threshold_auto.value
         else:
             self.reacq_threshold = float(reacq_threshold)
-        self.yolo_conf = yolo_conf
-        self.yolo_iou_thr = yolo_iou
-        self.yolo_imgsz = max(32, int(yolo_imgsz))
-        self.yolo_augment = bool(yolo_augment)
-        self.app_match_threshold = app_match_threshold
+
+        # Adaptive phase-0 SiamABC reacquisition gate (occ_siam_reacq_threshold
+        # == "auto"). Observes the live SiamABC confidence score, exactly like
+        # reacq_threshold:auto, but keeps its own (stricter) band.
+        self._occ_siam_reacq_threshold_auto = None
+        self._last_occ_siam_reacq_threshold_score: Optional[float] = None
+        if (
+            isinstance(occ_siam_reacq_threshold, str)
+            and occ_siam_reacq_threshold.strip().lower() == "auto"
+        ):
+            from .auto_margin import AutoDrmMargin
+
+            self._occ_siam_reacq_threshold_auto = AutoDrmMargin(
+                min_margin=occ_siam_reacq_threshold_auto_min,
+                max_margin=occ_siam_reacq_threshold_auto_max,
+                delta=occ_siam_reacq_threshold_auto_delta,
+                ema_alpha=occ_siam_reacq_threshold_auto_ema_alpha,
+                n_frames=occ_siam_reacq_threshold_auto_n_frames,
+                warmup=occ_siam_reacq_threshold_auto_warmup,
+                min_samples=occ_siam_reacq_threshold_auto_min_samples,
+            )
+            self.occ_siam_reacq_threshold = self._occ_siam_reacq_threshold_auto.value
+        else:
+            self.occ_siam_reacq_threshold = float(occ_siam_reacq_threshold)
+
+        # Adaptive phase-0 DRM acceptance gate (app_match_threshold == "auto").
+        # Observes the target's DRM composite self-score, the same signal
+        # drm_margin:auto consumes, with its own band.
+        self._app_match_threshold_auto = None
+        if (
+            isinstance(app_match_threshold, str)
+            and app_match_threshold.strip().lower() == "auto"
+        ):
+            from .auto_margin import AutoDrmMargin
+
+            self._app_match_threshold_auto = AutoDrmMargin(
+                min_margin=app_match_threshold_auto_min,
+                max_margin=app_match_threshold_auto_max,
+                delta=app_match_threshold_auto_delta,
+                ema_alpha=app_match_threshold_auto_ema_alpha,
+                n_frames=app_match_threshold_auto_n_frames,
+                warmup=app_match_threshold_auto_warmup,
+                min_samples=app_match_threshold_auto_min_samples,
+            )
+            self.app_match_threshold = self._app_match_threshold_auto.value
+        else:
+            self.app_match_threshold = float(app_match_threshold)
         self.nudge_alpha = nudge_alpha
         self.tau_occ = tau_occ
         self.beta = beta
@@ -471,6 +565,11 @@ class SiamRAMExperimentTracker:
         self.search_expand_growth_factor = search_expand_growth_factor
         self.search_expand_growth_every = search_expand_growth_every
         self.search_expand_max = search_expand_max
+        self._occ_explore_burst_enabled = bool(occ_explore_burst_enabled)
+        self._occ_explore_burst_every = int(occ_explore_burst_every)
+        self._occ_explore_burst_mult = float(occ_explore_burst_mult)
+        self._occ_emit_provisional = bool(occ_emit_provisional)
+        self._occ_provisional_select = str(occ_provisional_select).strip().lower()
         self._occ_frames: int = 0
         self.occ_siam_reacq_threshold = occ_siam_reacq_threshold
         self._drm_dist_sigma_factor = drm_dist_sigma_factor
@@ -510,6 +609,12 @@ class SiamRAMExperimentTracker:
             "skip_threshold": drm_skip_threshold,
             "lam_dist": drm_lam_dist,
             "lam_cand_dir": drm_lam_cand_dir,
+            "score_aggregation": self._normalize_drm_score_aggregation(
+                drm_score_aggregation
+            ),
+            "score_aggregation_topk": self._normalize_drm_score_aggregation_topk(
+                drm_score_aggregation_topk
+            ),
         }
 
         # Adaptive DRM acceptance margin (drm_margin == "auto"). A numeric
@@ -693,6 +798,15 @@ class SiamRAMExperimentTracker:
         self._yolo_detectability_probe_stride = max(1, int(yolo_detectability_probe_stride))
         self._yolo_detectability_min_hits = max(1, int(yolo_detectability_min_hits))
         self._yolo_detectability_iou_thr = float(yolo_detectability_iou_thr)
+        # YOLO confidence to use during occlusion candidate collection when the
+        # target was found NOT YOLO-detectable. Lower than the normal yolo_conf
+        # so the (otherwise sub-threshold) target still produces candidate boxes
+        # for DRM to rank. Falls back to yolo_conf when unset.
+        self._yolo_undetectable_conf = (
+            float(yolo_undetectable_conf)
+            if yolo_undetectable_conf is not None
+            else self.yolo_conf
+        )
         self._yolo_detectable: bool = False
         self._detectability_probe_done: bool = False
         self._detectability_runs: int = 0
@@ -765,8 +879,12 @@ class SiamRAMExperimentTracker:
         """
         if self._dynamic_template_drm_admit_enabled:
             self.tracker._template_admit_drm_gate = self._template_drm_admit_ok
-        elif hasattr(self.tracker, "_template_admit_drm_gate"):
-            delattr(self.tracker, "_template_admit_drm_gate")
+            self.tracker._template_admit_drm_score = self._template_drm_admit_score
+        else:
+            if hasattr(self.tracker, "_template_admit_drm_gate"):
+                delattr(self.tracker, "_template_admit_drm_gate")
+            if hasattr(self.tracker, "_template_admit_drm_score"):
+                delattr(self.tracker, "_template_admit_drm_score")
 
     def _discard_pending_descriptor(self) -> None:
         """
@@ -821,6 +939,13 @@ class SiamRAMExperimentTracker:
             self._reacq_threshold_auto.reset()
             self.reacq_threshold = self._reacq_threshold_auto.value
             self._last_reacq_threshold_score = None
+        if self._occ_siam_reacq_threshold_auto is not None:
+            self._occ_siam_reacq_threshold_auto.reset()
+            self.occ_siam_reacq_threshold = self._occ_siam_reacq_threshold_auto.value
+            self._last_occ_siam_reacq_threshold_score = None
+        if self._app_match_threshold_auto is not None:
+            self._app_match_threshold_auto.reset()
+            self.app_match_threshold = self._app_match_threshold_auto.value
         if self._conf_threshold_auto is not None:
             self._conf_threshold_auto.reset()
             self.conf_threshold = self._conf_threshold_auto.value
@@ -1004,6 +1129,14 @@ class SiamRAMExperimentTracker:
 
         if self.in_occlusion:
             self._sync_visual_state()
+            if self._occ_emit_provisional:
+                prov = self._occ_provisional_bbox(proc_frame)
+                prov_out = np.round(np.array(prov, dtype=float) * scale_inv).astype(int)
+                yolo_out = [
+                    np.round(np.array(b, dtype=float) * scale_inv).astype(int)
+                    for b in self._last_yolo
+                ]
+                return prov_out, 0.0, True, yolo_out
             return np.zeros(4, dtype=int), 0.0, True, self._last_yolo
 
         bbox_out = np.round(np.array(bbox, dtype=float) * scale_inv).astype(int)
@@ -1118,6 +1251,9 @@ class SiamRAMExperimentTracker:
             return float(self._drm_margin_auto.value)
         return float(self._dynamic_template_drm_admit_margin)
 
+    def _template_drm_admit_score(self) -> Optional[float]:
+        return self._template_gate_drm_score
+
     def _add_distractor_descriptor(
         self,
         desc: Optional[np.ndarray],
@@ -1157,14 +1293,7 @@ class SiamRAMExperimentTracker:
         crop = frame[ry: ry + rh, rx: rx + rw]
         if crop.size == 0:
             return []
-        results = self.yolo.predict(
-            crop,
-            conf=self.yolo_conf,
-            iou=self.yolo_iou_thr,
-            verbose=False,
-            imgsz=self.yolo_imgsz,
-            augment=self.yolo_augment,
-        )
+        results = self._predict_yolo(crop)
         boxes: List[np.ndarray] = []
         if results and results[0].boxes is not None and len(results[0].boxes) > 0:
             result_boxes = results[0].boxes
@@ -1371,6 +1500,21 @@ class SiamRAMExperimentTracker:
             cam_velocity=self._camera_velocity_from_h(self._last_H, frame.shape),
         )
 
+    def _observe_drm_self_score(self, self_score: float, frame_idx: int) -> None:
+        """Fold one target DRM composite self-score into whichever adaptive
+        estimators consume it: drm_margin and/or app_match_threshold. Each keeps
+        its own cadence via due(), so a numeric setting on either is a no-op."""
+        s = float(self_score)
+        self._last_drm_self_score = s
+        if self._drm_margin_auto is not None and self._drm_margin_auto.due(frame_idx):
+            self._drm_margin_auto.observe(s, frame_idx)
+        if (
+            self._app_match_threshold_auto is not None
+            and self._app_match_threshold_auto.due(frame_idx)
+        ):
+            self._app_match_threshold_auto.observe(s, frame_idx)
+            self.app_match_threshold = self._app_match_threshold_auto.value
+
     def _resolve_pending_descriptor(self) -> None:
         """
         Finish the OSNet descriptor deferred from the previous confident frame
@@ -1404,13 +1548,14 @@ class SiamRAMExperimentTracker:
                 lam_time=self._drm_kwargs["lam_time"],
                 alpha=self._drm_kwargs["alpha"],
                 gamma=self._drm_kwargs["gamma"],
+                score_aggregation=self._drm_kwargs["score_aggregation"],
+                score_aggregation_topk=self._drm_kwargs["score_aggregation_topk"],
             )
             if self_score is not None:
                 if self._dynamic_template_drm_admit_enabled:
                     self._template_gate_drm_score = float(self_score)
                 if pending["sample_drm"]:
-                    self._last_drm_self_score = float(self_score)
-                    self._drm_margin_auto.observe(self_score, pending["frame_idx"])
+                    self._observe_drm_self_score(self_score, pending["frame_idx"])
 
     def _normal_update(
         self,
@@ -1476,6 +1621,15 @@ class SiamRAMExperimentTracker:
             self._reacq_threshold_auto.observe(score, self.frame_idx)
             self.reacq_threshold = self._reacq_threshold_auto.value
             self._last_reacq_threshold_score = score
+
+        if (
+            self._occ_siam_reacq_threshold_auto is not None
+            and score >= effective_threshold
+            and self._occ_siam_reacq_threshold_auto.due(self.frame_idx)
+        ):
+            self._occ_siam_reacq_threshold_auto.observe(score, self.frame_idx)
+            self.occ_siam_reacq_threshold = self._occ_siam_reacq_threshold_auto.value
+            self._last_occ_siam_reacq_threshold_score = score
 
         if (
             self._conf_threshold_auto is not None
@@ -1612,10 +1766,15 @@ class SiamRAMExperimentTracker:
             score >= effective_threshold
             and descriptor_due
         ):
-            # Whether to sample the adaptive drm_margin estimator for this frame.
+            # Whether to compute the target's DRM self-score this frame for any
+            # adaptive estimator that consumes it (drm_margin and/or
+            # app_match_threshold). Each estimator keeps its own cadence.
             sample_drm = (
                 self._drm_margin_auto is not None
                 and self._drm_margin_auto.due(self.frame_idx)
+            ) or (
+                self._app_match_threshold_auto is not None
+                and self._app_match_threshold_auto.due(self.frame_idx)
             )
             if self._overlap_enabled():
                 # Tier-3: queue OSNet on the side stream now and defer admission
@@ -1667,13 +1826,16 @@ class SiamRAMExperimentTracker:
                             lam_time=self._drm_kwargs["lam_time"],
                             alpha=self._drm_kwargs["alpha"],
                             gamma=self._drm_kwargs["gamma"],
+                            score_aggregation=self._drm_kwargs["score_aggregation"],
+                            score_aggregation_topk=self._drm_kwargs[
+                                "score_aggregation_topk"
+                            ],
                         )
                         if self_score is not None:
                             if self._dynamic_template_drm_admit_enabled:
                                 self._template_gate_drm_score = float(self_score)
                             if sample_drm:
-                                self._last_drm_self_score = float(self_score)
-                                self._drm_margin_auto.observe(
+                                self._observe_drm_self_score(
                                     self_score, self.frame_idx
                                 )
 
@@ -1886,6 +2048,8 @@ class SiamRAMExperimentTracker:
         skip_threshold: float,
         lam_dist: float,
         lam_cand_dir: float,
+        score_aggregation: str = "max",
+        score_aggregation_topk: Optional[int] = None,
     ) -> Tuple[List[Tuple[np.ndarray, float]], str]:
         return self._occlusion_subsystem.occlusion_memory_match(
             frame=frame,
@@ -1906,6 +2070,8 @@ class SiamRAMExperimentTracker:
             skip_threshold=skip_threshold,
             lam_dist=lam_dist,
             lam_cand_dir=lam_cand_dir,
+            score_aggregation=score_aggregation,
+            score_aggregation_topk=score_aggregation_topk,
         )
 
     def _occ_phase_final_drm(
@@ -2031,6 +2197,30 @@ class SiamRAMExperimentTracker:
         return self._occlusion_subsystem.cam_vel_from_h(
             frame=frame,
         )
+
+    @staticmethod
+    def _normalize_drm_score_aggregation(value) -> str:
+        mode = str(value or "max").strip().lower()
+        if mode in {"max", "mean"}:
+            return mode
+        raise ValueError(
+            f"Unsupported DRM score aggregation '{value}'. Expected 'max' or 'mean'."
+        )
+
+    @staticmethod
+    def _normalize_drm_score_aggregation_topk(value) -> Optional[int]:
+        """Normalize the "mean" top-k knob: None/null/<=0 -> all anchors (global mean)."""
+        if value is None:
+            return None
+        if isinstance(value, str):
+            stripped = value.strip().lower()
+            if stripped in {"", "null", "none"}:
+                return None
+            value = stripped
+        ivalue = int(value)
+        if ivalue <= 0:
+            return None
+        return ivalue
 
     @property
     def _active_drm_kwargs(self) -> DRMKwargs:
@@ -2450,6 +2640,74 @@ class SiamRAMExperimentTracker:
             dtype=int,
         )
 
+    def _occ_provisional_bbox(
+        self,
+        frame: np.ndarray,
+    ) -> np.ndarray:
+        """
+        Pick a provisional bbox to emit during occlusion instead of a zero box.
+
+        Used by update() only when occ_emit_provisional is enabled. The goal is
+                    a continuous track (and a continuous red box in the viz) while the
+                    real recovery state machine runs untouched in the background — this
+                    method never mutates tracker/recovery state, it only reports a best
+                    guess of where the target is right now.
+
+                    Selection (occ_provisional_select):
+                        "nearest" → the YOLO detection from the most recent collection
+                                    frame (_last_yolo) ranked by the same appearance-
+                                    weighted distance-to-held_box used by
+                                    _nudge_toward_nearest. Falls back to the EKF held_box
+                                    when there are no detections.
+                        "held"    → always the EKF-propagated held_box, ignoring YOLO.
+
+                    The chosen box is the detection itself (not a nudged blend), so the
+                    emitted track snaps to the candidate the recovery logic is most
+                    likely to commit to, until verification flips us back to normal
+                    tracking.
+        Args:
+            frame (any): current (processed) video frame as a numpy BGR array
+        Returns:
+            np.ndarray [x, y, w, h] in processed-frame coords, clamped to frame
+    """
+        held_box = self.held_box
+        assert held_box is not None
+        held_box = held_box.copy()
+
+        detections = list(self._last_yolo)
+        if self._occ_provisional_select == "held" or not detections:
+            return self._clamp_bbox_to_frame(held_box, frame)
+
+        ref = self.memory.best_descriptor()
+        hcx = held_box[0] + held_box[2] / 2.0
+        hcy = held_box[1] + held_box[3] / 2.0
+
+        det_arr = np.asarray(detections, dtype=np.float64)
+        centers = np.column_stack(
+            (det_arr[:, 0] + det_arr[:, 2] / 2.0, det_arr[:, 1] + det_arr[:, 3] / 2.0)
+        )
+        dists = np.hypot(centers[:, 0] - hcx, centers[:, 1] - hcy)
+
+        if ref is not None:
+            dets_for_desc = self._limit_osnet_candidates(detections)
+            det_descs = _extract_descriptor(frame, dets_for_desc) if dets_for_desc else []
+            sims = np.zeros((len(detections),), dtype=np.float64)
+            n_desc = min(len(det_descs), len(detections))
+            if n_desc > 0:
+                sims[:n_desc] = np.asarray(
+                    [
+                        _cos_sim(ref, det_descs[i]) if det_descs[i] is not None else 0.0
+                        for i in range(n_desc)
+                    ],
+                    dtype=np.float64,
+                )
+            ranks = dists * (1.0 - 0.5 * sims)
+        else:
+            ranks = dists
+
+        best_det = det_arr[int(np.argmin(ranks))]
+        return self._clamp_bbox_to_frame(np.array(best_det, dtype=int), frame)
+
     def _get_yolo_search_roi(
         self,
         frame: np.ndarray,
@@ -2523,6 +2781,22 @@ class SiamRAMExperimentTracker:
         steps = self._occ_frames // max(1, _search_expand_growth_every)
         time_expand = float(_search_expand_growth_factor ** steps)
         effective_expand = min(_roi_start_expand * time_expand, _yolo_search_expand)
+
+        # Periodic exploration burst: every Nth occlusion frame, run a single
+        # search attempt with the ROI multiplied by occ_explore_burst_mult. The
+        # multiplier is applied *after* the _yolo_search_expand cap so the burst
+        # deliberately reaches beyond the steady-state window (the final
+        # frame-clamp below still bounds it to the visible frame). It applies in
+        # both detectability regimes: detectable and NOT-detectable targets now
+        # both reacquire through YOLO collection, which benefits from the wider
+        # ROI when the target has drifted far from the EKF prediction.
+        if (
+            self._occ_explore_burst_enabled
+            and self._occ_explore_burst_every > 0
+            and self._occ_frames > 0
+            and self._occ_frames % self._occ_explore_burst_every == 0
+        ):
+            effective_expand *= self._occ_explore_burst_mult
 
         if (
             self._out_of_frame
@@ -2599,14 +2873,14 @@ class SiamRAMExperimentTracker:
         if crop.size == 0:
             self._yolo_cache = []
             return []
-        results = self.yolo.predict(
-            crop,
-            conf=self.yolo_conf,
-            iou=self.yolo_iou_thr,
-            verbose=False,
-            imgsz=self.yolo_imgsz,
-            augment=self.yolo_augment,
-        )
+        # When the target was found NOT YOLO-detectable, collect candidates at a
+        # lower confidence so the otherwise sub-threshold target still surfaces
+        # boxes for DRM to rank. The detectability probe itself is unaffected
+        # (it runs through _yolo_detect_in_roi at the normal conf).
+        conf = None
+        if self._detectability_policy_active() and not self._yolo_detectable:
+            conf = self._yolo_undetectable_conf
+        results = self._predict_yolo(crop, conf=conf)
         boxes = []
         if results and results[0].boxes is not None and len(results[0].boxes) > 0:
             result_boxes = results[0].boxes
@@ -3328,14 +3602,7 @@ class SiamRAMExperimentTracker:
         if crop.size == 0:
             return
 
-        results = self.yolo.predict(
-            crop,
-            conf=self.yolo_conf,
-            iou=self.yolo_iou_thr,
-            verbose=False,
-            imgsz=self.yolo_imgsz,
-            augment=self.yolo_augment,
-        )
+        results = self._predict_yolo(crop)
         if not results or results[0].boxes is None or len(results[0].boxes) == 0:
             return
 
@@ -3480,20 +3747,6 @@ class SiamRAMExperimentTracker:
         """
         return self._yolo_detectability_enabled and self._detectability_probe_done
 
-    def _phase_after_failed_siam(
-        self,
-    ) -> int:
-        """
-        Occlusion phase to advance to after a failed phase=siam attempt.
-
-        Normally → 1 (begin YOLO candidate collection). But when the policy is
-        active and the target was found NOT YOLO-detectable, YOLO collection is
-        futile, so stay at phase 0 and keep retrying SiamABC every frame.
-        """
-        if self._detectability_policy_active() and not self._yolo_detectable:
-            return 0
-        return 1
-
     def _is_near_exit_edge(
         self,
         bbox: np.ndarray,
@@ -3556,6 +3809,61 @@ class SiamRAMExperimentTracker:
             model.export(format="engine", half=False, device=0, imgsz=self.yolo_imgsz)
 
         return YOLO(engine_path)
+
+    def _warmup_yolo(
+        self,
+    ) -> None:
+        """
+        Pay YOLO's lazy first-predict setup before the frame loop.
+
+        The detectability probe intentionally runs YOLO during normal tracking.
+        With a stride of 10, the first real predict otherwise lands on frame 10
+        and can look like a frozen video while Ultralytics moves/fuses the model,
+        picks CUDA kernels, and builds its predictor state.
+        """
+        try:
+            dummy_size = max(32, int(self.yolo_imgsz))
+            dummy = np.zeros((dummy_size, dummy_size, 3), dtype=np.uint8)
+            self._predict_yolo(dummy)
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+        except Exception as exc:
+            siamram_log(
+                f"YOLO warmup skipped: {exc}",
+                phase="YOLO",
+                status="warn",
+            )
+
+    def _predict_yolo(
+        self,
+        image: np.ndarray,
+        conf: Optional[float] = None,
+    ):
+        """
+        Run YOLO with stable latency for ROI crops.
+
+        `run_inference.py` enables cuDNN benchmark for fixed-shape SiamABC/OSNet
+        work. YOLO receives variable ROI crops, so leaving benchmark on can make
+        later probe frames pause while cuDNN autotunes a new crop shape.
+
+        `conf` overrides the detection confidence for this call (used by the
+        undetectable-target occlusion path); falls back to self.yolo_conf.
+        """
+        prev_benchmark = torch.backends.cudnn.benchmark
+        if prev_benchmark:
+            torch.backends.cudnn.benchmark = False
+        try:
+            return self.yolo.predict(
+                image,
+                conf=self.yolo_conf if conf is None else conf,
+                iou=self.yolo_iou_thr,
+                verbose=False,
+                imgsz=self.yolo_imgsz,
+                augment=self.yolo_augment,
+            )
+        finally:
+            if prev_benchmark:
+                torch.backends.cudnn.benchmark = prev_benchmark
 
     def _prescale_frame(
         self,

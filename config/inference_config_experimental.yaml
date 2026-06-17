@@ -6,7 +6,7 @@ weights_path: "/home/moha/SiamRAM/checkpoints/inference_checkpoint.pth"
 # =============================================================================
 trt_engine:
   # TRT-compile the SiamABC backbone. Master switch for the SiamABC engine.
-  trt_compile_siamabc: True
+  trt_compile_siamabc: False
   # Legacy precision fallback used only when backbone_mode is left empty.
   fp16: True
   # SiamABC backbone implementation. Keep dynamic_fp16 until the parity
@@ -16,7 +16,7 @@ trt_engine:
   # Diagnostic control for dynamic_fp32. False preserves TensorRT's TF32 default.
   backbone_disable_tf32: False
   # OSNet-only descriptor acceleration. Ignored unless descriptor_backend == "osnet".
-  trt_compile_osnet: True
+  trt_compile_osnet: False
   # OSNet-only FP16 descriptor inference. Ignored unless descriptor_backend == "osnet".
   osnet_fp16: True
   # OSNet-only async overlap. Pixel descriptors are CPU-only and synchronous.
@@ -29,6 +29,14 @@ trt_engine:
 # Which SiamRAM implementation to use. Kept for backwards compatibility;
 # run_inference currently always uses SiamRAMExperimentTracker.
 ram_tracker_impl: "experiment"
+
+# =============================================================================
+# runtime: process-level PyTorch switches.
+# =============================================================================
+runtime:
+  # Let cuDNN autotune convolution kernels. Faster for fixed shapes, but less
+  # predictable for variable ROI crops and can slightly perturb eager behavior.
+  cudnn_benchmark: false
 
 
 # =============================================================================
@@ -73,7 +81,7 @@ tracker:
 
   hanning_window_penalty:
     # Master switch for blending a Hanning/cosine prior into the score map.
-    enabled: false
+    enabled: False
     # "cosine" builds the spatial prior window used by SiamABC.
     window_type: cosine
     # Blend amount for the Hanning prior.
@@ -101,17 +109,21 @@ tracker:
     # IoU required between consecutive boxes before admitting a template update.
     admit_iou_threshold: 0.6
     # First frames treated as template warm-up.
-    warmup_frames: 5
+    warmup_frames: 6
     # Frames between dynamic-template re-selection during warm-up.
     warmup_update_interval: 2
     # During warm-up, consider only this many recent memory entries.
     warmup_memory_window: 8
     # Veto dynamic-template admission from transiently blurry target crops.
-    blur_gate_enabled: False
-    # Candidate sharpness must be at least this fraction of the running reference.
-    blur_gate_ratio: 1
+    blur_gate_enabled: True
+    # Candidate sharpness must be at least reference / ratio; sharper crops pass.
+    # Example: 1.25 rejects crops more than 20% blurrier than the sharpness EMA.
+    blur_gate_ratio: 1.3
     # EMA smoothing for the sharpness reference.
     blur_gate_ema_alpha: 1
+    # Update the blur reference only from frames actually selected as dynamic templates.
+    # False preserves legacy behavior: update on every blur-gate admission candidate.
+    blur_gate_update_ema_on_selected_only: True
 
 
 # =============================================================================
@@ -128,7 +140,7 @@ ram_tracker:
     # Print verbose diagnostics from the tracker (useful when debugging).
     debug: False
     # Downscale every input frame so its long edge is at most this many px (keeps things fast on big videos).
-    max_proc_long_edge: 1280
+    max_proc_long_edge: 10000
 
   # ---------------------------------------------------------------------------
   # yolo: re-detector used for occlusion recovery.
@@ -137,9 +149,9 @@ ram_tracker:
     # Which YOLO checkpoint to load for re-detection.
     yolo_weights: "checkpoints/yolo11n.pt"
     # Drop any YOLO box whose confidence is below this (lower = more candidates, more noise).
-    yolo_conf: 0.30
+    yolo_conf: 0.3
     # Side length YOLO downsamples each crop to (bigger = better on tiny targets, slower).
-    yolo_imgsz: 320
+    yolo_imgsz: 640
     # Run YOLO with test-time augmentation (flips + multi-scale). Higher recall, ~3-4× slower.
     yolo_augment: false
     # After class-vote warmup, keep only detections matching the inferred target class.
@@ -196,7 +208,7 @@ ram_tracker:
   template_drm_gate:
     # Master switch. false = inner score/IoU gates only.
     # Restored to baseline (944f2b8): baseline had no DRM template-admit gate.
-    dynamic_template_drm_admit_enabled: False
+    dynamic_template_drm_admit_enabled: True
     # Composite DRM score needed to refresh the dynamic template. "auto" reuses
     # the live drm_margin:auto value; if drm_margin is numeric, falls back to 0.50.
     dynamic_template_drm_admit_margin: auto
@@ -289,6 +301,30 @@ ram_tracker:
       out_of_frame_search_expand_growth_factor: -1.0
       out_of_frame_search_expand_growth_every: -1
 
+    # Periodic exploration burst: every Nth occlusion frame, widen the search ROI
+    # for that single frame to N-times its normal size (applied past search_expand_max),
+    # then snap back. Cheap way to occasionally cast a wider net without paying the
+    # cost every frame. Applies to normal, tiny, and out-of-frame ROIs.
+    explore_burst:
+      # Master switch for the periodic burst.
+      occ_explore_burst_enabled: True
+      # Stride N: fire the burst every Nth occlusion frame.
+      occ_explore_burst_every: 20
+      # ROI expansion multiplier applied on a burst frame.
+      occ_explore_burst_mult: 2.0
+
+    # Provisional emission: during occlusion, instead of emitting a zero bbox,
+    # emit a best-guess box (the most plausible YOLO detection, else the EKF
+    # held_box) so the track stays continuous and shows as a red box in the viz
+    # until recovery is verified. NOTE: this also changes the emitted track in
+    # submission output, not just the visualization — A/B it before committing.
+    provisional_emit:
+      # Master switch. When false, occlusion frames emit a zero bbox (legacy).
+      occ_emit_provisional: True
+      # How to pick the box: "nearest" (appearance-weighted closest YOLO
+      # detection to the EKF held_box) or "held" (always the EKF held_box).
+      occ_provisional_select: nearest
+
   # ---------------------------------------------------------------------------
   # memory_history: rolling buffers used by occlusion recovery & analysis.
   # ---------------------------------------------------------------------------
@@ -324,12 +360,23 @@ ram_tracker:
       # SiamABC score below this means the target is probably lost. "auto" maps
       # the healthy tracking-score EMA onto the output range below.
       # Restored to baseline (944f2b8) fixed value; auto knobs below stay dormant.
-      conf_threshold: 0.5
+      # conf_threshold: auto
+      # conf_threshold_auto_in_min: 0.60
+      # conf_threshold_auto_in_max: 0.95
+      # conf_threshold_auto_out_min: 0.4
+      # conf_threshold_auto_out_max: 0.6
+      # conf_threshold_auto_ema_alpha: 0.1
+      # conf_threshold_auto_warmup: 0.50
+      # conf_threshold_auto_n_frames: 1
+      # conf_threshold_auto_min_samples: 1
+
+
+      conf_threshold: auto
       conf_threshold_auto_in_min: 0.60
-      conf_threshold_auto_in_max: 0.95
-      conf_threshold_auto_out_min: 0.30
-      conf_threshold_auto_out_max: 0.6
-      conf_threshold_auto_ema_alpha: 0.1
+      conf_threshold_auto_in_max: 1
+      conf_threshold_auto_out_min: 0.4
+      conf_threshold_auto_out_max: 0.75
+      conf_threshold_auto_ema_alpha: 0.01
       conf_threshold_auto_warmup: 0.50
       conf_threshold_auto_n_frames: 1
       conf_threshold_auto_min_samples: 1
@@ -357,11 +404,13 @@ ram_tracker:
     # Its verdict selects the recovery strategy:
     #   detectable     -> skip the phase-0 SiamABC-alone commit; rely on
     #                     phase1_collect + phase2_final_drm (YOLO + DRM).
-    #   not detectable -> rely solely on phase0_siam (keep retrying SiamABC);
-    #                     YOLO collection is skipped since it cannot find it. ===
+    #   not detectable -> also skip the phase-0 SiamABC-at-EKF seed; rely on
+    #                     YOLO collection + DRM but run YOLO at the lower
+    #                     yolo_undetectable_conf so the (sub-threshold) target
+    #                     still surfaces candidate boxes for DRM to rank. ===
     detectability_probe:
       # Master switch. When false, occlusion recovery behaves exactly as before.
-      yolo_detectability_enabled: true
+      yolo_detectability_enabled: False
       # N: how many YOLO probe attempts to run during early tracking.
       yolo_detectability_probe_attempts: 12
       # Frames between probe attempts. Probe spans ~ attempts x stride frames,
@@ -371,6 +420,11 @@ ram_tracker:
       yolo_detectability_min_hits: 1
       # IoU with the tracked box for a YOLO detection to count as a hit.
       yolo_detectability_iou_thr: 0.3
+      # YOLO confidence used ONLY during occlusion candidate collection for a
+      # target the probe found NOT detectable. Lower than yolo_conf so the
+      # otherwise sub-threshold target still produces boxes for DRM to rank.
+      # The probe itself always uses the normal yolo_conf. Unset -> yolo_conf.
+      yolo_undetectable_conf: 0.08
 
     # === PHASE 0 — SIAM: the cheap fast path. Seed SiamABC in the search ROI and,
     # if it clears Gate A (occ_siam_reacq_threshold) AND Gate B (the DRM accept
@@ -378,12 +432,36 @@ ram_tracker:
     # below are read ONLY by occ_phase_siam. ===
     phase0_siam:
       # Gate A — SiamABC score needed to attempt a phase-0 reacquisition.
-      occ_siam_reacq_threshold: 0.8
+      # "auto" = adapt per video: EMA of the live SiamABC confidence (the same
+      # signal reacq_threshold:auto learns) minus delta, clamped to [min, max],
+      # but with its own, deliberately stricter band. A number keeps the fixed
+      # value and ignores every occ_siam_reacq_threshold_auto_* knob below.
+      occ_siam_reacq_threshold: auto
+      # --- adaptive knobs (only used when occ_siam_reacq_threshold == "auto") ---
+      occ_siam_reacq_threshold_auto_min: 0.65
+      occ_siam_reacq_threshold_auto_max: 0.8
+      occ_siam_reacq_threshold_auto_delta: 0.05
+      occ_siam_reacq_threshold_auto_ema_alpha: 0.2
+      occ_siam_reacq_threshold_auto_n_frames: 10
+      occ_siam_reacq_threshold_auto_warmup: 0.80
+      occ_siam_reacq_threshold_auto_min_samples: 5
       # Required margin between top-1 and top-2 candidates during occlusion.
-      occ_siam_margin: 0.5
+      occ_siam_margin: 0.0
       # Gate B — minimum DRM composite score to accept the phase-0 reacquisition.
       # Higher tightens the appearance check; 0 effectively disables this gate.
-      app_match_threshold: 0.6
+      # "auto" = adapt per video: EMA of the genuine target's DRM composite
+      # self-score (the same signal drm_margin:auto learns) minus delta, clamped
+      # to [min, max]. A number keeps the fixed legacy value and ignores every
+      # app_match_threshold_auto_* knob below.
+      app_match_threshold: auto
+      # --- adaptive knobs (only used when app_match_threshold == "auto") ---
+      app_match_threshold_auto_min: 0.55
+      app_match_threshold_auto_max: 0.80
+      app_match_threshold_auto_delta: 0.10
+      app_match_threshold_auto_ema_alpha: 0.2
+      app_match_threshold_auto_n_frames: 10
+      app_match_threshold_auto_warmup: 0.72
+      app_match_threshold_auto_min_samples: 5
 
     # === PHASE 1 — COLLECT: gather YOLO candidates (+ appearance descriptors)
     # across consecutive frames so per-candidate velocity becomes measurable. ===
@@ -412,11 +490,11 @@ ram_tracker:
         # Lower clamp: the tuned margin never drops below this.
         drm_margin_auto_min: 0.5
         # Upper clamp: the tuned margin never rises above this.
-        drm_margin_auto_max: 0.80
+        drm_margin_auto_max: 0.76
         # How far below the EMA the margin sits (bigger = more permissive / catches more).
         drm_margin_auto_delta: 0.05
         # EMA smoothing of the self-score (higher = reacts faster, noisier).
-        drm_margin_auto_ema_alpha: 0.2
+        drm_margin_auto_ema_alpha: 0.3
         # Sample the target self-score every N confident frames.
         drm_margin_auto_n_frames: 10
         # Margin used before enough samples accrue (acts as a fixed warmup margin).
@@ -427,6 +505,14 @@ ram_tracker:
         drm_skip_threshold: 23
         # Number of top candidates evaluated per DRM step.
         drm_top_k: 3
+        # How per-anchor DRM scores collapse into one candidate score:
+        # "max"  = best-matching anchor wins (legacy behaviour).
+        # "mean" = average across anchors (optionally only the top-k below).
+        drm_score_aggregation: "mean"
+        # For "mean": average only the top-k highest-scoring anchors.
+        # null (or <= 0) averages every anchor (global mean).
+        # Ignored when drm_score_aggregation is "max".
+        drm_score_aggregation_topk: 3
         # Global suppressor weight (0 = off).
         drm_gamma: 0
         # Weight on appearance similarity in the composite score.
@@ -457,11 +543,21 @@ ram_tracker:
       # SiamABC score needed to accept "yes, I found the target again". "auto"
       # sets the bar to EMA(score)-delta clamped to the range below.
       # Restored to baseline (944f2b8) fixed value; auto knobs below stay dormant.
-      reacq_threshold: 0.7
+      # reacq_threshold: auto
+      # reacq_threshold_auto_min: 0.7
+      # reacq_threshold_auto_max: 0.8
+      # reacq_threshold_auto_delta: 0.05
+      # reacq_threshold_auto_ema_alpha: 0.2
+      # reacq_threshold_auto_n_frames: 1
+      # reacq_threshold_auto_warmup: 0.70
+      # reacq_threshold_auto_min_samples: 1
+
+
+      reacq_threshold: auto
       reacq_threshold_auto_min: 0.7
-      reacq_threshold_auto_max: 0.90
+      reacq_threshold_auto_max: 0.8
       reacq_threshold_auto_delta: 0.05
-      reacq_threshold_auto_ema_alpha: 0.2
+      reacq_threshold_auto_ema_alpha: 0.02
       reacq_threshold_auto_n_frames: 1
       reacq_threshold_auto_warmup: 0.70
       reacq_threshold_auto_min_samples: 1

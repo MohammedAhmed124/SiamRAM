@@ -5,7 +5,7 @@ Date: 2026-06-17
 Status: exploration only. No runtime behavior is changed by this document.
 
 This report supersedes the earlier optimization draft. It was rewritten after reading
-`docs/JETSON_ORIN_NANO_OPTIMIZATION_AUDIT.md` and then re-checking the strongest
+`docs/optimization/JETSON_ORIN_NANO_OPTIMIZATION_AUDIT.md` and then re-checking the strongest
 claims directly against the repository. The goal is not just to list possible speedups,
 but to give an implementation-grade backlog for getting SiamRAM onto a Jetson Orin
 Nano without changing tracking behavior.

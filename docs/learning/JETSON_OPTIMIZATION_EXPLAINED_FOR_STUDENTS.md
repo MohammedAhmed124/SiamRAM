@@ -1,6 +1,6 @@
 # Jetson Optimization, Explained From Scratch
 
-A companion to [JETSON_ORIN_NANO_OPTIMIZATION_AUDIT.md](JETSON_ORIN_NANO_OPTIMIZATION_AUDIT.md).
+A companion to [JETSON_ORIN_NANO_OPTIMIZATION_AUDIT.md](../optimization/JETSON_ORIN_NANO_OPTIMIZATION_AUDIT.md).
 
 The audit is the "what to do" list. **This document is the "why."** It assumes almost no
 background. Every optimization in the audit is re-explained here as a small lesson:
@@ -125,7 +125,7 @@ every single frame. At 30 frames per second that's 180 freezes per second of vid
 
 In the audit this is the cluster of "~5–6 GPU→CPU syncs per frame." A couple of examples:
 
-**Example A — the TTA switch** ([siamabc.py:489](../models/SiamABC/tracker/trt_engine/siamabc.py#L489)):
+**Example A — the TTA switch** ([siamabc.py:489](../../models/SiamABC/tracker/trt_engine/siamabc.py#L489)):
 
 ```python
 # BEFORE — every frame, freeze the pipeline to read one number off the GPU
@@ -151,7 +151,7 @@ def set_tta(self, enabled):
 lam_val = self._norm_lambda_tta if self._tta_on else 0.0   # no GPU read, no freeze
 ```
 
-**Example B — finding the best grid cell** ([box_coder.py:397-398](../utils/box_coder.py#L397-L398)):
+**Example B — finding the best grid cell** ([box_coder.py:397-398](../../utils/box_coder.py#L397-L398)):
 
 ```python
 # BEFORE — TWO freezes to turn one index into a (row, col)
@@ -185,7 +185,7 @@ of "everybody freeze" moments drops.
 
 ### The concept: don't wait for things you could prepare in advance
 
-Right now, every frame, the program does this ([vis/test_model.py:376](../vis/test_model.py#L376)):
+Right now, every frame, the program does this ([vis/test_model.py:376](../../vis/test_model.py#L376)):
 
 ```
 read frame from disk  →  track it on the GPU  →  read next frame  →  track it  → ...
@@ -242,7 +242,7 @@ If you make a **second stream**, two independent GPU jobs can run at the same ti
 brigade is big enough to split into two teams). This project already uses this trick:
 OSNet (the appearance-descriptor network) runs on a *side* stream so that while it's
 computing the descriptor for frame N, the main SiamABC network can already be working on
-frame N+1 ([the `osnet_async_overlap` setting](../config/inference_config_experimental.yaml)).
+frame N+1 ([the `osnet_async_overlap` setting](../../config/inference_config_experimental.yaml)).
 
 You don't need to *add* this — it's a good example of the pattern done right, and it's why
 removing the `lam.item()` sync (Section 1) matters even more: a stray synchronization
@@ -334,7 +334,7 @@ memory, one more package that must install correctly on the Jetson) for nothing.
 
 The base tracker imports `albumentations` and builds three image-normalization "transforms"
 at startup. But the function that's supposed to use them
-([_preprocess_image](../models/SiamABC/tracker/base_tracker.py#L214-L222)) **ignores them**
+([_preprocess_image](../../models/SiamABC/tracker/base_tracker.py#L214-L222)) **ignores them**
 and does the normalization itself on the GPU instead:
 
 ```python
@@ -368,8 +368,8 @@ every clip**, you pay that cost 100 times — even though it's the same detector
 ### What's happening here
 
 Unless you pass `--reuse_tracker`, the program makes a *fresh* tracker wrapper for each
-clip ([run_inference.py:1570](../run_inference.py#L1570)), and each fresh wrapper loads
-YOLO again in its constructor ([tracker.py:390](../models/siamram/tracker.py#L390)).
+clip ([run_inference.py:1570](../../run_inference.py#L1570)), and each fresh wrapper loads
+YOLO again in its constructor ([tracker.py:390](../../models/siamram/tracker.py#L390)).
 
 Why does it make a fresh wrapper at all? For **safety** — so that leftover state from clip
 A (where the target was, what it looked like) can't leak into clip B and corrupt it. That's
@@ -419,14 +419,16 @@ Two consequences:
 - **Watch the temperature while you profile** (`tegrastats`/`jtop`). If your numbers wobble,
   check whether the clocks drooped before you blame your code.
 
-### 4 GB vs 8 GB
+### Memory: we're on the 8 GB board (comfortable)
 
 The Nano comes in 4 GB and 8 GB versions, and that RAM is shared by *everything* (CPU
-program + GPU models, remember — unified memory). On a 4 GB board you're tight. The part of
-our code most likely to blow the budget is building the **entire results table in memory**
-with pandas at the end of a long run ([run_inference.py:1688](../run_inference.py#L1688));
-writing rows out incrementally with the standard `csv` module avoids a big memory spike.
-Adding some swap/zram is also cheap insurance.
+program + GPU models, remember — unified memory). **Our target is the 8 GB version**, which
+is roomy for this pipeline — so memory isn't the thing to worry about here; *speed* is. The
+one memory habit still worth keeping is writing the results table out row-by-row with the
+standard `csv` module instead of building the **entire table in memory** with pandas at the
+end of a long run ([run_inference.py:1688](../../run_inference.py#L1688)); it costs nothing and
+avoids a pointless spike on very large runs. (On a 4 GB board this would be *important*, not
+optional — good to know if you ever port down.)
 
 ---
 

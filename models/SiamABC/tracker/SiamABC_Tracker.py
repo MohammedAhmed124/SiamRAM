@@ -199,13 +199,27 @@ class SiamABCTracker(Tracker):
 
         self.all_memory_imgs = deque([[image, rect]], maxlen=self.memory_window_size)
         self.classification_scores = deque([0.5], maxlen=self.memory_window_size)
+        self.template_drm_scores = deque(
+            [float("nan")], maxlen=self.memory_window_size
+        )
+        self.template_sharpness_scores = deque(
+            [float("nan")], maxlen=self.memory_window_size
+        )
+        self._last_template_update_score = float("nan")
+        self._last_template_update_drm = float("nan")
+        self._last_template_update_sharpness = float("nan")
 
         dyn_cfg = self.tracking_config.get("dynamic_template", {}) or {}
         self._blur_gate_enabled = bool(dyn_cfg.get("blur_gate_enabled", False))
         self._blur_gate_ratio = float(dyn_cfg.get("blur_gate_ratio", 0.6))
         self._blur_gate_ema_alpha = float(dyn_cfg.get("blur_gate_ema_alpha", 0.1))
+        self._blur_gate_update_ema_on_selected_only = bool(
+            dyn_cfg.get("blur_gate_update_ema_on_selected_only", False)
+        )
         self._template_sharpness_ema = (
-            self._crop_sharpness(image, rect) if self._blur_gate_enabled else None
+            self._crop_sharpness(image, rect)
+            if (self._blur_gate_enabled or getattr(self, "_viz_capture", False))
+            else None
         )
 
         self.running_dynamic_image = image
@@ -343,7 +357,7 @@ class SiamABCTracker(Tracker):
             crop_size=self.tracking_config["template_size"],
         )
 
-        img = self._preprocess_image(template_crop, self._template_transform)
+        img = self._preprocess_image(template_crop)
 
         return self.net.get_features(img)
 
@@ -405,7 +419,7 @@ class SiamABCTracker(Tracker):
             padding_value=self.tracking_state.mean_color,
             context=context,
         )
-        search_crop = self._preprocess_image(search_crop, self._search_transform)
+        search_crop = self._preprocess_image(search_crop)
         return self.net.get_features(search_crop), search_bbox, search_context
 
     def check_validity(
@@ -524,7 +538,16 @@ class SiamABCTracker(Tracker):
         ref = self._template_sharpness_ema
         ok = True
         if ref is not None and ref > 0.0:
-            ok = sharpness >= self._blur_gate_ratio * ref
+            ratio = max(1e-6, abs(float(self._blur_gate_ratio)))
+            min_sharpness = ref / ratio if ratio >= 1.0 else ref * ratio
+            ok = sharpness >= min_sharpness
+        if not getattr(self, "_blur_gate_update_ema_on_selected_only", False):
+            self._update_template_sharpness_ema(sharpness)
+        return ok
+
+    def _update_template_sharpness_ema(self, sharpness: float) -> None:
+        if not np.isfinite(sharpness):
+            return
         if self._template_sharpness_ema is None:
             self._template_sharpness_ema = sharpness
         else:
@@ -532,13 +555,14 @@ class SiamABCTracker(Tracker):
             self._template_sharpness_ema = (
                 (1.0 - a) * self._template_sharpness_ema + a * sharpness
             )
-        return ok
 
     def _maybe_store_frame(
         self,
         search: np.ndarray,
         pred_bbox: np.ndarray,
         pred_score: float,
+        drm_score: Optional[float] = None,
+        sharpness: Optional[float] = None,
     ) -> None:
         """
         Attempt to add the current frame to the rolling memory window.
@@ -575,6 +599,12 @@ class SiamABCTracker(Tracker):
         evicting = len(self.classification_scores) == self.memory_window_size
         self.all_memory_imgs.append([search, pred_bbox])
         self.classification_scores.append(pred_score)
+        self.template_drm_scores.append(
+            float(drm_score) if drm_score is not None else float("nan")
+        )
+        self.template_sharpness_scores.append(
+            float(sharpness) if sharpness is not None else float("nan")
+        )
         self._update_best_index(pred_score, evicting)
 
     def select_representatives(
@@ -632,6 +662,23 @@ class SiamABCTracker(Tracker):
                 break
         if latest_idx is None:
             return
+
+        self._last_template_update_score = float(self.classification_scores[latest_idx])
+        if latest_idx < len(self.template_drm_scores):
+            self._last_template_update_drm = float(self.template_drm_scores[latest_idx])
+        else:
+            self._last_template_update_drm = float("nan")
+        if latest_idx < len(self.template_sharpness_scores):
+            self._last_template_update_sharpness = float(
+                self.template_sharpness_scores[latest_idx]
+            )
+        else:
+            self._last_template_update_sharpness = float("nan")
+        if (
+            self._blur_gate_enabled
+            and getattr(self, "_blur_gate_update_ema_on_selected_only", False)
+        ):
+            self._update_template_sharpness_ema(self._last_template_update_sharpness)
 
         best_img, best_bbox = self.all_memory_imgs[latest_idx]
         self.dynamic_template_features = self.get_template_features(
@@ -706,6 +753,16 @@ class SiamABCTracker(Tracker):
         """
         pred_bbox, pred_score, sim_score = self.run_track(search)
 
+        # Promote the primary-track classification maps (raw + after penalty)
+        # captured in _postprocess() to the display slots read by the video
+        # visualiser. Done here (not in _postprocess) so candidate/recovery
+        # forwards that run later in the frame can't overwrite the map shown for
+        # the accepted prediction. Gated by _viz_capture so the no-video fast
+        # path pays nothing.
+        if getattr(self, "_viz_capture", False):
+            self.viz_cls_map = getattr(self, "_viz_cls_latest", None)
+            self.viz_cls_pen_map = getattr(self, "_viz_cls_pen_latest", None)
+
         self.tracking_state.bbox = pred_bbox
         self.tracking_state.pred_score = pred_score
         self.tracking_state.paths.append(pred_bbox)
@@ -730,13 +787,26 @@ class SiamABCTracker(Tracker):
                     pred_bbox, self._prev_bbox
                 ) >= self.tracking_config.get("iou_threshold", 0.3)
                 blur_ok = True
-                if iou_ok and self._blur_gate_enabled:
+                need_sharpness = self._blur_gate_enabled or getattr(
+                    self, "_viz_capture", False
+                )
+                sharpness = float("nan")
+                if iou_ok and need_sharpness:
                     sharpness = self._crop_sharpness(search, pred_bbox)
+                if iou_ok and self._blur_gate_enabled:
                     blur_ok = self._blur_admit_ok(sharpness)
                 drm_gate = getattr(self, "_template_admit_drm_gate", None)
                 drm_ok = drm_gate is None or bool(drm_gate())
                 if iou_ok and blur_ok and drm_ok:
-                    self._maybe_store_frame(search, pred_bbox, pred_score)
+                    drm_getter = getattr(self, "_template_admit_drm_score", None)
+                    admit_drm = drm_getter() if drm_getter is not None else None
+                    self._maybe_store_frame(
+                        search,
+                        pred_bbox,
+                        pred_score,
+                        admit_drm,
+                        sharpness if need_sharpness else None,
+                    )
 
             self._prev_bbox = pred_bbox.copy()
 
@@ -747,6 +817,12 @@ class SiamABCTracker(Tracker):
                 )
                 self.all_memory_imgs = full_imgs
                 self.classification_scores = full_scores
+                self.template_drm_scores = deque(
+                    self.template_drm_scores, maxlen=self.memory_window_size
+                )
+                self.template_sharpness_scores = deque(
+                    self.template_sharpness_scores, maxlen=self.memory_window_size
+                )
                 scores = np.array(self.classification_scores, dtype=np.float16)
                 self._best_idx = int(np.argmax(scores))
                 self._best_score = float(scores[self._best_idx])
@@ -993,6 +1069,24 @@ class SiamABCTracker(Tracker):
 
         sim_score_raw = track_result[constants.TRACKER_TARGET_SEARCH_SIM_SCORE]
         sim_score = sim_score_raw.item() if sim_score_raw is not None else 0.0
+
+        # Stash the classification head map before and after the scale/Hanning
+        # penalty, for the bottom-left video insets. "Before" is the raw
+        # per-location sigmoid (cls_score, already numpy [H, W]); "after" is
+        # classification_map from _confidence_postprocess() -- which equals the
+        # raw map when the hanning_window_penalty block is disabled. Both are
+        # already computed for decoding, so this only adds a squeeze/copy, and
+        # only when capture is enabled (so the no-video fast path pays nothing).
+        # update() promotes these "latest" buffers to its display slots.
+        if getattr(self, "_viz_capture", False):
+            self._viz_cls_latest = cls_score  # numpy [H, W] in [0, 1], pre-penalty
+            if classification_map is not None:
+                self._viz_cls_pen_latest = (
+                    classification_map.detach().float().squeeze().cpu().numpy()
+                )
+            else:
+                self._viz_cls_pen_latest = None
+
         return (
             pred_bbox,
             peak_cls_score,

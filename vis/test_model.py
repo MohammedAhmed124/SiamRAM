@@ -129,6 +129,44 @@ def _stamp_panel(
     cv2.putText(panel, label, (5, 15), FONT, 0.38, (255, 255, 255), 1, cv2.LINE_AA)
 
 
+def _stamp_template_stats(
+    panel: np.ndarray,
+    trk: float,
+    drm: float,
+    sharp: float,
+) -> None:
+    h = panel.shape[0]
+    strip_h = 36
+
+    def _fmt(v: float) -> str:
+        return "--" if not np.isfinite(v) else f"{v:.2f}"
+
+    def _fmt_sharp(v: float) -> str:
+        return "--" if not np.isfinite(v) else f"{v:.0f}"
+
+    cv2.rectangle(panel, (0, h - strip_h), (panel.shape[1], h), (20, 20, 20), -1)
+    cv2.putText(
+        panel,
+        f"trk={_fmt(trk)}  drm={_fmt(drm)}",
+        (5, h - 22),
+        FONT,
+        0.40,
+        (200, 230, 200),
+        1,
+        cv2.LINE_AA,
+    )
+    cv2.putText(
+        panel,
+        f"sharp={_fmt_sharp(sharp)}",
+        (5, h - 6),
+        FONT,
+        0.40,
+        (200, 220, 230),
+        1,
+        cv2.LINE_AA,
+    )
+
+
 def _resize_into(
     src: np.ndarray,
     dst: np.ndarray,
@@ -255,6 +293,76 @@ def _draw_legend(
             canvas, text, (x + 16, iy), FONT, 0.35, (210, 210, 210), 1, cv2.LINE_AA
         )
 
+
+# Same colormap + scale for both cls panels so the raw-vs-penalised response
+# maps are directly comparable (the penalty's spatial reweighting shows as a
+# change within one colour space, not a difference in palette).
+_CMAP_CLS = cv2.COLORMAP_JET
+
+
+def _draw_heatmap_panel(
+    canvas: np.ndarray,
+    x: int,
+    y: int,
+    size: int,
+    data,
+    label: str,
+    colormap: int,
+    normalize: bool,
+    peak_text: str | None = None,
+) -> None:
+    """
+    Draw a small labelled heatmap inset onto the composite canvas in place.
+
+    Inputs:
+        canvas    - np.ndarray (H x W x 3) full composite frame, drawn into in place
+        x, y      - int top-left corner of the panel (header included)
+        size      - int side length (px) of the square heatmap below the header
+        data      - 2D array-like map (e.g. classification response) or None
+        label     - str header text stamped on the dark title bar
+        colormap  - cv2 colormap id applied to the normalised map
+        normalize - bool min-max stretch the map for contrast; when False the
+                    data is assumed to already be in [0, 1] (the sigmoid map)
+        peak_text - optional str drawn at the panel's bottom-right (e.g. peak conf)
+
+    Renders a 16px dark header with the label, then the map as a colour heatmap
+    resized to size x size with INTER_NEAREST (so the true low-res response grid
+    stays visible). Missing/degenerate maps show a flat "n/a" panel rather than
+    crashing.
+    """
+    header_h = 16
+    x2 = x + size
+    y2 = y + header_h + size
+    cv2.rectangle(canvas, (x, y), (x2, y + header_h), (30, 30, 30), -1)
+    cv2.putText(
+        canvas, label, (x + 4, y + 12), FONT, 0.36, (235, 235, 235), 1, cv2.LINE_AA
+    )
+
+    arr = np.asarray(data, dtype=np.float32) if data is not None else None
+    if arr is None or arr.ndim != 2 or arr.size == 0:
+        cv2.rectangle(canvas, (x, y + header_h), (x2, y2), (45, 45, 45), -1)
+        cv2.putText(
+            canvas, "n/a", (x + size // 2 - 14, y + header_h + size // 2),
+            FONT, 0.45, (160, 160, 160), 1, cv2.LINE_AA,
+        )
+    else:
+        if normalize:
+            lo = float(arr.min())
+            hi = float(arr.max())
+            arr = (arr - lo) / (hi - lo) if hi - lo > 1e-8 else np.zeros_like(arr)
+        u8 = np.clip(arr * 255.0, 0, 255).astype(np.uint8)
+        u8 = cv2.resize(u8, (size, size), interpolation=cv2.INTER_NEAREST)
+        heat = cv2.applyColorMap(u8, colormap)
+        canvas[y + header_h: y2, x:x2] = heat
+        if peak_text:
+            (tw, _), _ = cv2.getTextSize(peak_text, FONT, 0.36, 1)
+            cv2.putText(
+                canvas, peak_text, (x2 - tw - 3, y2 - 5),
+                FONT, 0.36, (255, 255, 255), 1, cv2.LINE_AA,
+            )
+    cv2.rectangle(canvas, (x, y), (x2, y2), (90, 90, 90), 1)
+
+
 def _refresh_panels(
     tracker,
     dyn_image,
@@ -305,6 +413,14 @@ def _refresh_panels(
     )
     _resize_into(t_crop, panel_template)
     _stamp_panel(panel_template, f"TEMPLATE  F:{frame_idx}", updated=updated)
+    _stamp_template_stats(
+        panel_template,
+        trk=float(getattr(tracker, "_last_template_update_score", float("nan"))),
+        drm=float(getattr(tracker, "_last_template_update_drm", float("nan"))),
+        sharp=float(
+            getattr(tracker, "_last_template_update_sharpness", float("nan"))
+        ),
+    )
 
     s_ctx = extend_bbox(
         dyn_bbox, image_width=iw, image_height=ih, offset=cfg["search_context"]
@@ -387,6 +503,8 @@ def run_inference(
 
     if not output_video:
         import time
+        import threading
+        import queue
 
         progress = SiamRAMProgressLine(progress_name, total_frames=total_frames)
         tracker.initialize(first_bgr, initial_bbox)
@@ -406,10 +524,51 @@ def run_inference(
         frame_times: list[float] = []
         frame_idx = 1
 
+        # Frame prefetch: one background thread decodes the next frame while the
+        # GPU tracks the current one, hiding JPEG/video decode behind compute. A
+        # single producer + FIFO queue preserves exact frame order, so tracker
+        # output is identical to the old inline-read loop. `None` is the
+        # end-of-stream sentinel (also covers the first failed/short read, which
+        # the old loop handled via `if not ret or frame is None: break`).
+        frame_q: "queue.Queue" = queue.Queue(maxsize=4)
+        stop_reading = threading.Event()
+        reader_exc: list = []
+
+        def _frame_reader() -> None:
+            try:
+                while not stop_reading.is_set():
+                    ret, fr = _read_next_frame()
+                    if not ret or fr is None:
+                        break
+                    # Wait for room, but wake periodically so a stop request
+                    # (consumer finished/errored) can never deadlock the reader.
+                    while not stop_reading.is_set():
+                        try:
+                            frame_q.put(fr, timeout=0.25)
+                            break
+                        except queue.Full:
+                            continue
+            except Exception as exc:  # surface a hard decode error to the main thread
+                reader_exc.append(exc)
+            finally:
+                # Reliably deliver the sentinel in the normal case; skip if the
+                # consumer already asked us to stop (it is no longer reading).
+                while not stop_reading.is_set():
+                    try:
+                        frame_q.put(None, timeout=0.25)
+                        break
+                    except queue.Full:
+                        continue
+
+        reader_thread = threading.Thread(
+            target=_frame_reader, name="frame-prefetch", daemon=True
+        )
+        reader_thread.start()
+
         try:
             while True:
-                ret, frame = _read_next_frame()
-                if not ret or frame is None:
+                frame = frame_q.get()
+                if frame is None:
                     break
 
                 t0 = time.perf_counter()
@@ -434,8 +593,21 @@ def run_inference(
                 frame_idx += 1
 
         finally:
+            # Stop the reader and drain buffered frames so a producer blocked on
+            # put() can exit, then join before releasing the capture (the reader
+            # is the sole owner of the cap / imread cursor).
+            stop_reading.set()
+            try:
+                while True:
+                    frame_q.get_nowait()
+            except queue.Empty:
+                pass
+            reader_thread.join(timeout=2.0)
             progress.finish()
             _release_source()
+
+        if reader_exc:
+            raise reader_exc[0]
 
         if use_preallocated:
             tracked_bboxes = tracked_bboxes[:bbox_idx]
@@ -456,9 +628,13 @@ def run_inference(
         C_STATUS_OCC = (0, 0, 200)
         C_STATUS_OK = (0, 180, 0)
         C_STATUS_TEXT = (255, 255, 255)
+        inner_tracker._viz_capture = True
 
         top_h = max(h, PANEL_W * 3 + GAP * 2)
-        canvas_h = top_h
+        stats_strip_h = 236
+        stats_strip_gap = 8
+        stats_y0 = top_h + stats_strip_gap
+        canvas_h = top_h + stats_strip_gap + stats_strip_h
         total_w = w + PANEL_W
         y_off = (top_h - h) // 2
 
@@ -477,6 +653,41 @@ def run_inference(
             avi_path, cv2.VideoWriter_fourcc(*"XVID"), fps, (total_w, canvas_h)
         )
         progress = SiamRAMProgressLine(progress_name, total_frames=total_frames)
+
+        # Bottom-left heatmap insets: SiamABC classification response map, raw vs
+        # after the scale/Hanning penalty. Sized from the frame width so two
+        # squares fit side by side; skipped on frames too narrow to hold them.
+        viz_pad = 8
+        viz_label_h = 16
+        viz_sz = int(min(112, max(56, (w - 3 * viz_pad) // 2)))
+        viz_y = y_off + h - viz_sz - viz_label_h - viz_pad
+        viz_x_raw = viz_pad
+        viz_x_pen = viz_pad + viz_sz + viz_pad
+        viz_enabled = (w >= 2 * 56 + 3 * viz_pad) and (viz_y >= y_off)
+
+        def _viz_peak(m) -> "str | None":
+            try:
+                return f"max {float(np.max(m)):.2f}" if m is not None else None
+            except (ValueError, TypeError):
+                return None
+
+        def _draw_viz_panels() -> None:
+            """Draw the classification-head response maps (raw vs after the
+            scale/Hanning penalty) bottom-left, from the maps the SiamABC tracker
+            stashed during its last primary forward. Same colormap + scale so the
+            penalty's spatial reweighting is directly comparable."""
+            if not viz_enabled:
+                return
+            raw_map = getattr(inner_tracker, "viz_cls_map", None)
+            pen_map = getattr(inner_tracker, "viz_cls_pen_map", None)
+            _draw_heatmap_panel(
+                canvas, viz_x_raw, viz_y, viz_sz, raw_map,
+                "CLS RAW", _CMAP_CLS, normalize=False, peak_text=_viz_peak(raw_map),
+            )
+            _draw_heatmap_panel(
+                canvas, viz_x_pen, viz_y, viz_sz, pen_map,
+                "CLS PENALTY", _CMAP_CLS, normalize=False, peak_text=_viz_peak(pen_map),
+            )
 
         def _overlay_bbox(
             bb,
@@ -583,6 +794,25 @@ def run_inference(
                 cv2.LINE_AA,
             )
 
+        def _draw_stats_strip_base() -> None:
+            cv2.line(
+                canvas,
+                (0, top_h + stats_strip_gap // 2),
+                (total_w - 1, top_h + stats_strip_gap // 2),
+                (90, 90, 90),
+                1,
+            )
+            cv2.putText(
+                canvas,
+                "STATS",
+                (w + 6, stats_y0 + 14),
+                FONT,
+                0.42,
+                (190, 190, 190),
+                1,
+                cv2.LINE_AA,
+            )
+
         tracker.initialize(first_bgr, initial_bbox)
         _refresh_panels(
             inner_tracker,
@@ -605,7 +835,9 @@ def run_inference(
         cv2.putText(
             canvas, "F:0  INIT", (156, y_off + 22), FONT, 0.45, C_FRAME, 1, cv2.LINE_AA
         )
-        _draw_legend(canvas, w + 4, canvas_h - 90)
+        _draw_stats_strip_base()
+        _draw_legend(canvas, 8, stats_y0 + 24)
+        _draw_viz_panels()
         writer.write(canvas)
         progress.update("tracking")
 
@@ -771,7 +1003,6 @@ def run_inference(
                 cv2.putText(
                     canvas, hud, (156, y_off + 22), FONT, 0.45, C_FRAME, 1, cv2.LINE_AA
                 )
-                _draw_legend(canvas, w + 4, canvas_h - 90)
 
                 if is_dam and in_occlusion:
                     proc_frame = (
@@ -798,11 +1029,13 @@ def run_inference(
                         1,
                         cv2.LINE_AA,
                     )
+                _draw_stats_strip_base()
+                _draw_legend(canvas, 8, stats_y0 + 24)
                 # Right-column readout stack, drawn LAST so the full-width
-                # panels stay readable. Bottom-anchored: each box stacks upward.
+                # strip stays readable. Bottom-anchored inside the reserved stats band.
                 stack_x0 = w + 4
                 stack_x1 = total_w - 4
-                stack_y = min(canvas_h - 6, PANEL_W * 3 + GAP * 2 + 92)
+                stack_y = canvas_h - 6
 
                 def _stack_box(y_bottom, line1, line2, fg):
                     y_top = y_bottom - 40
@@ -812,14 +1045,27 @@ def run_inference(
                     cv2.rectangle(
                         canvas, (stack_x0, y_top), (stack_x1, y_bottom), (70, 70, 70), 1
                     )
-                    cv2.putText(
-                        canvas, line1, (stack_x0 + 6, y_top + 16),
-                        FONT, 0.42, fg, 1, cv2.LINE_AA,
-                    )
-                    cv2.putText(
-                        canvas, line2, (stack_x0 + 6, y_top + 33),
-                        FONT, 0.38, fg, 1, cv2.LINE_AA,
-                    )
+
+                    def _fit_text(text, y, scale):
+                        max_w = max(20, stack_x1 - stack_x0 - 12)
+                        while scale > 0.28:
+                            (tw, _), _ = cv2.getTextSize(text, FONT, scale, 1)
+                            if tw <= max_w:
+                                break
+                            scale -= 0.03
+                        cv2.putText(
+                            canvas,
+                            text,
+                            (stack_x0 + 6, y),
+                            FONT,
+                            scale,
+                            fg,
+                            1,
+                            cv2.LINE_AA,
+                        )
+
+                    _fit_text(line1, y_top + 16, 0.42)
+                    _fit_text(line2, y_top + 33, 0.38)
                     return y_top - 6
 
                 # (1) Adaptive DRM acceptance margin (only when drm_margin=="auto";
@@ -876,6 +1122,38 @@ def run_inference(
                         (255, 180, 80),
                     )
 
+                auto_dyn = (
+                    getattr(inner_tracker, "_dynamic_update_threshold_auto", None)
+                    if is_dam
+                    else None
+                )
+                if auto_dyn is not None:
+                    ema = auto_dyn.ema
+                    cur = getattr(inner_tracker, "_last_dyn_self_score", None)
+                    cur_txt = "--" if cur is None else f"{float(cur):.3f}"
+                    t_l2 = (
+                        f"(auto, warmup) cur={cur_txt}"
+                        if ema is None
+                        else f"(auto) ema={ema:.3f} cur={cur_txt} n={auto_dyn.samples}"
+                    )
+                    stack_y = _stack_box(
+                        stack_y,
+                        f"Tmpl admit: {auto_dyn.value:.3f}",
+                        t_l2,
+                        (255, 160, 60),
+                    )
+
+                if is_dam:
+                    n_cur = int(getattr(inner_tracker, "N", 0))
+                    win_cur = int(getattr(inner_tracker, "memory_window_size", 0))
+                    stack_y = _stack_box(
+                        stack_y,
+                        f"Tmpl rate: N={n_cur} win={win_cur}",
+                        "(fixed)",
+                        (0, 210, 140),
+                    )
+
+                _draw_viz_panels()
                 writer.write(canvas)
 
             frame_idx += 1

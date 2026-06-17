@@ -2,7 +2,7 @@
 
 <div align="center">
 
-**Robust long-term visual object tracking with occlusion recovery and distractor-aware reacquisition**
+**Robust long-term visual object tracking with occlusion recovery and appearance-aware reacquisition**
 
 [![Python](https://img.shields.io/badge/Python-3.10-blue.svg)](https://www.python.org/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.11.0-orange.svg)](https://pytorch.org/)
@@ -16,9 +16,9 @@
 SiamRAM is a hybrid long-term tracker built around a fast local Siamese tracker
 (SiamABC), homography-based Global Motion Compensation (GMC), a center-state
 Extended Kalman Filter (EKF), YOLO re-detection, and short/long-term appearance
-memory (RAM/DRM). It separates ordinary tracking, distractor handling, and
-lost-target recovery into distinct modes so camera motion, temporary occlusion,
-and look-alike objects do not all trigger the same response.
+memory (RAM/DRM). It separates ordinary tracking from lost-target recovery so
+camera motion, temporary occlusion, and look-alike objects do not all trigger
+the same response.
 
 The current recovery path is adaptive. A YOLO-detectability probe decides
 whether an occluded sequence should rely on SiamABC alone or on multi-frame
@@ -44,7 +44,7 @@ by SiamABC before the tracker commits and resumes normal tracking.
 
 The live tracker is coordinated by
 `models/siamram/tracker.py`. Its major collaborators are the camera-motion,
-occlusion-recovery, distractor-mode, spike-watcher, motion, and memory modules.
+occlusion-recovery, motion, and memory modules.
 
 ```mermaid
 flowchart TD
@@ -53,11 +53,7 @@ flowchart TD
     C --> D{Already in occlusion?}
     D -- No --> E[Validate and apply GMC search prior]
     E --> F[SiamABC local tracking]
-    F --> G{Distractor mode active?}
-    G -- Yes --> H[YOLO ROI ranking and hold/lock guards]
-    G -- No --> I[Optional spike/jump watcher]
-    H --> J{Loss-entry gate reached?}
-    I --> J
+    F --> J{Loss-entry gate reached?}
     J -- No --> K[Update EKF, memory, and clean history]
     J -- Yes --> L[Enter occlusion and rebuild EKF from clean history]
     D -- Yes --> M[Occlusion dispatcher]
@@ -84,10 +80,9 @@ bbox through the reliable homography and inject that warped bbox as SiamABC's
 search starting point. Healthy predictions update the EKF, motion history, and
 appearance memory.
 
-The tracker also runs early class/detectability probes and can adapt SiamABC's
-dynamic-template cadence to target or camera motion. Low confidence must pass
-the configured grace period, hysteresis, and camera-motion guards before it is
-treated as a real loss.
+The tracker also runs early class/detectability probes. Low confidence must
+pass the configured grace period, hysteresis, and camera-motion guards before
+it is treated as a real loss.
 
 ### GMC and Motion Model
 
@@ -118,23 +113,6 @@ edge until the predicted motion points back into the frame.
 
 The default descriptor backend is OSNet. SiamABC-feature and legacy pixel
 descriptor backends are also supported by the tracker configuration.
-
-### Distractor Mode
-
-The optional spike watcher detects camera-compensated, abnormal bbox jumps. A
-confirmed jump snaps the tracker back to a stable pre-jump anchor, stores the
-switched object as a distractor, and enters distractor mode.
-
-Distractor mode runs YOLO in a focused ROI and ranks candidates using target
-appearance, focus IoU/distance, the negative distractor bank, and optional EKF
-Mahalanobis gating. Ambiguous evidence is deliberately held instead of causing
-an immediate identity switch. The mode includes below-gate motion holds,
-overlap motion locks, stable-exit confirmation, and an optional forced handoff
-to occlusion recovery when the real target appears lost.
-
-> The current inference config keeps this machinery available but sets
-> `spike_reject_enabled: false`, so spike-triggered distractor-mode entry is
-> disabled by default.
 
 ### Occlusion Recovery
 
@@ -188,12 +166,14 @@ Important current defaults:
 | `trt_engine.trt_compile_osnet` | `true` | Compile the OSNet descriptor engine |
 | `ram_tracker.camera_motion.core.homography_mode` | `classic` | Fast GMC estimator |
 | `ram_tracker.gmc_prior.gmc_prior_enabled` | `true` | Warp the previous bbox into SiamABC's search prior |
-| `ram_tracker.camera_motion.gating.block_distractor_mode_on_camera_motion` | `true` | Suppress false jump-switches during heavy camera motion |
 | `ram_tracker.camera_motion.gating.block_occlusion_on_camera_motion` | `false` | Allow low-confidence occlusion entry during heavy motion |
+| `tracker.dynamic_template.blur_gate_enabled` | `false` | Keep sharpness-based template admission gate off unless enabled |
+| `ram_tracker.template_drm_gate.dynamic_template_drm_admit_enabled` | `false` | Use inner score/IoU gates only unless DRM-fit gating is enabled |
+| `ram_tracker.occlusion.entry.conf_threshold` | `0.5` | Fixed occlusion-entry score bar; `auto` can be enabled in config |
 | `ram_tracker.occlusion.detectability_probe.yolo_detectability_enabled` | `true` | Select SiamABC-only versus YOLO+DRM recovery |
 | `ram_tracker.occlusion.phase1_collect.cand_collection_frames` | `1` | Number of YOLO collection frames |
+| `ram_tracker.occlusion.reacquire_confirm.reacq_threshold` | `0.7` | Fixed tracker-verification score bar; `auto` can be enabled in config |
 | `ram_tracker.occlusion.reacquire_confirm.reacq_confirm_frames` | `1` | Verification frames before committing recovery |
-| `ram_tracker.spike_reject.spike_reject_enabled` | `false` | Spike-triggered distractor entry is off |
 | `ram_tracker.yolo.copile_yolo` | `false` | Ultralytics YOLO engine export is off |
 
 ---

@@ -718,7 +718,6 @@ class OcclusionRecoverySubsystem:
         self._host.velocity = ekf.get_velocity()
     
         self._host.in_occlusion = False
-        self._host._distractor_occlusion_active = False
         self._host._out_of_frame = False
         self._host._exit_edge = None
         self._host._occ_frames = 0
@@ -728,24 +727,6 @@ class OcclusionRecoverySubsystem:
         self._host._occ_cam_vels = []
         self._host._reset_reacq_confirmation()
         self._host._entry_streak = 0
-        self._host._distractor_mode_active = False
-        self._host._distractor_mode_visual_reals = []
-        self._host._distractor_mode_visual_distractors = []
-        self._host._distractor_mode_roi = None
-        self._host._distractor_mode_roi_size = None
-        self._host._distractor_mode_stable_count = 0
-        self._host._distractor_mode_ambiguous_count = 0
-        self._host._distractor_mode_reentry_cooldown = 0
-        self._host._distractor_mode_memory_freeze_left = 0
-        self._host._distractor_mode_template_freeze_left = 0
-        self._host._distractor_anchor_ekf = None
-        self._host._distractor_anchor_pred_bbox = None
-        self._host._distractor_mode_overlap_lock_active = False
-        self._host._distractor_mode_overlap_clear_count = 0
-        self._host._distractor_mode_overlap_lock_frames = 0
-        self._host._distractor_anchor_uncertainty = 0.0
-        self._host._clear_jump_watch_state()
-        self._host._jump_reject_distractor_timer = 0
         self._host.tracker.enable_tta()
         self._host.tracker.dynamic_update = self._host.tracker.tracking_config["dynamic_update"]
     
@@ -762,8 +743,6 @@ class OcclusionRecoverySubsystem:
             self._host.memory.try_admit(ekf_bbox, desc, self._host.held_box)
         self._host.current_bbox: NDArray = ekf_bbox.copy()
         self._host.held_box = ekf_bbox.copy()
-        self._host._stable_anchor_bbox = ekf_bbox.copy()
-        self._host._distractor_focus_bbox = ekf_bbox.copy()
         self._host.tracker.tracking_state.bbox = ekf_bbox.copy()
         self._host._search_cx = float(ekf_bbox[0] + ekf_bbox[2] / 2.0)
         self._host._search_cy = float(ekf_bbox[1] + ekf_bbox[3] / 2.0)

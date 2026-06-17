@@ -80,7 +80,6 @@ class FrameHistory:
         vel_history: Deque[np.ndarray],
         cam_vel_history: Deque[np.ndarray],
         cam_disp_history: Deque[float],
-        spike_step_norms: Deque[float],
     ) -> None:
         self._conf_history = conf_history
         self._size_history = size_history
@@ -88,7 +87,6 @@ class FrameHistory:
         self._vel_history = vel_history
         self._cam_vel_history = cam_vel_history
         self._cam_disp_history = cam_disp_history
-        self._spike_step_norms = spike_step_norms
 
     def clear(self) -> None:
         """Clear all synchronized history deques together."""
@@ -98,7 +96,6 @@ class FrameHistory:
         self._vel_history.clear()
         self._cam_vel_history.clear()
         self._cam_disp_history.clear()
-        self._spike_step_norms.clear()
 
     def commit_normal(
         self,
@@ -109,7 +106,6 @@ class FrameHistory:
         size_wh: tuple[int, int],
         cam_velocity: np.ndarray,
         cam_displacement: float,
-        spike_step_norm: Optional[float],
     ) -> None:
         """
         Commit one normal-tracking frame to all lockstep histories.
@@ -119,8 +115,6 @@ class FrameHistory:
         self._size_history.append((int(size_wh[0]), int(size_wh[1])))
         self._cam_vel_history.append(cam_velocity.copy())
         self._cam_disp_history.append(float(cam_displacement))
-        if spike_step_norm is not None:
-            self._spike_step_norms.append(float(spike_step_norm))
         self._conf_history.append(record)
 
     def commit_recovery(
@@ -129,7 +123,6 @@ class FrameHistory:
         record: FrameRecord,
         center: np.ndarray,
         cam_velocity: np.ndarray,
-        spike_step_norm: Optional[float],
     ) -> None:
         """
         Commit one recovery-confirmed frame.
@@ -138,6 +131,4 @@ class FrameHistory:
         """
         self._center_history.append(center.copy())
         self._cam_vel_history.append(cam_velocity.copy())
-        if spike_step_norm is not None:
-            self._spike_step_norms.append(float(spike_step_norm))
         self._conf_history.append(record)

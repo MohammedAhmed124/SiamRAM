@@ -45,37 +45,9 @@ def migrate_config(path: Path) -> Any:
         "confirm_frames": _maybe_get(ram, "reacq_confirm_frames", 1),
         "occ_siam_threshold": _maybe_get(ram, "occ_siam_reacq_threshold", 0.80),
     }
-    subsystems.spike_reject = {
-        "enabled": _maybe_get(exp, "spike_reject_enabled", True),
-        "min_frames": _maybe_get(exp, "spike_reject_min_frames", 3),
-        "min_score": _maybe_get(exp, "spike_reject_min_score", 0.50),
-        "history_window": _maybe_get(exp, "spike_reject_history_window", 40),
-        "min_history": _maybe_get(exp, "spike_reject_min_history", 5),
-        "ratio": _maybe_get(exp, "spike_reject_ratio", 2.5),
-        "abs_norm_min": _maybe_get(exp, "spike_reject_abs_norm_min", 0.0),
-        "use_appearance": _maybe_get(exp, "spike_reject_use_appearance", False),
-        "max_sim": _maybe_get(exp, "spike_reject_max_sim", 0.65),
-        "watch_max_frames": _maybe_get(exp, "spike_reject_watch_max_frames", 8),
-        "settle": {
-            "ratio": _maybe_get(exp, "spike_reject_settle_ratio", 0.70),
-            "abs_norm_max": _maybe_get(exp, "spike_reject_settle_abs_norm_max", 0.30),
-            "frames": _maybe_get(exp, "spike_reject_settle_frames", 1),
-            "from_spike_frac": _maybe_get(
-                exp, "spike_reject_settle_from_spike_frac", 0.55
-            ),
-        },
-        "anchor": {
-            "history_window": _maybe_get(exp, "spike_anchor_history_window", 12),
-            "trigger_norm": _maybe_get(exp, "spike_anchor_trigger_norm", 0.90),
-            "update_norm_max": _maybe_get(exp, "spike_anchor_update_norm_max", 0.60),
-        },
-    }
     subsystems.gmc_prior = {
         "enabled": _maybe_get(ram, "gmc_prior_enabled", True),
         "require_reliable_h": _maybe_get(ram, "gmc_prior_require_reliable_h", True),
-        "skip_in_distractor_mode": _maybe_get(
-            ram, "gmc_prior_skip_in_distractor_mode", True
-        ),
         "max_translation_frac": _maybe_get(ram, "gmc_prior_max_translation_frac", 0.25),
         "min_scale": _maybe_get(ram, "gmc_prior_min_scale", 0.70),
         "max_scale": _maybe_get(ram, "gmc_prior_max_scale", 1.40),

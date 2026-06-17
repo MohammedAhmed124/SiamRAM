@@ -23,6 +23,87 @@ INFERENCE_WEIGHT_PREFIXES = (
     "connect_model.",
 )
 
+TRACKER_CONFIG_ALIASES = {
+    "score_window_type": "windowing",
+    "score_grid_stride": "total_stride",
+    "score_grid_size": "score_size",
+    "template_update_enabled": "dynamic_update",
+    "bbox_smoothing_enabled": "smooth",
+    "template_context_padding": "template_bbox_offset",
+    "search_context_scale": "search_context",
+    "search_crop_size": "instance_size",
+    "template_crop_size": "template_size",
+    "template_update_interval": "N",
+    "warmup_template_update_interval": "warm_up_n",
+    "template_memory_window": "memory_window_size",
+    "template_admit_conf_threshold": "dynamic_update_threshold",
+    "running_confidence_floor": "running_confidence_floor_value",
+    "template_admit_iou_threshold": "iou_threshold",
+    "template_warmup_frames": "warmup_frames",
+    "warmup_template_memory_window": "warmup_window_size",
+}
+
+HANNING_WINDOW_PENALTY_ALIASES = {
+    "enabled": "hanning_window_enabled",
+    "window_type": "windowing",
+    "influence": "window_influence",
+    "size_penalty_enabled": "size_penalty_enabled",
+    "size_penalty_k": "penalty_k",
+    "bbox_size_smoothing_enabled": "smooth",
+    "bbox_size_smoothing_lr": "lr",
+}
+
+ARCHITECTURAL_CONFIG_ALIASES = {
+    "score_grid_stride": "total_stride",
+    "score_grid_size": "score_size",
+    "template_context_padding": "template_bbox_offset",
+    "search_context_scale": "search_context",
+    "search_crop_size": "instance_size",
+    "template_crop_size": "template_size",
+}
+
+DYNAMIC_TEMPLATE_ALIASES = {
+    "enabled": "dynamic_update",
+    "update_interval": "N",
+    "warmup_update_interval": "warm_up_n",
+    "memory_window": "memory_window_size",
+    "admit_conf_threshold": "dynamic_update_threshold",
+    "running_confidence_floor": "running_confidence_floor_value",
+    "admit_iou_threshold": "iou_threshold",
+    "warmup_frames": "warmup_frames",
+    "warmup_memory_window": "warmup_window_size",
+}
+
+
+def _apply_tracker_aliases(tracker_cfg, source_cfg, aliases) -> None:
+    for friendly_key, legacy_key in aliases.items():
+        if friendly_key in source_cfg:
+            tracker_cfg[legacy_key] = source_cfg[friendly_key]
+
+
+def normalize_tracker_config_aliases(config) -> None:
+    """Populate legacy SiamABC tracker keys from readable grouped config."""
+    if "tracker" not in config:
+        return
+    tracker_cfg = config["tracker"] if isinstance(config, dict) else config.tracker
+    _apply_tracker_aliases(tracker_cfg, tracker_cfg, TRACKER_CONFIG_ALIASES)
+
+    penalty_cfg = tracker_cfg.get("hanning_window_penalty", None)
+    if penalty_cfg is not None:
+        _apply_tracker_aliases(
+            tracker_cfg, penalty_cfg, HANNING_WINDOW_PENALTY_ALIASES
+        )
+
+    architectural_cfg = tracker_cfg.get("architectural_config", None)
+    if architectural_cfg is not None:
+        _apply_tracker_aliases(
+            tracker_cfg, architectural_cfg, ARCHITECTURAL_CONFIG_ALIASES
+        )
+
+    dynamic_cfg = tracker_cfg.get("dynamic_template", None)
+    if dynamic_cfg is not None:
+        _apply_tracker_aliases(tracker_cfg, dynamic_cfg, DYNAMIC_TEMPLATE_ALIASES)
+
 
 def _required_inference_prefixes(model: nn.Module) -> tuple[str, ...]:
     prefixes = list(INFERENCE_WEIGHT_PREFIXES)
@@ -158,6 +239,7 @@ def get_tracker(
         SiamABCTracker: An initialised tracker instance.
     """
 
+    normalize_tracker_config_aliases(config)
     model = instantiate(config["model"], inference_mode=True, norm_lambda=lambda_tta)
 
     model = load_model(

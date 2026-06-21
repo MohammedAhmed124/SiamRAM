@@ -1,0 +1,244 @@
+{
+  "public_lb": {
+    "dataset1_basketball_4": {
+      "video_path": "dataset1/basketball_4/basketball_4.mp4",
+      "annotation_path": "dataset1/basketball_4/annotation_first_box.txt",
+      "n_frames": 241
+    },
+    "dataset1_boat": {
+      "video_path": "dataset1/boat/boat.mp4",
+      "annotation_path": "dataset1/boat/annotation_first_box.txt",
+      "n_frames": 896
+    },
+    "dataset1_boat_2": {
+      "video_path": "dataset1/boat_2/boat_2.mp4",
+      "annotation_path": "dataset1/boat_2/annotation_first_box.txt",
+      "n_frames": 664
+    },
+    "dataset1_boat_with_person": {
+      "video_path": "dataset1/boat_with_person/boat_with_person.mp4",
+      "annotation_path": "dataset1/boat_with_person/annotation_first_box.txt",
+      "n_frames": 360
+    },
+    "dataset1_fish": {
+      "video_path": "dataset1/fish/fish.mp4",
+      "annotation_path": "dataset1/fish/annotation_first_box.txt",
+      "n_frames": 308
+    },
+    "dataset1_football": {
+      "video_path": "dataset1/football/football.mp4",
+      "annotation_path": "dataset1/football/annotation_first_box.txt",
+      "n_frames": 170
+    },
+    "dataset1_football_2": {
+      "video_path": "dataset1/football_2/football_2.mp4",
+      "annotation_path": "dataset1/football_2/annotation_first_box.txt",
+      "n_frames": 519
+    },
+    "dataset1_horse_1": {
+      "video_path": "dataset1/horse_1/horse_1.mp4",
+      "annotation_path": "dataset1/horse_1/annotation_first_box.txt",
+      "n_frames": 661
+    },
+    "dataset1_horse_2": {
+      "video_path": "dataset1/horse_2/horse_2.mp4",
+      "annotation_path": "dataset1/horse_2/annotation_first_box.txt",
+      "n_frames": 471
+    },
+    "dataset1_horse_3": {
+      "video_path": "dataset1/horse_3/horse_3.mp4",
+      "annotation_path": "dataset1/horse_3/annotation_first_box.txt",
+      "n_frames": 202
+    },
+    "dataset1_horse_5": {
+      "video_path": "dataset1/horse_5/horse_5.mp4",
+      "annotation_path": "dataset1/horse_5/annotation_first_box.txt",
+      "n_frames": 192
+    },
+    "dataset1_horses(zebras)": {
+      "video_path": "dataset1/horses(zebras)/horses(zebras).mp4",
+      "annotation_path": "dataset1/horses(zebras)/annotation_first_box.txt",
+      "n_frames": 1232
+    },
+    "dataset1_person_1": {
+      "video_path": "dataset1/person_1/person_1.mp4",
+      "annotation_path": "dataset1/person_1/annotation_first_box.txt",
+      "n_frames": 613
+    },
+    "dataset1_person_2": {
+      "video_path": "dataset1/person_2/person_2.mp4",
+      "annotation_path": "dataset1/person_2/annotation_first_box.txt",
+      "n_frames": 289
+    },
+    "dataset1_person_5": {
+      "video_path": "dataset1/person_5/person_5.mp4",
+      "annotation_path": "dataset1/person_5/annotation_first_box.txt",
+      "n_frames": 1040
+    },
+    "dataset1_person_6": {
+      "video_path": "dataset1/person_6/person_6.mp4",
+      "annotation_path": "dataset1/person_6/annotation_first_box.txt",
+      "n_frames": 259
+    },
+    "dataset1_person_parachute": {
+      "video_path": "dataset1/person_parachute/person_parachute.mp4",
+      "annotation_path": "dataset1/person_parachute/annotation_first_box.txt",
+      "n_frames": 576
+    },
+    "dataset1_surfer_2": {
+      "video_path": "dataset1/surfer_2/surfer_2.mp4",
+      "annotation_path": "dataset1/surfer_2/annotation_first_box.txt",
+      "n_frames": 445
+    },
+    "dataset1_surfer_3": {
+      "video_path": "dataset1/surfer_3/surfer_3.mp4",
+      "annotation_path": "dataset1/surfer_3/annotation_first_box.txt",
+      "n_frames": 490
+    },
+    "dataset1_surfer_4": {
+      "video_path": "dataset1/surfer_4/surfer_4.mp4",
+      "annotation_path": "dataset1/surfer_4/annotation_first_box.txt",
+      "n_frames": 288
+    },
+    "hidden_1": {
+      "video_path": "hidden/1/1.mp4",
+      "annotation_path": "hidden/1/annotation_first_box.txt",
+      "n_frames": 486
+    },
+    "hidden_10": {
+      "video_path": "hidden/10/10.mp4",
+      "annotation_path": "hidden/10/annotation_first_box.txt",
+      "n_frames": 104
+    },
+    "hidden_11": {
+      "video_path": "hidden/11/11.mp4",
+      "annotation_path": "hidden/11/annotation_first_box.txt",
+      "n_frames": 122
+    },
+    "hidden_12": {
+      "video_path": "hidden/12/12.mp4",
+      "annotation_path": "hidden/12/annotation_first_box.txt",
+      "n_frames": 109
+    },
+    "hidden_13": {
+      "video_path": "hidden/13/13.mp4",
+      "annotation_path": "hidden/13/annotation_first_box.txt",
+      "n_frames": 206
+    },
+    "hidden_14": {
+      "video_path": "hidden/14/14.mp4",
+      "annotation_path": "hidden/14/annotation_first_box.txt",
+      "n_frames": 180
+    },
+    "hidden_15": {
+      "video_path": "hidden/15/15.mp4",
+      "annotation_path": "hidden/15/annotation_first_box.txt",
+      "n_frames": 391
+    },
+    "hidden_16": {
+      "video_path": "hidden/16/16.mp4",
+      "annotation_path": "hidden/16/annotation_first_box.txt",
+      "n_frames": 140
+    },
+    "hidden_17": {
+      "video_path": "hidden/17/17.mp4",
+      "annotation_path": "hidden/17/annotation_first_box.txt",
+      "n_frames": 131
+    },
+    "hidden_18": {
+      "video_path": "hidden/18/18.mp4",
+      "annotation_path": "hidden/18/annotation_first_box.txt",
+      "n_frames": 181
+    },
+    "hidden_19": {
+      "video_path": "hidden/19/19.mp4",
+      "annotation_path": "hidden/19/annotation_first_box.txt",
+      "n_frames": 448
+    },
+    "hidden_2": {
+      "video_path": "hidden/2/2.mp4",
+      "annotation_path": "hidden/2/annotation_first_box.txt",
+      "n_frames": 307
+    },
+    "hidden_20": {
+      "video_path": "hidden/20/20.mp4",
+      "annotation_path": "hidden/20/annotation_first_box.txt",
+      "n_frames": 292
+    },
+    "hidden_21": {
+      "video_path": "hidden/21/21.mp4",
+      "annotation_path": "hidden/21/annotation_first_box.txt",
+      "n_frames": 421
+    },
+    "hidden_22": {
+      "video_path": "hidden/22/22.mp4",
+      "annotation_path": "hidden/22/annotation_first_box.txt",
+      "n_frames": 545
+    },
+    "hidden_23": {
+      "video_path": "hidden/23/23.mp4",
+      "annotation_path": "hidden/23/annotation_first_box.txt",
+      "n_frames": 219
+    },
+    "hidden_24": {
+      "video_path": "hidden/24/24.mp4",
+      "annotation_path": "hidden/24/annotation_first_box.txt",
+      "n_frames": 250
+    },
+    "hidden_25": {
+      "video_path": "hidden/25/25.mp4",
+      "annotation_path": "hidden/25/annotation_first_box.txt",
+      "n_frames": 90
+    },
+    "hidden_26": {
+      "video_path": "hidden/26/26.mp4",
+      "annotation_path": "hidden/26/annotation_first_box.txt",
+      "n_frames": 132
+    },
+    "hidden_27": {
+      "video_path": "hidden/27/27.mp4",
+      "annotation_path": "hidden/27/annotation_first_box.txt",
+      "n_frames": 250
+    },
+    "hidden_28": {
+      "video_path": "hidden/28/28.mp4",
+      "annotation_path": "hidden/28/annotation_first_box.txt",
+      "n_frames": 131
+    },
+    "hidden_3": {
+      "video_path": "hidden/3/3.mp4",
+      "annotation_path": "hidden/3/annotation_first_box.txt",
+      "n_frames": 338
+    },
+    "hidden_4": {
+      "video_path": "hidden/4/4.mp4",
+      "annotation_path": "hidden/4/annotation_first_box.txt",
+      "n_frames": 243
+    },
+    "hidden_5": {
+      "video_path": "hidden/5/5.mp4",
+      "annotation_path": "hidden/5/annotation_first_box.txt",
+      "n_frames": 163
+    },
+    "hidden_6": {
+      "video_path": "hidden/6/6.mp4",
+      "annotation_path": "hidden/6/annotation_first_box.txt",
+      "n_frames": 111
+    },
+    "hidden_7": {
+      "video_path": "hidden/7/7.mp4",
+      "annotation_path": "hidden/7/annotation_first_box.txt",
+      "n_frames": 117
+    },
+    "hidden_8": {
+      "video_path": "hidden/8/8.mp4",
+      "annotation_path": "hidden/8/annotation_first_box.txt",
+      "n_frames": 85
+    },
+    "hidden_9": {
+      "video_path": "hidden/9/9.mp4",
+      "annotation_path": "hidden/9/annotation_first_box.txt",
+      "n_frames": 107
+    }
+  }
+}

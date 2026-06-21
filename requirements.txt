@@ -1,0 +1,59 @@
+# =============================================================================
+# requirements.txt — SiamRAM Competition Submission
+# Exact versions locked from uv.lock for reproducibility.
+# Python 3.10 required.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# PyTorch ecosystem (CUDA 12.8 wheels)
+# Install manually from the PyTorch index if pip cannot resolve automatically:
+#   pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu128
+# ---------------------------------------------------------------------------
+torch==2.11.0
+torchvision==0.26.0
+
+# ---------------------------------------------------------------------------
+# Core inference dependencies
+# ---------------------------------------------------------------------------
+numpy==2.2.6
+opencv-python==4.13.0.92
+pandas==2.3.3
+omegaconf==2.3.0
+ultralytics==8.4.45
+gdown==6.0.0
+scipy==1.15.3
+pillow==12.2.0
+
+# ---------------------------------------------------------------------------
+# OSNet / torchreid dependencies
+# ---------------------------------------------------------------------------
+h5py==3.13.0
+future==1.0.0
+yacs==0.1.8
+chardet==5.2.0
+Cython==3.0.11
+easydict==1.13
+six==1.17.0
+coloredlogs==15.0.1
+
+# ---------------------------------------------------------------------------
+# Config / utility
+# ---------------------------------------------------------------------------
+antlr4-python3-runtime==4.9.3
+PyYAML==6.0.2
+einops==0.8.2
+tqdm==4.67.1
+typing_extensions==4.15.0
+filelock==3.18.0
+fsspec==2025.3.2
+requests==2.32.3
+packaging==25.0
+
+# ---------------------------------------------------------------------------
+# Git-sourced dependencies (install with pip install -e or direct git URL)
+# ---------------------------------------------------------------------------
+# OSNet / deep-person-reid (torchreid)
+git+https://github.com/KaiyangZhou/deep-person-reid.git@f8cd150fdf77e8d9e1ed143b7f308c2c609ded50
+
+# MobileCV (mobile-vision) — required by SiamABC backbone blocks
+git+https://github.com/facebookresearch/mobile-vision.git@bb8465cfe06327c35b398f3cc0b30e2e668eb0dd

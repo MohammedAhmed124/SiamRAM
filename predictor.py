@@ -12,9 +12,13 @@ run_tracker(model, video_path, init_box_path) → List[dict]
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
+import queue
+import subprocess
 import sys
+import threading
 import warnings
 from pathlib import Path
 
@@ -184,6 +188,55 @@ def read_init_box(path: str) -> list[float]:
 
 
 # ---------------------------------------------------------------------------
+# Video capture helpers — NVDEC on Jetson, CPU decode everywhere else
+# ---------------------------------------------------------------------------
+
+@functools.lru_cache(maxsize=1)
+def _nvv4l2decoder_available() -> bool:
+    """
+    Return True if the Jetson hardware H.264 decoder GStreamer plugin is
+    present and loadable.  Result is cached so the subprocess runs only once
+    per process, not once per video.
+    """
+    try:
+        result = subprocess.run(
+            ["gst-inspect-1.0", "nvv4l2decoder"],
+            capture_output=True,
+            timeout=2,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def _open_video(path: str) -> cv2.VideoCapture:
+    """
+    Open a video file for reading.
+
+    On Jetson Orin Nano (or any device with nvv4l2decoder), uses GStreamer
+    with the hardware NVDEC decoder (<1 ms/frame vs 8-15 ms CPU decode).
+    Falls back to OpenCV's default software decoder on any other device so
+    the code runs unchanged on x86 dev machines and CI.
+    """
+    if _nvv4l2decoder_available():
+        gst = (
+            f"filesrc location={path} ! "
+            "qtdemux ! h264parse ! nvv4l2decoder ! "
+            "nvvidconv ! video/x-raw,format=BGRx ! "
+            "videoconvert ! video/x-raw,format=BGR ! "
+            "appsink drop=1"
+        )
+        try:
+            cap = cv2.VideoCapture(gst, cv2.CAP_GSTREAMER)
+            if cap.isOpened():
+                return cap
+            cap.release()
+        except Exception:
+            pass
+    return cv2.VideoCapture(path)
+
+
+# ---------------------------------------------------------------------------
 # run_tracker
 # ---------------------------------------------------------------------------
 
@@ -203,51 +256,102 @@ def run_tracker(
     Returns:
         List of dicts with keys: frame_idx, x, y, w, h.
         The first entry is always the ground-truth init_box.
-    """
-    import numpy as np  # lazy import — ensures it's available at call time
 
+    Performance notes
+    -----------------
+    * A background reader thread decodes the next frame while the GPU tracks
+      the current one, hiding H.264 decode latency (~8-15 ms on CPU, <1 ms
+      with Jetson NVDEC) behind compute.
+    * On Jetson Orin Nano, _open_video() routes through GStreamer nvv4l2decoder
+      (hardware NVDEC) when available, falling back to software decode silently.
+    * Frame order is preserved by the FIFO queue — tracker output is identical
+      to a serial loop.
+    """
     init_box = read_init_box(init_box_path)
 
-    cap = cv2.VideoCapture(video_path)
+    cap = _open_video(video_path)
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open video: '{video_path}'")
 
-    predictions: list[dict] = []
-    frame_idx = 0
+    # ------------------------------------------------------------------
+    # Frame 0: read synchronously and initialise the tracker.
+    # The reader thread starts after this so it never races on frame 0.
+    # ------------------------------------------------------------------
+    success, first_frame = cap.read()
+    if not success or first_frame is None:
+        cap.release()
+        raise RuntimeError(f"Cannot read first frame from: '{video_path}'")
 
-    while True:
-        success, frame = cap.read()
-        if not success:
-            break
+    model.initialize(first_frame, init_box)
 
-        if frame_idx == 0:
-            # ----------------------------------------------------------------
-            # Frame 0: initialise the tracker with the ground-truth bbox.
-            # initialize() expects a full-resolution BGR numpy array and
-            # [x, y, w, h] in pixel coordinates.
-            # ----------------------------------------------------------------
-            model.initialize(frame, init_box)
-            pred_box = init_box  # first prediction is the given init box
-        else:
-            # ----------------------------------------------------------------
-            # Subsequent frames: call update() which returns
-            #   (bbox_array, score, in_occlusion, yolo_detections)
-            # bbox_array is a numpy array [x, y, w, h] in full-frame pixels.
-            # ----------------------------------------------------------------
+    x0, y0, w0, h0 = init_box
+    predictions: list[dict] = [
+        {"frame_idx": 0, "x": x0, "y": y0, "w": w0, "h": h0}
+    ]
+
+    # ------------------------------------------------------------------
+    # Frames 1..N: reader thread decodes ahead while GPU tracks.
+    # Queue depth 4 keeps the GPU fed without excessive memory use.
+    # ------------------------------------------------------------------
+    frame_q: queue.Queue = queue.Queue(maxsize=4)
+    stop_event = threading.Event()
+    reader_exc: list = []
+
+    def _frame_reader() -> None:
+        try:
+            while not stop_event.is_set():
+                ret, fr = cap.read()
+                if not ret or fr is None:
+                    break
+                # Block until there is room, but wake periodically so a
+                # stop request (consumer error/done) never deadlocks us.
+                while not stop_event.is_set():
+                    try:
+                        frame_q.put(fr, timeout=0.25)
+                        break
+                    except queue.Full:
+                        continue
+        except Exception as exc:
+            reader_exc.append(exc)
+        finally:
+            # Deliver end-of-stream sentinel; skip if consumer already stopped.
+            while not stop_event.is_set():
+                try:
+                    frame_q.put(None, timeout=0.25)
+                    break
+                except queue.Full:
+                    continue
+
+    reader = threading.Thread(target=_frame_reader, name="frame-prefetch", daemon=True)
+    reader.start()
+
+    frame_idx = 1
+    try:
+        while True:
+            frame = frame_q.get()
+            if frame is None:
+                break
+
             bbox_arr, _score, _in_occ, _yolo = model.update(frame)
-            pred_box = [float(v) for v in bbox_arr[:4]]
+            x, y, w, h = (float(v) for v in bbox_arr[:4])
+            predictions.append(
+                {"frame_idx": frame_idx, "x": x, "y": y, "w": w, "h": h}
+            )
+            frame_idx += 1
 
-        x, y, w, h = pred_box
-        predictions.append(
-            {
-                "frame_idx": frame_idx,
-                "x": x,
-                "y": y,
-                "w": w,
-                "h": h,
-            }
-        )
-        frame_idx += 1
+    finally:
+        # Signal reader to stop, drain any buffered frames so it can unblock
+        # from a put(), then join before releasing the capture handle.
+        stop_event.set()
+        try:
+            while True:
+                frame_q.get_nowait()
+        except queue.Empty:
+            pass
+        reader.join(timeout=2.0)
+        cap.release()
 
-    cap.release()
+    if reader_exc:
+        raise reader_exc[0]
+
     return predictions

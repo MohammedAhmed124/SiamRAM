@@ -1,22 +1,23 @@
 # =============================================================================
-# requirements.txt — SiamRAM Competition Submission
-# Exact versions locked from uv.lock for reproducibility.
-# Python 3.10 required.
+# requirements.nano.txt — Jetson Orin Nano deployment
+#
+# Use this file INSTEAD of requirements.txt on Jetson.
+#
+# torch, torchvision, tensorrt, and torch_tensorrt come pre-installed in the
+# nvcr.io/nvidia/l4t-pytorch base image — do NOT pip-install them here or
+# you will overwrite the ARM/L4T builds with broken x86 wheels.
+#
+# opencv-python is intentionally excluded: use the system python3-opencv
+# package (installed via apt in Dockerfile.nano) which includes GStreamer
+# and nvv4l2decoder support for hardware H.264 decoding on NVDEC.
+#
+# Python 3.10, JetPack 6.x (L4T r36.x), CUDA 12.2
 # =============================================================================
 
 # ---------------------------------------------------------------------------
-# PyTorch ecosystem (CUDA 12.8 wheels)
-# Install manually from the PyTorch index if pip cannot resolve automatically:
-#   pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu128
-# ---------------------------------------------------------------------------
-torch==2.11.0
-torchvision==0.26.0
-
-# ---------------------------------------------------------------------------
-# Core inference dependencies
+# Core inference dependencies  (no torch, torchvision, opencv — see above)
 # ---------------------------------------------------------------------------
 numpy==2.2.6
-opencv-python==4.13.0.92
 pandas==2.3.3
 omegaconf==2.3.0
 ultralytics==8.4.45
@@ -51,10 +52,7 @@ requests==2.32.3
 packaging==25.0
 
 # ---------------------------------------------------------------------------
-# Git-sourced dependencies (install with pip install -e or direct git URL)
+# Git-sourced dependencies
 # ---------------------------------------------------------------------------
-# OSNet / deep-person-reid (torchreid)
 git+https://github.com/KaiyangZhou/deep-person-reid.git@f8cd150fdf77e8d9e1ed143b7f308c2c609ded50
-
-# MobileCV (mobile-vision) — required by SiamABC backbone blocks
 git+https://github.com/facebookresearch/mobile-vision.git@bb8465cfe06327c35b398f3cc0b30e2e668eb0dd

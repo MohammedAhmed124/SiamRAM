@@ -243,28 +243,17 @@ class TRTSiamABCNet:
 
         _attn_mod = _AttentionNeck(model).eval().to(self._device).float()
         with quiet_external_logs():
-            _compiled = torch.compile(_attn_mod, dynamic=True, fullgraph=True)
-            try:
-                with torch.no_grad():
-                    for hw in (h_t, h_s):
-                        _dummy = torch.randn(
-                            1,
-                            C * 2,
-                            hw, hw,
-                            device=self._device,
-                            dtype=torch.float32,
-                        )
-                        _compiled(_dummy)   # trigger actual compilation
-                self._trt_attn = _compiled
-            except Exception:
-                # Triton/inductor unavailable (common on Jetson without the
-                # NVIDIA Triton wheel) — fall back to eager execution.
-                siamram_log(
-                    "torch.compile failed; falling back to eager attention neck",
-                    phase="TRT",
-                    status="warn",
-                )
-                self._trt_attn = _attn_mod
+            self._trt_attn = torch.compile(_attn_mod, dynamic=True, fullgraph=True)
+            with torch.no_grad():
+                for hw in (h_t, h_s):
+                    _dummy = torch.randn(
+                        1,
+                        C * 2,
+                        hw, hw,
+                        device=self._device,
+                        dtype=torch.float32,
+                    )
+                    self._trt_attn(_dummy)   # trigger actual compilation
         compile_progress().complete()
         compile_progress().stage("compiling connect engines")
 

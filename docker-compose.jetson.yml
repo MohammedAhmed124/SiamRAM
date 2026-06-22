@@ -17,7 +17,7 @@ services:
       dockerfile: Dockerfile.jetson
       args:
         # Match your JetPack version. JetPack 6.x -> r36.x, JetPack 5.x -> r35.x.
-        L4T_BASE: dustynv/l4t-pytorch:r36.2.0
+        L4T_BASE: dustynv/l4t-ml:r36.2.0
     image: siamram-jetson
     # JetPack's NVIDIA container runtime. This is how the container gets access
     # to the Orin Nano's integrated GPU (and the NVDEC hardware decoder). It is

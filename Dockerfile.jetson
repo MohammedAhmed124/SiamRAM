@@ -16,16 +16,25 @@
 # IMPORTANT — pick the base tag that matches YOUR JetPack version.
 # Check the version on the device first:
 #       cat /etc/nv_tegra_release
-# then choose a base:
-#       JetPack 6.x  ->  L4T r36.x  ->  dustynv/l4t-pytorch:r36.2.0   (default)
-#       JetPack 5.x  ->  L4T r35.x  ->  dustynv/l4t-pytorch:r35.4.1
+# then choose a matching tag:
+#       JetPack 6.x  ->  L4T r36.x  ->  dustynv/l4t-ml:r36.2.0   (default)
+#       JetPack 5.x  ->  L4T r35.x  ->  dustynv/l4t-ml:r35.4.1
 # You can override it without editing this file:
 #       docker build -f Dockerfile.jetson \
-#           --build-arg L4T_BASE=dustynv/l4t-pytorch:r35.4.1 \
+#           --build-arg L4T_BASE=dustynv/l4t-ml:r35.4.1 \
 #           -t siamram-jetson .
+#
+# Why l4t-ml and not l4t-pytorch:
+# l4t-ml bundles torch, torchvision, numpy, scipy, pandas AND OpenCV built with
+# CUDA + GStreamer, so the hardware NVDEC decode path works out of the box and we
+# barely have to pip-install anything. l4t-pytorch is lighter but does not always
+# include OpenCV / the scientific stack, which would break the decode path. If
+# you deliberately switch to l4t-pytorch, add opencv + scipy + pandas back to
+# requirements.jetson.txt yourself. Either way the build self-check below tells
+# you immediately if something the code needs is missing.
 # =============================================================================
 
-ARG L4T_BASE=dustynv/l4t-pytorch:r36.2.0
+ARG L4T_BASE=dustynv/l4t-ml:r36.2.0
 FROM ${L4T_BASE}
 
 ENV DEBIAN_FRONTEND=noninteractive

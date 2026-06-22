@@ -20,9 +20,12 @@
 #                           the good OpenCV and silently kills hardware decoding,
 #                           which is exactly why albumentations is left out below.
 #
-#   numpy, pillow       ->  left to whatever versions the base image's torch and
-#                           OpenCV were built against, so we don't upgrade them
-#                           out from under torch and break the ABI.
+#   numpy, pillow,      ->  provided by the l4t-ml base image, built to match its
+#   scipy, pandas           torch / OpenCV. We do NOT pin or reinstall these, so
+#                           we never upgrade them out from under torch and break
+#                           the numpy ABI. (scipy isn't imported by the inference
+#                           path at all; pandas is only used by check_submission.py
+#                           and is already in l4t-ml.)
 #
 #   albumentations      ->  only used by src/utils/dataset.py (training/data prep),
 #                           never on the inference path that the grader runs. It
@@ -35,11 +38,9 @@
 # =============================================================================
 
 # Core inference dependencies (minus the ones provided by the base image)
-pandas==2.3.3
 omegaconf==2.3.0
 ultralytics==8.4.45
 gdown==6.0.0
-scipy==1.15.3
 
 # OSNet / torchreid dependencies
 h5py==3.13.0

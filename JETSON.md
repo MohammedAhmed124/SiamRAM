@@ -24,11 +24,16 @@ to use:
 
 | JetPack | L4T   | Base image tag to use            |
 |---------|-------|----------------------------------|
-| 6.x     | r36.x | `dustynv/l4t-pytorch:r36.2.0` (default) |
-| 5.x     | r35.x | `dustynv/l4t-pytorch:r35.4.1`    |
+| 6.x     | r36.x | `dustynv/l4t-ml:r36.2.0` (default) |
+| 5.x     | r35.x | `dustynv/l4t-ml:r35.4.1`    |
 
 If your exact `r36.x` / `r35.x` differs, pick the closest published
-`dustynv/l4t-pytorch` tag (see hub.docker.com/r/dustynv/l4t-pytorch/tags).
+`dustynv/l4t-ml` tag (see hub.docker.com/r/dustynv/l4t-ml/tags).
+
+We use the `l4t-ml` image because it bundles torch, torchvision, the scientific
+stack, and an OpenCV built with CUDA + GStreamer, so hardware NVDEC works
+without extra work. The build will fail fast (on purpose) if the tag you pick
+doesn't actually have those.
 
 ## Step 2 — Turn on hardware decoding (optional but recommended)
 

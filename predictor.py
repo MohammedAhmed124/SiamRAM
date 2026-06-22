@@ -225,12 +225,19 @@ def _open_video(path: str) -> cv2.VideoCapture:
     original code on x86 / CI / eval machines.
     """
     if _USE_NVDEC and _nvv4l2decoder_available():
+        # sync=false   : do not throttle delivery to the video's native frame
+        #                rate — we want every frame as fast as the GPU can pull,
+        #                otherwise throughput is capped at e.g. 30 FPS.
+        # drop=false   : never drop frames; tracking needs one output row per
+        #                frame, so a dropped frame would desync the CSV.
+        # max-buffers=4: bounded backpressure (appsink blocks when full) so the
+        #                pipeline can't run ahead unboundedly in memory.
         gst = (
             f"filesrc location={path} ! "
             "qtdemux ! h264parse ! nvv4l2decoder ! "
             "nvvidconv ! video/x-raw,format=BGRx ! "
             "videoconvert ! video/x-raw,format=BGR ! "
-            "appsink drop=1"
+            "appsink sync=false drop=false max-buffers=4"
         )
         try:
             cap = cv2.VideoCapture(gst, cv2.CAP_GSTREAMER)

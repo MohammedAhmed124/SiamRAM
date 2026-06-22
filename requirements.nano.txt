@@ -24,6 +24,8 @@ ultralytics==8.4.45
 gdown==6.0.0
 scipy==1.15.3
 pillow==12.2.0
+# Imported at module level by src/utils/dataset.py (shipped, not on hot-path).
+albumentations==2.0.8
 
 # ---------------------------------------------------------------------------
 # OSNet / torchreid dependencies

@@ -1,484 +1,157 @@
 # SiamRAM
 
-<div align="center">
+Robust long-term visual object tracking with occlusion recovery and
+appearance-aware reacquisition. This branch is our MTC-AIC4 Phase 2 submission.
 
-**Robust long-term visual object tracking with occlusion recovery and appearance-aware reacquisition**
+![Python](https://img.shields.io/badge/Python-3.10-blue.svg)
+![PyTorch](https://img.shields.io/badge/PyTorch-2.11.0-orange.svg)
+![CUDA](https://img.shields.io/badge/CUDA-12.8-green.svg)
+![License](https://img.shields.io/badge/License-MIT-yellow.svg)
 
-[![Python](https://img.shields.io/badge/Python-3.10-blue.svg)](https://www.python.org/)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.11.0-orange.svg)](https://pytorch.org/)
-[![CUDA](https://img.shields.io/badge/CUDA-12.8-green.svg)](https://developer.nvidia.com/cuda-toolkit)
-[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+## What this is
 
-</div>
+SiamRAM tracks a single object through a video given only its box in the first
+frame. It pairs a fast Siamese tracker (SiamABC) with a recovery system that
+takes over when the target is lost, so camera shake, brief occlusion, and
+look-alike distractors are handled differently instead of all breaking tracking
+the same way.
 
-## Abstract
+The submission follows the Phase 2 layout. The grader's runner, `inference.py`,
+imports two functions from `predictor.py`:
 
-SiamRAM is a hybrid long-term tracker built around a fast local Siamese tracker
-(SiamABC), homography-based Global Motion Compensation (GMC), a center-state
-Extended Kalman Filter (EKF), YOLO re-detection, and short/long-term appearance
-memory (RAM/DRM). It separates ordinary tracking from lost-target recovery so
-camera motion, temporary occlusion, and look-alike objects do not all trigger
-the same response.
+- `load_model(device)` builds the tracker once.
+- `run_tracker(model, video_path, init_box_path)` tracks one video and returns
+  its box on every frame.
 
-The current recovery path is adaptive. A YOLO-detectability probe decides
-whether an occluded sequence should rely on SiamABC alone or on multi-frame
-YOLO candidate collection plus DRM ranking. Every accepted recovery is verified
-by SiamABC before the tracker commits and resumes normal tracking.
+`predictor.py` is the only file we wrote against the framework. Everything it
+relies on lives under `src/`, and every setting comes from one config file
+(`src/config/inference_config_944f2b8.yaml`).
 
-## Table of Contents
-
-- [System Architecture](#system-architecture)
-- [Current Configuration](#current-configuration)
-- [Installation](#installation)
-- [Checkpoints](#checkpoints)
-- [Quick Start](#quick-start)
-- [TensorRT Cache Behavior](#tensorrt-cache-behavior)
-- [Training](#training)
-- [Project Structure](#project-structure)
-- [Authors](#authors)
-- [Citation](#citation)
-
----
-
-## System Architecture
-
-The live tracker is coordinated by
-`models/siamram/tracker.py`. Its major collaborators are the camera-motion,
-occlusion-recovery, motion, and memory modules.
+## How it works
 
 ```mermaid
 flowchart TD
-    A[Frame] --> B[Estimate background homography]
-    B --> C[EKF prediction with reliable homography]
-    C --> D{Already in occlusion?}
-    D -- No --> E[Validate and apply GMC search prior]
-    E --> F[SiamABC local tracking]
-    F --> J{Loss-entry gate reached?}
-    J -- No --> K[Update EKF, memory, and clean history]
-    J -- Yes --> L[Enter occlusion and rebuild EKF from clean history]
-    D -- Yes --> M[Occlusion dispatcher]
+    A[Frame] --> B[Estimate camera motion]
+    B --> C[EKF predicts the next target centre]
+    C --> D{Currently lost?}
+    D -- No --> E[Warp last box forward, run SiamABC]
+    E --> F{Confidence dropped below the loss gate?}
+    F -- No --> K[Update EKF, memory, history]
+    F -- Yes --> L[Enter recovery, rebuild EKF from clean history]
+    D -- Yes --> M[Recovery dispatcher]
     L --> M
-    M --> N{YOLO-detectability verdict}
-    N -- Detectable --> O[Collect YOLO candidates]
-    N -- Not detectable --> P[Retry SiamABC phase 0]
-    N -- Unknown or disabled --> P
+    M --> N{Can YOLO see the target?}
+    N -- Yes --> O[Collect YOLO candidates]
+    N -- No --> P[Retry SiamABC alone]
+    O --> R[Rank with appearance memory, verify with SiamABC]
     P -- Verified --> Q[Commit reacquisition]
-    P -- Failed and YOLO allowed --> O
-    P -- Failed and not detectable --> P
-    O --> R[RAM/DRM rank and SiamABC verify]
+    R -- Verified --> Q
     R -- Failed --> M
-    R -- Verified --> S[Optional multi-frame confirmation]
-    S --> Q
     Q --> K
 ```
 
-### Normal Tracking
+The pieces, in order of how a frame flows through them:
 
-Each frame is prescaled, background motion is estimated, and the EKF predicts
-the next target center. Before SiamABC runs, the GMC prior can warp the previous
-bbox through the reliable homography and inject that warped bbox as SiamABC's
-search starting point. Healthy predictions update the EKF, motion history, and
-appearance memory.
+- **Camera motion (GMC).** Background motion between frames is estimated with
+  grid optical flow plus affine RANSAC. When the estimate is reliable it warps
+  the previous box forward to give SiamABC a better starting point, and it feeds
+  the motion model and the recovery logic.
+- **Motion model (EKF).** A Kalman filter on the target centre predicts where to
+  look next. While the target is lost it drives the expanding search region, and
+  it pins the search to the frame edge when the target left the view.
+- **SiamABC.** The per-frame local tracker. It produces a box and a confidence
+  score every frame.
+- **Appearance memory (RAM/DRM).** Recent confident appearances (RAM) and
+  longer-term confirmed ones (DRM) describe what the target looks like, plus a
+  distractor bank of known look-alikes to reject. OSNet is the default
+  descriptor backend.
+- **Occlusion recovery.** When confidence stays low past the loss gate, the
+  tracker rebuilds its motion estimate from clean history and tries to find the
+  target again: SiamABC alone if YOLO can't see it, otherwise YOLO candidates
+  ranked by appearance memory and confirmed by SiamABC before tracking resumes.
 
-The tracker also runs early class/detectability probes. Low confidence must
-pass the configured grace period, hysteresis, and camera-motion guards before
-it is treated as a real loss.
+## Setup and running (x86 + CUDA)
 
-### GMC and Motion Model
-
-`CameraMotionSubsystem` estimates background motion between consecutive frames:
-
-- `classic` mode uses grid optical flow plus affine RANSAC and is the default.
-- `accurate` mode uses feature tracking plus a full homography, then falls back
-  to `classic` if necessary.
-
-A homography is only used as a GMC search prior when it is reliable and passes
-translation, scale, rotation, and corner-displacement plausibility checks. The
-same camera-motion estimate is also used by the EKF, heavy-motion guards,
-loss-cause classification, and camera-compensated recovery-candidate velocity.
-
-`BBoxEKF` tracks `[cx, cy, vx, vy]`; bbox width and height are smoothed
-separately. During loss, its prediction drives the held bbox and expanding
-search ROI. Out-of-frame recovery pins the search center to the detected exit
-edge until the predicted motion points back into the frame.
-
-### Appearance Memory
-
-`AppearanceMemory` contains three identity signals:
-
-- **RAM:** recent high-confidence descriptors admitted only when bbox continuity
-  and area consistency pass.
-- **DRM:** longer-term descriptors promoted after repeated appearance agreement.
-- **Distractor bank:** negative descriptors used to suppress known look-alikes.
-
-The default descriptor backend is OSNet. SiamABC-feature and legacy pixel
-descriptor backends are also supported by the tracker configuration.
-
-### Occlusion Recovery
-
-Occlusion entry is not just a low-score branch. The tracker skips likely
-corrupted recent history, rebuilds the EKF from clean frames, freezes dynamic
-template updates/TTA, classifies the loss cause, and starts the recovery
-dispatcher immediately.
-
-Recovery then follows this policy:
-
-1. **Detectability policy:** an early normal-tracking probe determines whether
-   YOLO can detect the target. Detectable targets skip the SiamABC-only commit
-   path and rely on YOLO+DRM. Targets found not detectable retry SiamABC phase 0
-   and skip futile YOLO collection. If no verdict exists, the legacy phase
-   sequence is used.
-2. **Phase 0, SiamABC fast path:** seed SiamABC inside the growing or edge-pinned
-   ROI. Reacquisition requires both the SiamABC score gate and an appearance
-   memory/DRM gate.
-3. **Phase 1, candidate collection:** collect YOLO boxes and descriptors across
-   `cand_collection_frames`, recording camera velocity for motion compensation.
-4. **Phase 2, final ranking:** trace candidates across collection frames, rank
-   them with RAM/DRM according to policy, augment with motion consistency, and
-   verify the top candidates using SiamABC.
-5. **Confirmation and commit:** optionally require consecutive confident
-   verification frames, then update the EKF, clear recovery/distractor state,
-   restore normal tracker updates, and admit the recovered appearance.
-
-The current config uses one collection frame and one confirmation frame, so
-both values can be increased without changing the recovery implementation.
-
-For deeper design notes, see the
-[SiamRAM theory and architecture guide](docs/architecture/SIAMRAM_THEORY_AND_ARCHITECTURE.md)
-and the [System Description](docs/architecture/system_description.pdf). The source modules
-and `config/inference_config_experimental.yaml` are the authoritative behavior.
-
----
-
-## Current Configuration
-
-The primary inference config is
-`config/inference_config_experimental.yaml`. Every leaf below `ram_tracker` is
-flattened into a `SiamRAMExperimentTracker` keyword argument; the nesting is for
-readability.
-
-Important current defaults:
-
-| Config key | Default | Effect |
-|---|---:|---|
-| `trt_engine.trt_compile_siamabc` | `true` | Use the TensorRT SiamABC wrapper |
-| `trt_engine.backbone_mode` | `dynamic_fp16` | Dynamic-shape FP16 SiamABC backbone |
-| `trt_engine.trt_compile_osnet` | `true` | Compile the OSNet descriptor engine |
-| `ram_tracker.camera_motion.core.homography_mode` | `classic` | Fast GMC estimator |
-| `ram_tracker.gmc_prior.gmc_prior_enabled` | `true` | Warp the previous bbox into SiamABC's search prior |
-| `ram_tracker.camera_motion.gating.block_occlusion_on_camera_motion` | `false` | Allow low-confidence occlusion entry during heavy motion |
-| `tracker.dynamic_template.blur_gate_enabled` | `false` | Keep sharpness-based template admission gate off unless enabled |
-| `ram_tracker.template_drm_gate.dynamic_template_drm_admit_enabled` | `false` | Use inner score/IoU gates only unless DRM-fit gating is enabled |
-| `ram_tracker.occlusion.entry.conf_threshold` | `0.5` | Fixed occlusion-entry score bar; `auto` can be enabled in config |
-| `ram_tracker.occlusion.detectability_probe.yolo_detectability_enabled` | `true` | Select SiamABC-only versus YOLO+DRM recovery |
-| `ram_tracker.occlusion.phase1_collect.cand_collection_frames` | `1` | Number of YOLO collection frames |
-| `ram_tracker.occlusion.reacquire_confirm.reacq_threshold` | `0.7` | Fixed tracker-verification score bar; `auto` can be enabled in config |
-| `ram_tracker.occlusion.reacquire_confirm.reacq_confirm_frames` | `1` | Verification frames before committing recovery |
-| `ram_tracker.yolo.copile_yolo` | `false` | Ultralytics YOLO engine export is off |
-
----
-
-## Installation
-
-Depending on whether your machine has a GPU, follow one of these guides:
-
-- [CUDA / GPU Installation Guide](docs/getting-started/install-CUDA.md) — Native Docker, VSCode Devcontainer, or local `uv` with CUDA
-- [CPU-only Installation Guide](docs/getting-started/install-CPU.md) — Native Docker, VSCode Devcontainer, or local `uv` without a GPU
-
-The primary inference config currently enables TensorRT for SiamABC and OSNet,
-so the commands below assume a CUDA environment. For CPU inference, set
-`trt_engine.trt_compile_siamabc`, `trt_engine.trt_compile_osnet`, and
-`trt_engine.osnet_fp16` to `false` in a CPU-specific config.
-
-Throughout this README, every runnable step is shown for all three environments. If you are unsure which one applies to you:
-
-> 💡 **Which environment am I in?**
->
-> | How you installed | Your environment |
-> |---|---|
-> | Ran `poe gpu_setup` or `poe cpu_setup` in a terminal | **Native Docker** |
-> | Opened the project via *Dev Containers: Reopen in Container* in VSCode | **VSCode Devcontainer** |
-> | Ran `uv sync` directly on your machine | **Local uv** |
-
----
-
-## Checkpoints
-
-Inference requires two files under `checkpoints/`:
-
-- `inference_checkpoint.pth` — the SiamABC weights.
-- `yolo11n.pt` — the YOLO weights.
-
-`SiamABC_init_checkpoint.pth` is additionally available for training from
-scratch.
-
-Download all published checkpoints with:
+Requires Python 3.10 and a CUDA 12.8 GPU.
 
 ```bash
-uv run checkpoints/download_checkpoints.py
+pip install -r requirements.txt
 ```
 
-Or grab them directly from [Google Drive](https://drive.google.com/drive/folders/1BRPhnBnU9CDLU5qQPv-zQeKtqv1HMsl4?usp=drive_link) and place them in `checkpoints/`.
-
-If either required inference checkpoint is missing or corrupt,
-`run_inference.py` automatically invokes the downloader before building the
-tracker.
-
----
-
-## Quick Start
-
-`run_inference.py` expects the AIC-4 competition data layout under `data/`:
-
-```
-data/
-├── metadata/
-│   └── contestant_manifest.json
-└── <dataset_name>/
-    ├── <video_id>/
-    │   └── video.mp4
-    └── annotations/
-        └── <video_id>.txt     # single line: x,y,w,h
-```
-
-Paths are resolved against the repository root, even when the command is
-launched from elsewhere.
-
-### Full Public Leaderboard Split
-
-Run every `public_lb` entry and write a complete `submission.csv`:
+Then run the grader's entry point. It takes the manifest, the split name inside
+it, and the output CSV path:
 
 ```bash
-uv run run_inference.py --run_split public_lb --max_sequences 0
+python inference.py test.json public_lb submission.csv
 ```
 
-`public_lb` and `max_sequences=0` are already the defaults; they are written
-explicitly above so a full leaderboard run is unambiguous.
+The checkpoints download automatically on the first run, so the machine needs
+network access once. They are saved under `checkpoints/`:
 
-Force the serialized TensorRT engines to rebuild once before the full run:
+- `model.pth` (SiamABC weights)
+- `yolo11n.pt` (YOLO re-detector)
+- `osnet_x0_25_imagenet.pth` (OSNet appearance descriptor)
+
+The manifest lists each sequence's `video_path` and `annotation_path` (the
+first-frame box). Those paths are read relative to the directory you launch
+from, so run the command from the folder that holds the dataset, for example:
+
+```
+.
+├── test.json
+└── dataset1/
+    └── basketball_4/
+        ├── basketball_4.mp4
+        └── annotation_first_box.txt   # one line: x,y,w,h
+```
+
+## Running on a Jetson Orin Nano
+
+A Jetson is a different platform from an x86 GPU box (it has its own CUDA,
+PyTorch, and OpenCV from JetPack), so it gets its own Docker image instead of
+this `requirements.txt`. See **[JETSON.md](JETSON.md)** for the full steps. In
+short: pick the base image that matches your JetPack, build `Dockerfile.jetson`,
+and set `runtime.use_nvdec: true` in the config to use the hardware decoder.
+
+## Checking a submission CSV
+
+`check_submission.py` confirms a predictions CSV has the right columns and the
+same frame IDs as a reference CSV before you submit:
 
 ```bash
-uv run run_inference.py \
-    --run_split public_lb \
-    --max_sequences 0 \
-    --rebuild_trt_cache
+python check_submission.py reference.csv submission.csv
 ```
 
-### Useful Runs
+## Configuration
 
-```bash
-# Fast smoke test: first public-LB sequence only
-uv run run_inference.py --run_split public_lb --max_sequences 1
+Every setting lives in `src/config/inference_config_944f2b8.yaml` (the hash
+marks the commit whose behaviour it reproduces). `predictor.py` reads from it
+and does not override it, so the config is the single place to change anything:
+model and tracker hyperparameters, the YOLO/OSNet/SiamABC checkpoint paths, and
+the runtime switches (`use_nvdec` for hardware decoding, `cudnn_benchmark`).
 
-# One manifest video by exact key
-uv run run_inference.py --run_split all --video_key dataset1/volleyball
-
-# One video by generated numeric id or exact key, with annotated video output
-uv run run_single_video.py 42
-
-# Only selected datasets
-uv run run_inference.py --run_split public_lb --datasets dataset1 dataset3
-
-# Train and public-LB manifest entries in one pass
-uv run run_inference.py --run_split all
-
-# Write annotated debug videos in addition to bbox text files
-uv run run_inference.py --run_split public_lb --output_video
-```
-
-### Other Environments
-
-Start a native Docker container once with `poe gpu_up`, then replace the local
-`uv run` prefix with `poe gpu_run`:
-
-```bash
-poe gpu_run run_inference.py --run_split public_lb --max_sequences 0
-```
-
-Inside the VSCode devcontainer, run Python directly:
-
-```bash
-python run_inference.py --run_split public_lb --max_sequences 0
-```
-
-### Outputs
-
-By default, each sequence writes its bbox text file under:
-
-```text
-outputs/SiamRAM/<dataset>/<video_name>/<video_name>.txt
-```
-
-`--output_video` writes the annotated video beside that bbox file. At the end
-of the run, selected outputs are flattened into `submission.csv`.
-
-`--override_csv` rebuilds the selected split from all matching saved bbox files
-under `--outputs_dir`; when some files are missing, it preserves their prior
-rows only if the existing submission CSV is available.
-
-### CLI Arguments
-
-Run `uv run run_inference.py --help` for the authoritative live parser.
-
-| Argument | Default | Description |
-|---|---|---|
-| `--split` | unset | Convenience alias: `test` → `public_lb`; also accepts `train` and `all` |
-| `--run_split` | `public_lb` | Run `public_lb`, `train`, `train_csv`, or manifest `all` |
-| `--train_csv_path` | `data/train_dataframe.csv` | CSV used by `--run_split train_csv` |
-| `--data_dir` | `data` | Root containing videos and annotations |
-| `--max_sequences` | `0` | Sequence cap; `0` means no cap |
-| `--outputs_dir` | `outputs/SiamRAM` | Per-video output root |
-| `--output_layout` | `dataset` | Use `<dataset>/<video>/` or flat `<video>/` layout |
-| `--manifest_path` | `data/metadata/contestant_manifest.json` | Competition manifest |
-| `--weights_path` | `checkpoints/inference_checkpoint.pth` | SiamABC inference checkpoint |
-| `--yaml_config_path` | `config/inference_config_experimental.yaml` | Inference config |
-| `--model_size` | `M` | SiamABC size: `S`, `M`, or `L` |
-| `--lambda_tta` | `0.1` | Base tracker TTA lambda; TRT config can override it |
-| `--datasets` | all data subdirectories | Restrict selected datasets |
-| `--video_key` | unset | Restrict the run to one manifest sequence |
-| `--submission_csv` | `submission.csv` | Final submission path |
-| `--override_csv` | off | Rebuild/overlay CSV rows from saved bbox outputs |
-| `--output_video` | off | Write annotated debug videos; slower |
-| `--reuse_tracker` | off | Reuse one SiamRAM wrapper across clips |
-| `--trt_cache_dir` | `checkpoints/trt_engines` | Serialized TensorRT cache directory |
-| `--rebuild_trt_cache` | off | Ignore caches and rebuild/save supported engines once |
-| `--use_existing_trt_cache` | on | Load validated, fingerprint-matched caches |
-| `--disable_trt_cache` | off | Disable TensorRT cache loading and saving |
-
----
-
-## TensorRT Cache Behavior
-
-The primary config enables TensorRT compilation for SiamABC and OSNet. By
-default, validated fingerprint-matched engines are loaded from
-`checkpoints/trt_engines`.
-
-`--rebuild_trt_cache` forces a one-time startup rebuild of:
-
-- the SiamABC backbone TensorRT engine;
-- the two SiamABC connector engines;
-- the OSNet descriptor TensorRT engine, when the OSNet backend is active.
-
-It does **not** force-rebuild every kind of compiled object:
-
-- The SiamABC attention neck uses `torch.compile` once each time
-  `run_inference.py` starts. It is reused for every sequence in that process and
-  is not explicitly serialized under `checkpoints/trt_engines`.
-- Ultralytics YOLO `.engine` export is separate from this cache flag and is
-  disabled by default through the current `copile_yolo: false` config key.
-- `--disable_trt_cache` disables serialized engine load/save; with TensorRT
-  compilation still enabled in the YAML, supported engines compile for that
-  process without being saved.
-
-To compare SiamABC backbone modes against eager FP32 on representative real
-crops and free-running bare-tracker decisions:
-
-```bash
-uv run benchmark_siamabc_backbone.py
-```
-
-The benchmark keeps a candidate only when it stays within `3%` mean and `5%`
-p95 backbone latency of `dynamic_fp16`, then writes its recommendation and full
-metrics to `outputs/siamabc_backbone_benchmark.json`.
-
----
-
-## Training
-
-Training is a two-step process: first you build a frame-level index from the raw videos, then you fine-tune the tracking head against it.
-
-### Step 1 — Build the dataset index
-
-This decodes the raw videos in `data/` into individual frames at `data/<dataset>/<seq>/img/` (right next to each video) and writes the CSV index files the training loader expects. You only need to do this once per dataset.
-
-**Native Docker:**
-
-```bash
-poe gpu_run data_prep/build_dataset_index.py
-```
-
-**VSCode Devcontainer:**
-
-```bash
-python data_prep/build_dataset_index.py
-```
-
-**Local uv:**
-
-```bash
-uv run data_prep/build_dataset_index.py
-```
-
-### Step 2 — Fine-tune the tracking head
-
-All training hyperparameters — learning rate, batch size, number of epochs, checkpoint interval — are set in `config/training_config.yaml`. Edit that file before running.
-
-**Native Docker:**
-
-```bash
-poe gpu_run training/train_head.py
-```
-
-**VSCode Devcontainer:**
-
-```bash
-python training/train_head.py
-```
-
-**Local uv:**
-
-```bash
-uv run training/train_head.py
-```
-
-Checkpoints are saved to `checkpoints/` as `head_epoch_<NNN>.pth`. To run inference with a freshly trained checkpoint, pass it via `--weights_path`.
-
----
-
-## Project Structure
+## Project structure
 
 ```
-SiamRAM/
-├── models/                       # Tracker implementations
-│   ├── SiamRAM.py                # Main SiamRAMTracker class
-│   ├── ram_memory.py             # AppearanceMemory and DRM bank
-│   ├── motion_model.py           # BBoxEKF (Extended Kalman Filter)
-│   └── SiamABC/                  # Siamese base tracker
-├── utils/                        # Shared utilities (IoU, descriptors, cosine sim, losses, etc.)
-├── config/
-│   ├── inference_config.yaml
-│   ├── inference_config_experimental.yaml
-│   └── training_config.yaml
-├── data_prep/
-│   └── build_dataset_index.py   # Decodes videos to frames and builds the CSV index
-├── training/
-│   └── train_head.py            # Fine-tunes the SiamABC tracking head
-├── vis/                          # Visualisation tools
-├── containers/                   # Docker Compose files and environment verification
-│   ├── Dockerfile.cpu
-│   ├── Dockerfile.gpu
-│   ├── docker-compose.gpu.yml
-│   ├── docker-compose.cpu.yml
-│   └── test.py
-├── docs/
-│   ├── README.md
-│   ├── getting-started/          # CPU/CUDA installation guides
-│   ├── architecture/             # System overview, diagram, and architecture report
-│   ├── learning/                 # Theory course and teaching-oriented guides
-│   ├── optimization/             # Jetson/performance audits and reports
-│   └── experiments/              # Experiment design notes
-├── data/                         # Raw videos, annotations, manifest, and extracted frames (img/ subfolders)
-├── checkpoints/                  # Model weights and download scripts
-│   ├── download_checkpoints.py
-│   ├── download-checkpoints.sh
-│   └── download-checkpoints.bat
-├── pyproject.toml                # uv dependencies and poe tasks (GPU)
-├── pyproject.cpu.toml            # uv dependencies (CPU-only)
-├── requirements.txt              # pip dependencies (device-agnostic)
-└── run_inference.py              # Main inference entry point
+.
+├── predictor.py               # The file we wrote: load_model + run_tracker
+├── inference.py               # Grader's runner (provided): manifest -> CSV
+├── check_submission.py        # Grader's CSV validator (provided)
+├── download.py                # Fetches the three checkpoints from Google Drive
+├── requirements.txt           # x86 + CUDA 12.8 dependencies (pinned)
+├── requirements.jetson.txt    # Extra deps for the Jetson image
+├── Dockerfile.jetson          # Jetson Orin Nano image
+├── docker-compose.jetson.yml  # Convenience wrapper for the Jetson image
+├── JETSON.md                  # Jetson build/run guide
+├── test.json                  # Example manifest (public_lb split)
+└── src/
+    ├── config/
+    │   └── inference_config_944f2b8.yaml   # All settings
+    ├── models/
+    │   ├── siamram/            # SiamRAM tracker, recovery, memory, motion, GMC
+    │   └── SiamABC/            # Siamese base tracker (+ TensorRT engine)
+    └── utils/                  # Shared helpers (IoU, descriptors, logging, etc.)
 ```
-
----
 
 ## Authors
 
@@ -488,11 +161,7 @@ SiamRAM/
 - Philopater Guirgis — [@Philodoescode](https://github.com/Philodoescode)
 - Soliman Elhassanein — [@SolimanElhassanein](https://github.com/Soliman-Elhassanein)
 
----
-
 ## Citation
-
-If you find SiamRAM useful in your research, please cite:
 
 ```bibtex
 @misc{siamram2026,

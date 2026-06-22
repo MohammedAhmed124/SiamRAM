@@ -1,0 +1,70 @@
+# =============================================================================
+# requirements.jetson.txt — extra Python packages for the Jetson Orin Nano image
+#
+# READ THIS FIRST:
+# This file is ONLY used by Dockerfile.jetson. It is NOT the competition
+# submission file. The submission file is requirements.txt, and that one targets
+# a normal x86 + CUDA 12.8 machine.
+#
+# Some packages are deliberately MISSING from this list, on purpose:
+#
+#   torch, torchvision  ->  come from the L4T base image. On a Jetson these have
+#                           to be the NVIDIA-built, GPU-enabled wheels; the ones
+#                           on PyPI for ARM64 are CPU-only, so we must never let
+#                           pip install them on top.
+#
+#   opencv-python       ->  also comes from the L4T base image, where it is built
+#                           WITH GStreamer + CUDA so the NVDEC video decode works.
+#                           The PyPI wheel has no GStreamer at all. If pip ever
+#                           installs it (or opencv-python-headless) it overwrites
+#                           the good OpenCV and silently kills hardware decoding,
+#                           which is exactly why albumentations is left out below.
+#
+#   numpy, pillow       ->  left to whatever versions the base image's torch and
+#                           OpenCV were built against, so we don't upgrade them
+#                           out from under torch and break the ABI.
+#
+#   albumentations      ->  only used by src/utils/dataset.py (training/data prep),
+#                           never on the inference path that the grader runs. It
+#                           is dropped here because it drags in
+#                           opencv-python-headless, which would clobber the
+#                           base OpenCV described above.
+#
+# Everything below is pure-Python or has clean ARM64 wheels and is safe to add
+# on top of the base image. Versions stay pinned to match requirements.txt.
+# =============================================================================
+
+# Core inference dependencies (minus the ones provided by the base image)
+pandas==2.3.3
+omegaconf==2.3.0
+ultralytics==8.4.45
+gdown==6.0.0
+scipy==1.15.3
+
+# OSNet / torchreid dependencies
+h5py==3.13.0
+future==1.0.0
+yacs==0.1.8
+chardet==5.2.0
+Cython==3.0.11
+easydict==1.13
+six==1.17.0
+coloredlogs==15.0.1
+
+# Config / utility
+antlr4-python3-runtime==4.9.3
+hydra-core==1.3.2
+PyYAML==6.0.2
+einops==0.8.2
+tqdm==4.67.1
+typing_extensions==4.15.0
+filelock==3.18.0
+fsspec==2025.3.2
+requests==2.32.3
+packaging==25.0
+
+# Git-sourced dependencies (pinned to exact commits, same as requirements.txt)
+# OSNet / deep-person-reid (torchreid)
+git+https://github.com/KaiyangZhou/deep-person-reid.git@f8cd150fdf77e8d9e1ed143b7f308c2c609ded50
+# MobileCV (mobile-vision) — required by the SiamABC backbone blocks
+git+https://github.com/facebookresearch/mobile-vision.git@bb8465cfe06327c35b398f3cc0b30e2e668eb0dd

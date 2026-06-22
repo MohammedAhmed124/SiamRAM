@@ -1,0 +1,14 @@
+# Keep the build context (and the resulting image) small. None of this is needed
+# inside the container: the checkpoints are downloaded at run time, and the rest
+# is local/dev clutter.
+.git
+.gitignore
+__pycache__/
+*.pyc
+checkpoints/
+outputs/
+*.csv
+!sample_submission.csv
+.venv/
+.vscode/
+.idea/

@@ -1,13 +1,14 @@
 # =============================================================================
 # requirements.txt — SiamRAM Competition Submission
-# Exact versions locked from uv.lock for reproducibility.
-# Python 3.10 required.
+# Exact versions locked for reproducibility.
+# Python 3.10+ required.
 # =============================================================================
+
+--extra-index-url https://download.pytorch.org/whl/cu128
 
 # ---------------------------------------------------------------------------
 # PyTorch ecosystem (CUDA 12.8 wheels)
-# Install manually from the PyTorch index if pip cannot resolve automatically:
-#   pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu128
+# Resolved from https://download.pytorch.org/whl/cu128
 # ---------------------------------------------------------------------------
 torch==2.11.0
 torchvision==0.26.0
@@ -57,7 +58,9 @@ packaging==25.0
 # Git-sourced dependencies (install with pip install -e or direct git URL)
 # ---------------------------------------------------------------------------
 # OSNet / deep-person-reid (torchreid)
-git+https://github.com/KaiyangZhou/deep-person-reid.git@f8cd150fdf77e8d9e1ed143b7f308c2c609ded50
+# Fork of KaiyangZhou/deep-person-reid with pyproject.toml added so that
+# numpy and Cython are available in pip's isolated build environment.
+git+https://github.com/alofty25/deep-person-reid.git@77e5e08a48a5a7aed40efee02eae89845cca3f47
 
 # MobileCV (mobile-vision) — required by SiamABC backbone blocks
 git+https://github.com/facebookresearch/mobile-vision.git@bb8465cfe06327c35b398f3cc0b30e2e668eb0dd

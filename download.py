@@ -1,13 +1,15 @@
 """
-Download Module — SiamRAM Competition Submission.
+Checkpoint downloader for the SiamRAM submission.
 
-Downloads all required model checkpoints from Google Drive:
-  - model.pth              : SiamABC backbone checkpoint
-  - yolo11n.pt             : YOLO re-detector weights
-  - osnet_x0_25_imagenet.pth : OSNet ReID descriptor weights
+The tracker needs three weight files to run, and we host them on Google Drive
+so the submission stays small:
+  - model.pth                : the SiamABC backbone weights
+  - yolo11n.pt               : the YOLO re-detector weights
+  - osnet_x0_25_imagenet.pth : the OSNet appearance-descriptor weights
 
-All files are saved under ./checkpoints/.  Each download is skipped if a
-valid (non-empty, non-HTML) file already exists at the destination.
+Everything lands in ./checkpoints/. If a file is already there and looks valid
+(big enough and not an HTML error page), we skip downloading it again, so
+re-running the submission does not re-fetch gigabytes for no reason.
 """
 
 import os
@@ -15,7 +17,8 @@ import gdown
 
 
 # ---------------------------------------------------------------------------
-# Google Drive file IDs for each checkpoint
+# The Google Drive file ID for each checkpoint, keyed by the filename we save
+# it as. To swap a checkpoint, change the ID here.
 # ---------------------------------------------------------------------------
 _GDRIVE_IDS = {
     "model.pth":                 "1VQdAZj0Mpf_ZMxvoZOaCRp3uo6wOPuDC",
@@ -25,7 +28,15 @@ _GDRIVE_IDS = {
 
 
 def _is_valid_file(path: str) -> bool:
-    """Return True if path exists, is at least 1 MB, and is not an HTML error page."""
+    """
+    Decide whether a file on disk is a real checkpoint we can reuse.
+
+    We check three things: the file exists, it is at least 1 MB (a truncated or
+    empty download is smaller than any real checkpoint), and it does not start
+    like an HTML page. That last check matters because when a Google Drive link
+    is wrong or rate-limited, gdown sometimes saves the error web page instead of
+    the actual file, and that page would otherwise look like a valid download.
+    """
     if not os.path.exists(path):
         return False
     if os.path.getsize(path) < 1024 * 1024:
@@ -41,15 +52,20 @@ def download_checkpoint(
     checkpoint_dir: str = "./checkpoints",
 ) -> str:
     """
-    Download a single checkpoint file from Google Drive if not already present.
+    Download one checkpoint from Google Drive, unless we already have it.
 
     Args:
-        file_id:        Google Drive file ID.
-        filename:       Destination filename inside checkpoint_dir.
-        checkpoint_dir: Directory where checkpoints are stored.
+        file_id:        the Google Drive file ID to fetch.
+        filename:       what to name the file inside checkpoint_dir.
+        checkpoint_dir: the folder to save it in.
 
     Returns:
-        Absolute path to the checkpoint file.
+        The path to the checkpoint file on disk.
+
+    If a valid copy is already there we return its path straight away. Otherwise
+    we download it and then check it really arrived; if the download produced an
+    invalid file we raise, because it almost always means the Drive link is not
+    public and silently carrying on would just fail later in a more confusing way.
     """
     os.makedirs(checkpoint_dir, exist_ok=True)
     checkpoint_path = os.path.join(checkpoint_dir, filename)
@@ -74,13 +90,13 @@ def download_checkpoint(
 
 def download_all_checkpoints(checkpoint_dir: str = "./checkpoints") -> dict:
     """
-    Download all three required checkpoints.
+    Download all three checkpoints the tracker needs.
 
     Args:
-        checkpoint_dir: Directory where checkpoints are stored.
+        checkpoint_dir: the folder to save the checkpoints in.
 
     Returns:
-        dict mapping filename → absolute path for each checkpoint.
+        A dict mapping each filename to its path on disk.
     """
     paths = {}
     for filename, file_id in _GDRIVE_IDS.items():

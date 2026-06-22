@@ -11,7 +11,11 @@
 # =============================================================================
 
 # Path to the trained SiamABC checkpoint loaded at startup.
-weights_path: ""   # overridden at runtime by predictor.py — do not set a path here
+# This is relative to the submission root (the folder that holds predictor.py).
+# predictor.py reads this value and turns it into an absolute path at runtime so
+# the submission still works no matter which directory you launch it from. If you
+# ever want to point at a different checkpoint, change it here, not in the code.
+weights_path: "checkpoints/model.pth"
 
 # =============================================================================
 # trt_engine: all TensorRT / FP16 options (GPU-only), grouped in one place.
@@ -172,8 +176,12 @@ ram_tracker:
     siamese_feature_source: "neck"
     siamese_comparison_mode: "similarity"
     osnet_model_name: "osnet_x0_25"
-    osnet_pretrained_checkpoint: ""
-    osnet_model_path: ""
+    # "custom" tells torchreid to load OSNet weights from osnet_model_path below
+    # instead of downloading a generic pretrained model. The path is relative to
+    # the submission root and predictor.py resolves it to an absolute path at
+    # runtime (same treatment as weights_path and yolo_weights).
+    osnet_pretrained_checkpoint: "custom"
+    osnet_model_path: "checkpoints/osnet_x0_25_imagenet.pth"
     osnet_device: "auto"
     osnet_max_candidate_batch: 5
     descriptor_stride: 2

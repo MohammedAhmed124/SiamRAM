@@ -65,6 +65,11 @@ from models.siamram.tracker import SiamRAMExperimentTracker  # noqa: E402
 from download import download_all_checkpoints  # noqa: E402
 
 
+# Master switch for Jetson NVDEC decode.  Set by load_model() from the
+# runtime.use_nvdec config key.  Default False restores the old serial
+# software-decode behaviour on any non-Jetson machine.
+_USE_NVDEC: bool = False
+
 # ---------------------------------------------------------------------------
 # Fixed paths (relative to the submission root where inference.py lives).
 # ---------------------------------------------------------------------------
@@ -111,10 +116,11 @@ def load_model(device: str = "cuda") -> SiamRAMExperimentTracker:
             config, "ram_tracker.descriptor.osnet_model_path", _OSNET_WEIGHTS
         )
 
-    # -- 3c.  Apply cuDNN benchmark setting from config ---------------------
+    # -- 3c.  Apply runtime settings from config ----------------------------
+    global _USE_NVDEC
     runtime_cfg = config.get("runtime", {}) or {}
-    cudnn_benchmark = bool(runtime_cfg.get("cudnn_benchmark", False))
-    torch.backends.cudnn.benchmark = cudnn_benchmark
+    torch.backends.cudnn.benchmark = bool(runtime_cfg.get("cudnn_benchmark", False))
+    _USE_NVDEC = bool(runtime_cfg.get("use_nvdec", False))
 
     # -- 3d.  Flatten ram_tracker config to kwargs dict ---------------------
     ram_tracker_kwargs = flatten_ram_tracker_config(config)
@@ -213,12 +219,12 @@ def _open_video(path: str) -> cv2.VideoCapture:
     """
     Open a video file for reading.
 
-    On Jetson Orin Nano (or any device with nvv4l2decoder), uses GStreamer
-    with the hardware NVDEC decoder (<1 ms/frame vs 8-15 ms CPU decode).
-    Falls back to OpenCV's default software decoder on any other device so
-    the code runs unchanged on x86 dev machines and CI.
+    When runtime.use_nvdec is true AND nvv4l2decoder is installed (Jetson),
+    routes through GStreamer hardware NVDEC (<1 ms/frame).  Otherwise falls
+    back to OpenCV's default software decoder — identical behaviour to the
+    original code on x86 / CI / eval machines.
     """
-    if _nvv4l2decoder_available():
+    if _USE_NVDEC and _nvv4l2decoder_available():
         gst = (
             f"filesrc location={path} ! "
             "qtdemux ! h264parse ! nvv4l2decoder ! "
@@ -271,6 +277,7 @@ def run_tracker(
 
     cap = _open_video(video_path)
     if not cap.isOpened():
+        cap.release()
         raise RuntimeError(f"Cannot open video: '{video_path}'")
 
     # ------------------------------------------------------------------

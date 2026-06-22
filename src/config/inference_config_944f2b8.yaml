@@ -11,7 +11,7 @@
 # =============================================================================
 
 # Path to the trained SiamABC checkpoint loaded at startup.
-weights_path: "/home/moha/SiamRAM/checkpoints/inference_checkpoint.pth"
+weights_path: ""   # overridden at runtime by predictor.py — do not set a path here
 
 # =============================================================================
 # trt_engine: all TensorRT / FP16 options (GPU-only), grouped in one place.
@@ -49,6 +49,10 @@ runtime:
   # Let cuDNN autotune convolution kernels. Faster for fixed shapes, but less
   # predictable for variable ROI crops and can slightly perturb eager behavior.
   cudnn_benchmark: false
+  # Route video decode through the Jetson hardware NVDEC via GStreamer
+  # (nvv4l2decoder).  Leave false on x86 / any non-Jetson eval machine;
+  # set true only on Jetson Orin Nano where the plugin is installed.
+  use_nvdec: false
 
 
 # =============================================================================

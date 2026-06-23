@@ -60,6 +60,8 @@ Depending on whether your machine has a GPU, follow one of these guides:
 
 - [CUDA / GPU Installation Guide](docs/install-CUDA.md) — Native Docker, VSCode Devcontainer, or local `uv` with CUDA
 - [CPU-only Installation Guide](docs/install-CPU.md) — Native Docker, VSCode Devcontainer, or local `uv` without a GPU
+- [Jetson Nano Setup (fresh install via `uv`)](docs/install-nano.md) — ARM64/JetPack 6.x using `pyproject.nano.toml`
+- [Jetson Nano Setup (pre-installed JetPack)](docs/install-nano-system.md) — reuse JetPack's bundled PyTorch/TensorRT/Docker
 
 Throughout this README, every runnable step is shown for all three environments. If you are unsure which one applies to you:
 
@@ -270,6 +272,8 @@ SiamRAM/
 ├── docs/
 │   ├── install-CUDA.md
 │   ├── install-CPU.md
+│   ├── install-nano.md           # Jetson Nano setup (fresh uv install)
+│   ├── install-nano-system.md    # Jetson Nano setup (pre-installed JetPack)
 │   ├── system_description.pdf
 │   └── system_diagram.png
 ├── data/                         # Raw videos, annotations, manifest
@@ -280,7 +284,7 @@ SiamRAM/
 │   └── download-checkpoints.bat
 ├── pyproject.toml                # uv dependencies and poe tasks (GPU)
 ├── pyproject.cpu.toml            # uv dependencies (CPU-only)
-├── requirements.txt              # pip dependencies (device-agnostic)
+├── pyproject.nano.toml           # uv dependencies (Jetson Nano / ARM64, JetPack 6.x)
 └── run_inference.py              # Main inference entry point
 ```
 

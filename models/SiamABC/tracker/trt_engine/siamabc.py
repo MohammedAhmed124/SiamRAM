@@ -73,12 +73,26 @@ import sys
 import warnings
 import contextlib
 import os
-import platform
+import importlib.util
 
-# Triton (required by torch.compile's default Inductor backend) has no ARM64
-# wheels and is excluded from pyproject.nano.toml.  Detect once at import time
-# so the attention-neck compilation path can fall back to eager on Jetson Nano.
-_IS_AARCH64: bool = platform.machine() == "aarch64"
+
+def _triton_available() -> bool:
+    """
+    True if Triton can be imported.
+
+    torch.compile's default Inductor backend lowers to Triton kernels for CUDA;
+    without Triton the very first compiled call raises at runtime.  Triton ships
+    no ARM64/aarch64 wheel, so it is excluded from pyproject.nano.toml and absent
+    on Jetson — but it can also be missing on any platform where install failed.
+    Probing the module directly is therefore more reliable than guessing from the
+    CPU architecture: a capable aarch64 host that *does* have Triton still gets a
+    compiled neck, and an x86 host that lacks it still falls back to eager.
+    """
+    return importlib.util.find_spec("triton") is not None
+
+
+# Resolved once at import time and reused for every tracker built in the process.
+_TORCH_COMPILE_OK: bool = _triton_available()
 
 # ── ANSI helpers ────────────────────────────────────────────────────────────
 _RED    = "\033[1;31m"
@@ -217,14 +231,13 @@ class TRTSiamABCNet:
         _clog("  [SiamRAM] Compiling attention neck …", _RED)
         _attn_mod = _AttentionNeck(model).eval().to(self._device).float()
         with _suppress_external_logs():
-            if _IS_AARCH64:
-                # Triton is unavailable on ARM64/Jetson Nano (no wheel exists).
-                # The default Inductor backend requires Triton for kernel codegen,
-                # so torch.compile would crash.  Run the attention neck in eager
-                # mode instead — the backbone and connect engines still use TRT.
-                self._trt_attn = _attn_mod
-            else:
+            if _TORCH_COMPILE_OK:
                 self._trt_attn = torch.compile(_attn_mod, dynamic=True, fullgraph=True)
+            else:
+                # Triton missing (e.g. Jetson/ARM64, where it has no wheel) — the
+                # Inductor backend would crash on the first compiled call.  Run the
+                # attention neck eagerly; backbone and connect engines still use TRT.
+                self._trt_attn = _attn_mod
             with torch.no_grad():
                 for hw in (h_t, h_s):
                     _dummy = torch.randn(

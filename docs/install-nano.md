@@ -94,9 +94,10 @@ If `cuda available: False`, TRT compilation will fail later. Fix CUDA before con
 uv run python checkpoints/download_checkpoints.py
 ```
 
-This downloads two files into `checkpoints/`:
-- `inference_checkpoint.pth` — SiamABC weights
-- `yolo11n.pt` — YOLO re-detection weights
+This downloads three files into `checkpoints/`:
+- `inference_checkpoint.pth` — SiamABC weights (required for inference)
+- `yolo11n.pt` — YOLO re-detection weights (required for inference)
+- `SiamABC_init_checkpoint.pth` — backbone init weights (only needed for training)
 
 ---
 
@@ -142,7 +143,7 @@ uv run run_inference.py \
 |---|---|---|
 | `--data_dir` | `data` | Root directory of videos and annotations |
 | `--manifest_path` | `data/metadata/contestant_manifest.json` | Competition manifest JSON |
-| `--weights_path` | `checkpoints/head_epoch_000.pth` | SiamABC checkpoint |
+| `--weights_path` | `checkpoints/inference_checkpoint.pth` | SiamABC checkpoint |
 | `--yaml_config_path` | `config/inference_config.yaml` | Inference config |
 | `--outputs_dir` | `outputs/SiamRAM` | Per-video prediction output directory |
 | `--model_size` | `M` | Model size: `S`, `M`, or `L` |

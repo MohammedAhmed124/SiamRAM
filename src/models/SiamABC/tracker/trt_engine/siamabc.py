@@ -99,7 +99,8 @@ def _triton_available() -> bool:
     on Jetson — but it can also be missing on any platform where install failed.
     Probing the module directly is therefore more reliable than guessing from the
     CPU architecture: a capable aarch64 host that *does* have Triton still gets a
-    compiled neck, and an x86 host that lacks it still falls back to eager.
+    Triton-compiled neck, and a host that lacks it compiles the neck on TensorRT
+    instead (see _build_attention_neck).
     """
     return importlib.util.find_spec("triton") is not None
 
@@ -263,13 +264,7 @@ class TRTSiamABCNet:
 
         _attn_mod = _AttentionNeck(model).eval().to(self._device).float()
         with quiet_external_logs():
-            if _TORCH_COMPILE_OK:
-                self._trt_attn = torch.compile(_attn_mod, dynamic=True, fullgraph=True)
-            else:
-                # Triton missing (e.g. Jetson/ARM64, where it has no wheel) — the
-                # Inductor backend would crash on the first compiled call. Run the
-                # attention neck eagerly; backbone and connect engines still use TRT.
-                self._trt_attn = _attn_mod
+            self._trt_attn = self._build_attention_neck(_attn_mod, C, h_t, h_s)
             with torch.no_grad():
                 for hw in (h_t, h_s):
                     _dummy = torch.randn(
@@ -279,7 +274,7 @@ class TRTSiamABCNet:
                         device=self._device,
                         dtype=torch.float32,
                     )
-                    self._trt_attn(_dummy)   # trigger compilation or warmup
+                    self._trt_attn(_dummy)   # trigger compilation / warm the engine
         compile_progress().complete()
         compile_progress().stage("compiling connect engines")
 
@@ -460,6 +455,136 @@ class TRTSiamABCNet:
             disable_tf32=self._disable_tf32,
             truncate_long_and_double=True,
         )
+
+    def _build_attention_neck(
+        self,
+        module: nn.Module,
+        C: int,
+        h_t: int,
+        h_s: int,
+    ) -> torch.nn.Module:
+        """
+        Build the attention-neck stage on the fastest backend the platform offers.
+
+        The neck is the one stage not pre-lowered to a TensorRT engine: it runs as
+        a single dynamic-shape module so the template (h_t) and search (h_s)
+        branches share one kernel family, keeping t_mixed / s_mixed numerically
+        consistent for the downstream cross-correlation.
+
+        Backend selection:
+          1. torch.compile (Inductor) — when Triton is importable (x86 CUDA). The
+             default backend; fuses the attention into Triton kernels.
+          2. TensorRT engine          — when Triton is absent (Jetson/ARM64), where
+             torch.compile's Inductor backend would crash. TRT is the fastest
+             backend actually available — the backbone and connect stages already
+             run on it — so the neck is compiled to a dynamic-shape TRT engine too.
+
+        This class only exists because SiamABC compilation was explicitly requested
+        (trt_engine.trt_compile_siamabc). A neck that cannot be compiled — a TRT
+        build error, or an engine whose output diverges from eager — therefore
+        RAISES rather than silently running an unfused eager neck. The point of
+        enabling compilation is to know it actually happened, so the failure is
+        surfaced, not hidden.
+        """
+        if _TORCH_COMPILE_OK:
+            return torch.compile(module, dynamic=True, fullgraph=True)
+
+        # No Triton wheel (Jetson/ARM64): compile the neck on TensorRT. This is
+        # deliberately not wrapped in an eager fallback — if the engine fails to
+        # build or diverges from eager, let it raise so the broken compiled path
+        # is visible instead of being masked by a slow eager neck.
+        try:
+            engine = self._compile_attention_neck_engine(module, C, h_t, h_s)
+            self._validate_attention_neck(engine, module, C, (h_t, h_s))
+        except Exception as exc:
+            raise RuntimeError(
+                "attention-neck TensorRT compilation failed. SiamABC was built "
+                "with compilation enabled, so this is raised instead of silently "
+                f"falling back to an eager neck. Cause: {exc}"
+            ) from exc
+        return engine
+
+    def _compile_attention_neck_engine(
+        self,
+        module: nn.Module,
+        C: int,
+        h_t: int,
+        h_s: int,
+    ) -> torch.nn.Module:
+        """
+        Compile the FP32 attention neck to one dynamic-shape TensorRT engine.
+
+        Mirrors _compile_backbone_engine: trace with TorchScript at the opt shape
+        (concrete ops, no symbolic-shape guards → no ConstraintViolationError),
+        then hand the ScriptModule to torch_tensorrt.compile with a min..max
+        spatial profile spanning both the template (h_t) and search (h_s) feature
+        sizes. Input is the concatenated feature pair (1, 2*C, h, w); the neck runs
+        in FP32, so the engine is FP32 regardless of the backbone precision.
+        """
+        min_hw, max_hw = sorted((int(h_t), int(h_s)))
+        module = module.eval().to(self._device).float()
+
+        dummy = torch.randn(
+            1, C * 2, max_hw, max_hw, device=self._device, dtype=torch.float32
+        )
+        with torch.no_grad():
+            scripted = torch.jit.trace(module, dummy)
+
+        return torch_tensorrt.compile(
+            scripted,
+            inputs=[
+                torch_tensorrt.Input(
+                    min_shape=(1, C * 2, min_hw, min_hw),
+                    opt_shape=(1, C * 2, max_hw, max_hw),
+                    max_shape=(1, C * 2, max_hw, max_hw),
+                    dtype=torch.float32,
+                )
+            ],
+            enabled_precisions={torch.float32},
+            disable_tf32=self._disable_tf32,
+            truncate_long_and_double=True,
+        )
+
+    def _validate_attention_neck(
+        self,
+        engine: torch.nn.Module,
+        reference: nn.Module,
+        C: int,
+        spatial_sizes: Sequence[int],
+    ) -> None:
+        """
+        Reject a TRT neck engine that does not match eager within FP32 tolerance.
+
+        Runs both branch sizes through the engine and the eager module and
+        compares. A conversion that silently changed the attention math would
+        degrade tracking quality with no crash, so the engine is only trusted when
+        its outputs agree with eager; otherwise the caller falls back to eager.
+        """
+        with torch.no_grad():
+            for hw in spatial_sizes:
+                probe = torch.randn(
+                    1, C * 2, int(hw), int(hw),
+                    device=self._device, dtype=torch.float32,
+                )
+                got = engine(probe)
+                want = reference(probe)
+                if not torch.is_tensor(got):
+                    raise RuntimeError(
+                        f"neck engine returned {type(got).__name__}, expected Tensor"
+                    )
+                if tuple(got.shape) != tuple(want.shape):
+                    raise RuntimeError(
+                        f"neck engine shape {tuple(got.shape)} != {tuple(want.shape)}"
+                    )
+                if not bool(torch.isfinite(got.float()).all().item()):
+                    raise RuntimeError("neck engine returned non-finite values")
+                if not torch.allclose(
+                    got.float(), want.float(), rtol=1e-2, atol=1e-2
+                ):
+                    max_diff = (got.float() - want.float()).abs().max().item()
+                    raise RuntimeError(
+                        f"neck engine diverges from eager (max abs diff {max_diff:.3g})"
+                    )
 
     def get_features(
         self,

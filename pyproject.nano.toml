@@ -95,6 +95,14 @@ torchreid = [
 # NVIDIA Jetson AI Lab package index for JetPack 6.x (CUDA 12.6, aarch64).
 # Provides ARM64 builds of torch, torchvision, and torch-tensorrt that are
 # pre-matched against the system TensorRT installed by JetPack.
+#
+# INSTALL NOTE: the repo uv.lock was generated on x86 and does NOT contain
+# Jetson wheel entries.  Always use plain `uv sync` (no --frozen) on Jetson:
+#
+#   cp pyproject.nano.toml pyproject.toml
+#   uv sync        ← re-resolves from jetson-jp6 index; generates local lock
+#
+# Do NOT use `uv sync --frozen` — it will fail with "no matching distribution".
 [[tool.uv.index]]
 name = "jetson-jp6"
 url = "https://pypi.jetson-ai-lab.dev/jp6/cu126"

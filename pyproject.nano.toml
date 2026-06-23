@@ -63,7 +63,9 @@ dependencies = [
 [tool.uv.sources]
 mobile_cv = { git = "https://github.com/facebookresearch/mobile-vision.git" }
 # pytorch-cu128 index only serves x86_64 wheels and cannot be used on Jetson Nano.
-# Use NVIDIA's Jetson AI Lab index instead (ARM64, CUDA 12.6, JetPack 6.x).
+# Use NVIDIA's Jetson AI Lab index instead (ARM64, JetPack 6.x).
+# NOTE: the index URL below must match your JetPack CUDA minor — see the
+# [[tool.uv.index]] block at the bottom of this file.
 torch = { index = "jetson-jp6" }
 torchvision = { index = "jetson-jp6" }
 torch-tensorrt = { index = "jetson-jp6" }
@@ -92,9 +94,17 @@ torchreid = [
   "torchvision>=0.18.0",
 ]
 
-# NVIDIA Jetson AI Lab package index for JetPack 6.x (CUDA 12.6, aarch64).
-# Provides ARM64 builds of torch, torchvision, and torch-tensorrt that are
-# pre-matched against the system TensorRT installed by JetPack.
+# NVIDIA Jetson AI Lab package index (aarch64).  Provides ARM64 builds of
+# torch, torchvision, and torch-tensorrt pre-matched to the system CUDA/TensorRT
+# installed by JetPack.
+#
+# IMPORTANT — match the index path to YOUR JetPack CUDA minor version:
+#   JetPack 6.0  → CUDA 12.2 → https://pypi.jetson-ai-lab.dev/jp6/cu122
+#   JetPack 6.1  → CUDA 12.4 → https://pypi.jetson-ai-lab.dev/jp6/cu124
+#   JetPack 6.2  → CUDA 12.6 → https://pypi.jetson-ai-lab.dev/jp6/cu126   (default below)
+# Check yours with:  cat /usr/local/cuda/version.json   (or `nvcc --version`)
+# If it is not 12.6, edit the url below to the matching cuXXX path, or the
+# torch wheel will fail to load its CUDA libraries at import time.
 #
 # INSTALL NOTE: the repo uv.lock was generated on x86 and does NOT contain
 # Jetson wheel entries.  Always use plain `uv sync` (no --frozen) on Jetson:

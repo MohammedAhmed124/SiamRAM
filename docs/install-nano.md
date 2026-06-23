@@ -48,11 +48,33 @@ uv --version
 
 ---
 
-## Step 3 — Install dependencies
+## Step 3 — Match the package index to your JetPack CUDA version
+
+The Jetson AI Lab index is split by CUDA minor version. Pick the path that
+matches your JetPack:
+
+| JetPack | CUDA | Index path |
+|---|---|---|
+| 6.0 | 12.2 | `https://pypi.jetson-ai-lab.dev/jp6/cu122` |
+| 6.1 | 12.4 | `https://pypi.jetson-ai-lab.dev/jp6/cu124` |
+| 6.2 | 12.6 | `https://pypi.jetson-ai-lab.dev/jp6/cu126` |
+
+Check your CUDA version:
+
+```bash
+cat /usr/local/cuda/version.json 2>/dev/null | grep -m1 version || nvcc --version
+```
+
+`pyproject.nano.toml` defaults to the **cu126** path (JetPack 6.2). If you are on
+6.0 or 6.1, edit the `url` under `[[tool.uv.index]]` in `pyproject.nano.toml` to
+the matching `cuXXX` path before syncing — otherwise the torch wheel will fail to
+load its CUDA libraries at import time.
+
+## Step 4 — Install dependencies
 
 The main `pyproject.toml` targets x86 CUDA 12.8 and will not work on Jetson.
 Use `pyproject.nano.toml` instead, which:
-- Pulls `torch`, `torchvision`, and `torch-tensorrt` from NVIDIA's Jetson AI Lab index (ARM64, CUDA 12.6)
+- Pulls `torch`, `torchvision`, and `torch-tensorrt` from NVIDIA's Jetson AI Lab index (ARM64)
 - Excludes `triton` (no ARM64 wheel exists)
 
 ```bash
@@ -64,9 +86,22 @@ uv sync
 
 This step takes a few minutes on first run.
 
+> **If `import torch_tensorrt` later fails with `No module named 'tensorrt'`:**
+> JetPack installs TensorRT's Python bindings as a *system apt* package, which a
+> `uv`/`venv` environment does not see by default. Either install the matching
+> TensorRT wheel from the same Jetson index into the venv:
+>
+> ```bash
+> uv pip install tensorrt --index-url https://pypi.jetson-ai-lab.dev/jp6/cu126
+> ```
+>
+> or use the [pre-installed JetPack guide](install-nano-system.md), whose Docker
+> path (NVIDIA L4T container) has TensorRT already wired in and is the most
+> reliable option on Jetson.
+
 ---
 
-## Step 4 — Verify the environment
+## Step 5 — Verify the environment
 
 ```bash
 uv run containers/test.py
@@ -88,7 +123,7 @@ If `cuda available: False`, TRT compilation will fail later. Fix CUDA before con
 
 ---
 
-## Step 5 — Download checkpoints
+## Step 6 — Download checkpoints
 
 ```bash
 uv run python checkpoints/download_checkpoints.py
@@ -101,7 +136,7 @@ This downloads three files into `checkpoints/`:
 
 ---
 
-## Step 6 — Run inference
+## Step 7 — Run inference
 
 Place your data under `data/` following this layout:
 

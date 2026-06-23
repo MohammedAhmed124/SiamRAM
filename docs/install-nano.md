@@ -48,10 +48,20 @@ uv --version
 
 ---
 
-## Step 3 — Match the package index to your JetPack CUDA version
+> **Already have torch/torchvision/torch-tensorrt on the device?** If JetPack (or
+> your rental provider) pre-installed PyTorch and TensorRT, skip this guide and use
+> the [pre-installed JetPack guide](install-nano-system.md) — it reuses the system
+> stack directly instead of downloading wheels. This guide is for a base JetPack
+> flash that has CUDA/TRT/cuDNN but **not** torch.
 
-The Jetson AI Lab index is split by CUDA minor version. Pick the path that
-matches your JetPack:
+## Step 3 — Create a system-site-packages venv and install torch from the Jetson index
+
+`pyproject.nano.toml` no longer declares `torch`/`torchvision`/`torch-tensorrt` —
+it expects them to be visible in the venv already (so it works identically whether
+they come from JetPack or from the Jetson AI Lab index). On a base flash without
+torch, install them into a `--system-site-packages` venv first.
+
+Pick the Jetson AI Lab index path that matches your JetPack CUDA minor:
 
 | JetPack | CUDA | Index path |
 |---|---|---|
@@ -65,46 +75,54 @@ Check your CUDA version:
 cat /usr/local/cuda/version.json 2>/dev/null | grep -m1 version || nvcc --version
 ```
 
-`pyproject.nano.toml` defaults to the **cu126** path (JetPack 6.2). If you are on
-6.0 or 6.1, edit the `url` under `[[tool.uv.index]]` in `pyproject.nano.toml` to
-the matching `cuXXX` path before syncing — otherwise the torch wheel will fail to
-load its CUDA libraries at import time.
+Then (substituting your `cuXXX` path):
 
-## Step 4 — Install dependencies
+```bash
+uv venv --system-site-packages
+source .venv/bin/activate
+uv pip install torch torchvision torch-tensorrt \
+    --index-url https://pypi.jetson-ai-lab.dev/jp6/cu126
+```
 
-The main `pyproject.toml` targets x86 CUDA 12.8 and will not work on Jetson.
-Use `pyproject.nano.toml` instead, which:
-- Pulls `torch`, `torchvision`, and `torch-tensorrt` from NVIDIA's Jetson AI Lab index (ARM64)
-- Excludes `triton` (no ARM64 wheel exists)
+> If the wrong `cuXXX` path is used, the torch wheel will fail to load its CUDA
+> libraries at import time.
+
+## Step 4 — Install the project
+
+The main `pyproject.toml` targets x86 CUDA 12.8 and will not work on Jetson. Use
+`pyproject.nano.toml`, which skips torch/torchvision/torch-tensorrt/opencv (provided
+above / by the system), excludes `triton` (no ARM64 wheel exists), and builds
+`torchreid`/`mobile-cv` against the installed torch:
 
 ```bash
 cp pyproject.nano.toml pyproject.toml
-uv sync
+uv pip install --no-build-isolation .
 ```
 
-> **Note:** Do not use `uv sync --frozen`. The repo lock file was generated on x86 and has no Jetson wheel entries. `uv sync` re-resolves fresh from the Jetson AI Lab index.
+This step takes a few minutes on first run (torchreid compiles a Cython extension).
 
-This step takes a few minutes on first run.
+> **Why not `uv sync`:** `uv sync` re-resolves the entire graph and would pull torch
+> (a transitive dep of ultralytics, timm, …) from PyPI, shadowing the Jetson build.
+> `uv pip install` respects the torch already in the `--system-site-packages` venv.
 
 > **If `import torch_tensorrt` later fails with `No module named 'tensorrt'`:**
-> JetPack installs TensorRT's Python bindings as a *system apt* package, which a
-> `uv`/`venv` environment does not see by default. Either install the matching
-> TensorRT wheel from the same Jetson index into the venv:
+> JetPack installs TensorRT's Python bindings as a *system apt* package. The
+> `--system-site-packages` venv normally exposes it; if not, install the matching
+> wheel into the venv:
 >
 > ```bash
 > uv pip install tensorrt --index-url https://pypi.jetson-ai-lab.dev/jp6/cu126
 > ```
->
-> or use the [pre-installed JetPack guide](install-nano-system.md), whose Docker
-> path (NVIDIA L4T container) has TensorRT already wired in and is the most
-> reliable option on Jetson.
 
 ---
 
 ## Step 5 — Verify the environment
 
+Run inside the activated venv from Step 3 (use plain `python`, not `uv run` — the
+project is installed with `uv pip`, not project-mode `uv sync`):
+
 ```bash
-uv run containers/test.py
+python containers/test.py
 ```
 
 Expected output:
@@ -126,7 +144,7 @@ If `cuda available: False`, TRT compilation will fail later. Fix CUDA before con
 ## Step 6 — Download checkpoints
 
 ```bash
-uv run python checkpoints/download_checkpoints.py
+python checkpoints/download_checkpoints.py
 ```
 
 This downloads three files into `checkpoints/`:
@@ -154,13 +172,13 @@ data/
 Then run:
 
 ```bash
-uv run run_inference.py
+python run_inference.py
 ```
 
 Or with explicit paths:
 
 ```bash
-uv run run_inference.py \
+python run_inference.py \
     --data_dir data/ \
     --manifest_path data/metadata/contestant_manifest.json \
     --weights_path checkpoints/inference_checkpoint.pth \
@@ -189,14 +207,17 @@ uv run run_inference.py \
 
 ## Troubleshooting
 
-### `uv sync` fails with "no matching distribution"
+### `uv pip install` fails with "no matching distribution" for torch
 
-Make sure you copied the nano config first:
+`pyproject.nano.toml` does not declare torch — it must already be in the venv. Make
+sure you created the venv with `--system-site-packages` and installed torch from the
+Jetson index (Step 3) before running `uv pip install --no-build-isolation .`.
 
-```bash
-cp pyproject.nano.toml pyproject.toml
-uv sync
-```
+### `uv pip install` tries to build torchreid before torch is present
+
+Confirm the venv is activated and `python -c "import torch"` works inside it. The
+`no-build-isolation-package` setting builds `torchreid`/`mobile-cv` against that torch,
+so torch must import before this step.
 
 ### CUDA not available after install
 
@@ -223,5 +244,5 @@ TRT engine compilation is memory-intensive. Close other processes before running
 
 ```bash
 sudo systemctl stop <any-heavy-service>
-uv run run_inference.py
+python run_inference.py
 ```

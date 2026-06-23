@@ -39,14 +39,26 @@ cd SiamRAM
 git pull
 ```
 
-### Step 2 — Create a system-site-packages venv
+### Step 2 — Install uv
 
 ```bash
-python3 -m venv --system-site-packages .venv
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source $HOME/.local/bin/env
+uv --version
+```
+
+### Step 3 — Create a system-site-packages venv
+
+```bash
+uv venv --system-site-packages
 source .venv/bin/activate
 ```
 
-The `--system-site-packages` flag makes torch, torchvision, and tensorrt visible inside the venv without reinstalling them.
+The `--system-site-packages` flag makes JetPack's torch, torchvision, torch-tensorrt,
+tensorrt, and opencv visible inside the venv without reinstalling them. This is the
+key to reusing the pre-installed stack: because the project is installed with
+`uv pip install` (not `uv sync`), uv treats those system packages as already
+satisfied and will not re-download multi-GB Jetson-index wheels.
 
 Verify torch is available:
 
@@ -54,7 +66,7 @@ Verify torch is available:
 python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 ```
 
-### Step 3 — Check torch-tensorrt
+### Step 4 — Check torch-tensorrt
 
 ```bash
 python -c "import torch_tensorrt; print(torch_tensorrt.__version__)"
@@ -63,64 +75,29 @@ python -c "import torch_tensorrt; print(torch_tensorrt.__version__)"
 If that fails (not bundled in your JetPack version), install it from NVIDIA's Jetson index:
 
 ```bash
-pip install torch-tensorrt --index-url https://pypi.jetson-ai-lab.dev/jp6/cu126
+uv pip install torch-tensorrt --index-url https://pypi.jetson-ai-lab.dev/jp6/cu126
 ```
 
-### Step 4 — Install remaining dependencies
+### Step 5 — Install project dependencies
+
+`pyproject.nano.toml` is configured for exactly this scenario: it declares everything
+*except* torch/torchvision/torch-tensorrt/opencv (which come from the system) and marks
+`torchreid` and `mobile-cv` as no-build-isolation packages so they compile against the
+system torch. Install it with:
 
 ```bash
-pip install \
-    "albumentations>=2.0.8" \
-    "coloredlogs>=15.0.1" \
-    "easydict>=1.13" \
-    "einops>=0.8.2" \
-    "fire>=0.7.1" \
-    "gdown>=6.0.0" \
-    "got10k>=0.1.3" \
-    "hydra-core>=1.3.2" \
-    "imageio>=2.37.3" \
-    "ipykernel>=7.2.0" \
-    "ipython>=8.39.0" \
-    "ipywidgets>=8.1.8" \
-    "jpeg4py>=0.1.4" \
-    "lmdb>=2.2.0" \
-    "matplotlib>=3.10.9" \
-    "numpy>=2.2.6" \
-    "opencv-python>=4.13.0" \
-    "pandas>=2.3.3" \
-    "pillow>=12.2.0" \
-    "pycocotools>=2.0.11" \
-    "pytorch-toolbelt>=0.8.0" \
-    "pyyaml>=6.0.3" \
-    "scikit-learn>=1.7.2" \
-    "scipy>=1.15.3" \
-    "shapely>=2.1.2" \
-    "six>=1.17.0" \
-    "spikingjelly>=0.0.0.0.14" \
-    "tensorboard>=2.16.0" \
-    "tensorboardx>=2.6.5" \
-    "timm>=1.0.26" \
-    "torchmetrics>=1.9.0" \
-    "tqdm>=4.67.3" \
-    "typing-extensions>=4.15.0" \
-    "ultralytics>=8.4.41" \
-    "wandb>=0.26.1" \
-    "omegaconf>=2.3.0" \
-    "cython>=3.0.0" \
-    "h5py>=3.10.0" \
-    "future>=1.0.0" \
-    "yacs>=0.1.8" \
-    "chardet>=5.2.0"
+cp pyproject.nano.toml pyproject.toml
+uv pip install --no-build-isolation .
 ```
 
-### Step 5 — Install git-sourced dependencies
+This installs the remaining PyPI dependencies plus the two git-sourced packages
+(`mobile-cv`, `torchreid`). `torchreid` builds a Cython extension against the system
+torch — this takes a minute.
 
-```bash
-pip install git+https://github.com/facebookresearch/mobile-vision.git
-pip install git+https://github.com/KaiyangZhou/deep-person-reid.git
-```
-
-`torchreid` builds a Cython extension — this takes a minute.
+> **Why `uv pip install` and not `uv sync`:** `uv sync` strictly reconciles the venv to
+> the full resolved graph and would re-resolve torch (a transitive dep of ultralytics,
+> timm, torchmetrics, …) from PyPI, shadowing the JetPack build. `uv pip install` respects
+> packages already visible via `--system-site-packages` and skips them.
 
 ### Step 6 — Verify the environment
 
@@ -221,73 +198,34 @@ If it is missing:
 pip install torch-tensorrt --index-url https://pypi.jetson-ai-lab.dev/jp6/cu126
 ```
 
-### Step 6 — Install remaining dependencies
+### Step 6 — Install project dependencies
+
+The container's system Python already provides torch/torchvision/torch-tensorrt/opencv,
+so install the project the same way as Path A — `pyproject.nano.toml` skips those and
+builds `torchreid`/`mobile-cv` against the container torch. Inside the container:
 
 ```bash
-pip install \
-    "albumentations>=2.0.8" \
-    "coloredlogs>=15.0.1" \
-    "easydict>=1.13" \
-    "einops>=0.8.2" \
-    "fire>=0.7.1" \
-    "gdown>=6.0.0" \
-    "got10k>=0.1.3" \
-    "hydra-core>=1.3.2" \
-    "imageio>=2.37.3" \
-    "ipykernel>=7.2.0" \
-    "ipython>=8.39.0" \
-    "ipywidgets>=8.1.8" \
-    "jpeg4py>=0.1.4" \
-    "lmdb>=2.2.0" \
-    "matplotlib>=3.10.9" \
-    "numpy>=2.2.6" \
-    "opencv-python>=4.13.0" \
-    "pandas>=2.3.3" \
-    "pillow>=12.2.0" \
-    "pycocotools>=2.0.11" \
-    "pytorch-toolbelt>=0.8.0" \
-    "pyyaml>=6.0.3" \
-    "scikit-learn>=1.7.2" \
-    "scipy>=1.15.3" \
-    "shapely>=2.1.2" \
-    "six>=1.17.0" \
-    "spikingjelly>=0.0.0.0.14" \
-    "tensorboard>=2.16.0" \
-    "tensorboardx>=2.6.5" \
-    "timm>=1.0.26" \
-    "torchmetrics>=1.9.0" \
-    "tqdm>=4.67.3" \
-    "typing-extensions>=4.15.0" \
-    "ultralytics>=8.4.41" \
-    "wandb>=0.26.1" \
-    "omegaconf>=2.3.0" \
-    "cython>=3.0.0" \
-    "h5py>=3.10.0" \
-    "future>=1.0.0" \
-    "yacs>=0.1.8" \
-    "chardet>=5.2.0"
+pip install uv
+cp pyproject.nano.toml pyproject.toml
+uv pip install --system --no-build-isolation .
 ```
 
-### Step 7 — Install git-sourced dependencies
+`--system` installs into the container's Python (there is no separate venv inside the
+container). This also pulls the two git-sourced packages (`mobile-cv`, `torchreid`).
 
-```bash
-pip install git+https://github.com/facebookresearch/mobile-vision.git
-pip install git+https://github.com/KaiyangZhou/deep-person-reid.git
-```
-
-### Step 8 — Verify the environment
+### Step 7 — Verify the environment
 
 ```bash
 python3 containers/test.py
 ```
 
-### Step 9 — Download checkpoints
+### Step 8 — Download checkpoints
 
 ```bash
 python3 checkpoints/download_checkpoints.py
 ```
 
-### Step 10 — Run inference
+### Step 9 — Run inference
 
 ```bash
 python3 run_inference.py

@@ -23,7 +23,9 @@ dependencies = [
   #TODO: remove mobile cv
   "mobile-cv>=0.1",
   "numpy>=2.2.6",
-  "opencv-python>=4.13.0.92",
+  # opencv: NOT installed by uv — JetPack ships a CUDA/GStreamer-enabled OpenCV
+  # system-wide. A PyPI opencv-python wheel would shadow it and lose hardware
+  # acceleration. The --system-site-packages venv exposes the system build.
   "pandas>=2.3.3",
   "pillow>=12.2.0",
   "pycocotools>=2.0.11",
@@ -42,12 +44,12 @@ dependencies = [
   "typing-extensions>=4.15.0",
   "ultralytics>=8.4.41",
   "wandb>=0.26.1",
-  # torch/torchvision/torch-tensorrt sourced from NVIDIA Jetson AI Lab index (ARM64, CUDA 12.6).
-  # Version is NOT pinned to 2.11.0 because the Jetson index lags x86 releases;
-  # uv resolves the latest compatible set from the jetson-jp6 index.
-  "torch>=2.3.0",
-  "torchvision>=0.18.0",
-  "torch-tensorrt>=2.3.0",
+  # torch / torchvision / torch-tensorrt: NOT installed by uv. JetPack 6.x ships
+  # these (and TensorRT/cuDNN) pre-built for the Jetson's CUDA. We reuse them via
+  # a --system-site-packages venv rather than re-downloading multi-GB Jetson-index
+  # wheels. ultralytics/timm/torchmetrics/pytorch-toolbelt pull torch transitively;
+  # since this is installed with `uv pip install` (not `uv sync`), uv treats the
+  # system torch as already-satisfied and skips it. See docs/install-nano-system.md.
   # triton: EXCLUDED — no ARM64/aarch64 wheel exists; TensorRT handles kernel
   # compilation on Jetson via the system-installed JetPack TRT libraries.
   # triton-windows: not applicable on Jetson.
@@ -60,63 +62,33 @@ dependencies = [
   "chardet>=5.2.0",
 ]
 
+# torchreid and mobile-cv build from source. With build isolation disabled they
+# compile against the system torch already present in the venv — so they must be
+# listed in no-build-isolation-package for uv's two-phase install.
+[tool.uv]
+no-build-isolation-package = ["torchreid", "mobile-cv"]
+
 [tool.uv.sources]
 mobile_cv = { git = "https://github.com/facebookresearch/mobile-vision.git" }
-# pytorch-cu128 index only serves x86_64 wheels and cannot be used on Jetson Nano.
-# Use NVIDIA's Jetson AI Lab index instead (ARM64, JetPack 6.x).
-# NOTE: the index URL below must match your JetPack CUDA minor — see the
-# [[tool.uv.index]] block at the bottom of this file.
-torch = { index = "jetson-jp6" }
-torchvision = { index = "jetson-jp6" }
-torch-tensorrt = { index = "jetson-jp6" }
+# torch/torchvision/torch-tensorrt are NOT sourced here — they come from the
+# system (JetPack) via a --system-site-packages venv. See the dependencies note.
 torchreid = { git = "https://github.com/KaiyangZhou/deep-person-reid.git" }
 
-[tool.uv.extra-build-dependencies]
-torchreid = [
-  "numpy>=2.2.6",
-  "Cython>=3.0.0",
-  "h5py>=3.10.0",
-  "pillow>=12.2.0",
-  "six>=1.17.0",
-  "scipy>=1.15.3",
-  "opencv-python>=4.13.0.92",
-  "matplotlib>=3.10.9",
-  "tb-nightly",
-  "future>=1.0.0",
-  "yacs>=0.1.8",
-  "gdown>=6.0.0",
-  "flake8",
-  "yapf",
-  "isort==4.3.21",
-  "imageio>=2.37.3",
-  "chardet>=5.2.0",
-  "torch>=2.3.0",
-  "torchvision>=0.18.0",
-]
-
-# NVIDIA Jetson AI Lab package index (aarch64).  Provides ARM64 builds of
-# torch, torchvision, and torch-tensorrt pre-matched to the system CUDA/TensorRT
-# installed by JetPack.
+# NOTE: torch/torchvision/torch-tensorrt are intentionally NOT declared as uv
+# dependencies or sources here — JetPack provides them system-wide and they are
+# exposed to the venv via --system-site-packages. Because the install uses
+# `uv pip install --no-build-isolation` (not `uv sync`), uv treats those
+# already-installed packages as satisfied and does not re-download Jetson-index
+# wheels. There is therefore no [[tool.uv.index]] block and no
+# [tool.uv.extra-build-dependencies] table: with build isolation disabled,
+# torchreid/mobile-cv build directly against the system torch in the venv, and
+# their build deps (cython, numpy, h5py, pillow, ...) are already regular
+# dependencies installed before the source builds run.
 #
-# IMPORTANT — match the index path to YOUR JetPack CUDA minor version:
-#   JetPack 6.0  → CUDA 12.2 → https://pypi.jetson-ai-lab.dev/jp6/cu122
-#   JetPack 6.1  → CUDA 12.4 → https://pypi.jetson-ai-lab.dev/jp6/cu124
-#   JetPack 6.2  → CUDA 12.6 → https://pypi.jetson-ai-lab.dev/jp6/cu126   (default below)
-# Check yours with:  cat /usr/local/cuda/version.json   (or `nvcc --version`)
-# If it is not 12.6, edit the url below to the matching cuXXX path, or the
-# torch wheel will fail to load its CUDA libraries at import time.
-#
-# INSTALL NOTE: the repo uv.lock was generated on x86 and does NOT contain
-# Jetson wheel entries.  Always use plain `uv sync` (no --frozen) on Jetson:
-#
+# Install (see docs/install-nano-system.md):
 #   cp pyproject.nano.toml pyproject.toml
-#   uv sync        ← re-resolves from jetson-jp6 index; generates local lock
-#
-# Do NOT use `uv sync --frozen` — it will fail with "no matching distribution".
-[[tool.uv.index]]
-name = "jetson-jp6"
-url = "https://pypi.jetson-ai-lab.dev/jp6/cu126"
-explicit = true
+#   uv venv --system-site-packages
+#   uv pip install --no-build-isolation .
 
 [dependency-groups]
 dev = [
@@ -125,133 +97,4 @@ dev = [
   "pandas-stubs>=2.3.3.260113",
   "ruff>=0.15.12",
   "ty>=0.0.32",
-]
-
-[tool.ty.environment]
-python-version = "3.10"
-
-[tool.ty.analysis]
-# Similar spirit to mypy's ignore_missing_imports = true,
-# but you can narrow this later instead of allowing everything forever.
-allowed-unresolved-imports = ["**"]
-replace-imports-with-any = [
-  "torch.**",
-  "numpy.**",
-  "cv2.**",
-  "albumentations.**",
-  "hydra.**",
-  "omegaconf.**",
-  "pytorch_toolbelt.**",
-]
-
-[tool.ty.rules]
-# Similar spirit to mypy's warn_unused_ignores = true.
-unused-ignore-comment = "warn"
-
-# Similar spirit to mypy's warn_redundant_casts = true.
-redundant-cast = "warn"
-
-[tool.ruff]
-# Exclude a variety of commonly ignored directories.
-exclude = [
-  ".bzr",
-  ".direnv",
-  ".eggs",
-  ".git",
-  ".git-rewrite",
-  ".hg",
-  ".ipynb_checkpoints",
-  ".mypy_cache",
-  ".nox",
-  ".pants.d",
-  ".pyenv",
-  ".pytest_cache",
-  ".pytype",
-  ".ruff_cache",
-  ".svn",
-  ".tox",
-  ".venv",
-  ".vscode",
-  "__pypackages__",
-  "_build",
-  "buck-out",
-  "build",
-  "dist",
-  "node_modules",
-  "site-packages",
-  "venv",
-]
-
-# Same as Black.
-line-length = 120
-indent-width = 4
-
-# Assume Python 3.10
-target-version = "py310"
-
-[tool.ruff.lint]
-# Enable Pyflakes (`F`) and a subset of the pycodestyle (`E`)  codes by default.
-select = ["E4", "E7", "E9", "F", "I"]
-extend-select = ["D100", "D101", "D102", "D103", "D104", "D107"]
-ignore = ["E722"]
-
-# Allow fix for all enabled rules (when `--fix`) is provided.
-fixable = ["ALL"]
-unfixable = []
-
-# Allow unused variables when underscore-prefixed.
-dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
-
-[tool.ruff.lint.pydocstyle]
-convention = "google"
-
-[tool.ruff.format]
-# Like Black, use double quotes for strings.
-quote-style = "double"
-
-# Like Black, indent with spaces, rather than tabs.
-indent-style = "space"
-
-# Like Black, respect magic trailing commas.
-skip-magic-trailing-comma = false
-
-# Like Black, automatically detect the appropriate line ending.
-line-ending = "auto"
-
-[tool.ruff.lint.isort]
-case-sensitive = true
-
-[tool.poe.executor]
-type = "simple"
-
-[tool.poe.tasks]
-gpu_build = { cmd = "docker compose -f containers/docker-compose.gpu.yml build gpu", help = "Build the GPU Docker image." }
-gpu_up = { cmd = "docker compose -f containers/docker-compose.gpu.yml up -d gpu", help = "Start GPU container in detached mode." }
-gpu_down = { cmd = "docker compose -f containers/docker-compose.gpu.yml down --remove-orphans", help = "Stop GPU container." }
-gpu_logs = { cmd = "docker compose -f containers/docker-compose.gpu.yml logs -f gpu", help = "Tail GPU container logs." }
-gpu_verify = { cmd = "docker compose -f containers/docker-compose.gpu.yml exec gpu python containers/test.py", help = "Verify GPU container environment." }
-gpu_shell = { cmd = "docker compose -f containers/docker-compose.gpu.yml exec gpu bash", help = "Open shell in GPU container." }
-
-cpu_build = { cmd = "docker compose -f containers/docker-compose.cpu.yml build cpu", help = "Build the CPU Docker image." }
-cpu_up = { cmd = "docker compose -f containers/docker-compose.cpu.yml up -d cpu", help = "Start CPU container in detached mode." }
-cpu_down = { cmd = "docker compose -f containers/docker-compose.cpu.yml down --remove-orphans", help = "Stop CPU container." }
-cpu_logs = { cmd = "docker compose -f containers/docker-compose.cpu.yml logs -f cpu", help = "Tail CPU container logs." }
-cpu_verify = { cmd = "docker compose -f containers/docker-compose.cpu.yml exec cpu python containers/test.py", help = "Verify CPU container environment." }
-cpu_shell = { cmd = "docker compose -f containers/docker-compose.cpu.yml exec cpu bash", help = "Open shell in CPU container." }
-
-gpu_setup = { sequence = ["gpu_build", "gpu_up", "gpu_verify"], help = "Build, start, and verify GPU container." }
-cpu_setup = { sequence = ["cpu_build", "cpu_up", "cpu_verify"], help = "Build, start, and verify CPU container." }
-
-[tool.poe.tasks.gpu_run]
-help = "Run a Python file inside the running GPU container."
-cmd = "docker compose -f containers/docker-compose.gpu.yml exec gpu python ${file}"
-args = [
-  { name = "file", positional = true, help = "Python file path to run inside GPU container." }
-]
-
-[tool.poe.tasks.cpu_run]
-help = "Run a Python file inside the running CPU container."
-cmd = "docker compose -f containers/docker-compose.cpu.yml exec cpu python ${file}"
-args = [
-  { name = "file", positional = true, help = "Python file path to run inside CPU container." }
 ]

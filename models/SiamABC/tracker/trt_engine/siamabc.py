@@ -73,6 +73,12 @@ import sys
 import warnings
 import contextlib
 import os
+import platform
+
+# Triton (required by torch.compile's default Inductor backend) has no ARM64
+# wheels and is excluded from pyproject.nano.toml.  Detect once at import time
+# so the attention-neck compilation path can fall back to eager on Jetson Nano.
+_IS_AARCH64: bool = platform.machine() == "aarch64"
 
 # ── ANSI helpers ────────────────────────────────────────────────────────────
 _RED    = "\033[1;31m"
@@ -211,7 +217,14 @@ class TRTSiamABCNet:
         _clog("  [SiamRAM] Compiling attention neck …", _RED)
         _attn_mod = _AttentionNeck(model).eval().to(self._device).float()
         with _suppress_external_logs():
-            self._trt_attn = torch.compile(_attn_mod, dynamic=True, fullgraph=True)
+            if _IS_AARCH64:
+                # Triton is unavailable on ARM64/Jetson Nano (no wheel exists).
+                # The default Inductor backend requires Triton for kernel codegen,
+                # so torch.compile would crash.  Run the attention neck in eager
+                # mode instead — the backbone and connect engines still use TRT.
+                self._trt_attn = _attn_mod
+            else:
+                self._trt_attn = torch.compile(_attn_mod, dynamic=True, fullgraph=True)
             with torch.no_grad():
                 for hw in (h_t, h_s):
                     _dummy = torch.randn(
@@ -221,7 +234,7 @@ class TRTSiamABCNet:
                         device=self._device,
                         dtype=torch.float32,
                     )
-                    self._trt_attn(_dummy)   # trigger actual compilation
+                    self._trt_attn(_dummy)   # trigger compilation or warmup
         _clog("  [SiamRAM] Attention neck ready.", _GREEN)
 
         # ── connect engines ──────────────────────────────────────────────────

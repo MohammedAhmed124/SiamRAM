@@ -52,6 +52,7 @@ Delegated / no-op:
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 import os
 from pathlib import Path
@@ -86,6 +87,25 @@ silence_noisy_libraries()
 with quiet_external_logs():
     import tensorrt
     import torch_tensorrt
+
+
+def _triton_available() -> bool:
+    """
+    True if Triton can be imported.
+
+    torch.compile's default Inductor backend lowers to Triton kernels for CUDA;
+    without Triton the very first compiled call raises at runtime. Triton ships
+    no ARM64/aarch64 wheel, so it is excluded from pyproject.nano.toml and absent
+    on Jetson — but it can also be missing on any platform where install failed.
+    Probing the module directly is therefore more reliable than guessing from the
+    CPU architecture: a capable aarch64 host that *does* have Triton still gets a
+    compiled neck, and an x86 host that lacks it still falls back to eager.
+    """
+    return importlib.util.find_spec("triton") is not None
+
+
+# Resolved once at import time and reused for every tracker built in the process.
+_TORCH_COMPILE_OK: bool = _triton_available()
 
 
 BACKBONE_MODES = {
@@ -243,7 +263,13 @@ class TRTSiamABCNet:
 
         _attn_mod = _AttentionNeck(model).eval().to(self._device).float()
         with quiet_external_logs():
-            self._trt_attn = torch.compile(_attn_mod, dynamic=True, fullgraph=True)
+            if _TORCH_COMPILE_OK:
+                self._trt_attn = torch.compile(_attn_mod, dynamic=True, fullgraph=True)
+            else:
+                # Triton missing (e.g. Jetson/ARM64, where it has no wheel) — the
+                # Inductor backend would crash on the first compiled call. Run the
+                # attention neck eagerly; backbone and connect engines still use TRT.
+                self._trt_attn = _attn_mod
             with torch.no_grad():
                 for hw in (h_t, h_s):
                     _dummy = torch.randn(
@@ -253,7 +279,7 @@ class TRTSiamABCNet:
                         device=self._device,
                         dtype=torch.float32,
                     )
-                    self._trt_attn(_dummy)   # trigger actual compilation
+                    self._trt_attn(_dummy)   # trigger compilation or warmup
         compile_progress().complete()
         compile_progress().stage("compiling connect engines")
 

@@ -37,7 +37,7 @@ trt_engine:
   # Diagnostic control for dynamic_fp32. False preserves TensorRT's TF32 default.
   backbone_disable_tf32: False
   # OSNet-only descriptor acceleration. Ignored unless descriptor_backend == "osnet".
-  trt_compile_osnet: False            # [944f2b8] was True (current default False)
+  trt_compile_osnet: True            # [944f2b8] was True (current default False)
   # OSNet-only FP16 descriptor inference. Ignored unless descriptor_backend == "osnet".
   osnet_fp16: True
   # OSNet-only async overlap. Pixel descriptors are CPU-only and synchronous.

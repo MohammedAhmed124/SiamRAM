@@ -25,6 +25,7 @@ from utils.utils import (_cos_sim, _extract_descriptor,
                          descriptor_async_supported)
 
 from ..SiamABC.tracker.SiamABC_Tracker import SiamABCTracker
+from ..SiamABC.tracker.trt_engine.cache_utils import yolo_cache_suffix
 from .camera_motion import CameraMotionSubsystem
 from .memory import AppearanceMemory
 from .motion import BBoxEKF
@@ -3866,6 +3867,41 @@ class SiamRAMExperimentTracker:
 
         return True
 
+    @staticmethod
+    def _trt_software_versions():
+        """Versions that determine TensorRT engine compatibility.
+
+        Mirrors what the SiamABC cache fingerprint records (see
+        trt_engine/cache_utils.py) so the YOLO engine invalidates on the same
+        software changes. tensorrt / torch_tensorrt are imported lazily because
+        the non-TRT path never needs them.
+        """
+        versions = {
+            "torch": getattr(torch, "__version__", "unknown"),
+            "cuda": str(getattr(torch.version, "cuda", "unknown")),
+        }
+        try:
+            import tensorrt
+            versions["tensorrt"] = getattr(tensorrt, "__version__", "unknown")
+        except Exception:
+            versions["tensorrt"] = "unknown"
+        try:
+            import torch_tensorrt
+            versions["torch_tensorrt"] = getattr(torch_tensorrt, "__version__", "unknown")
+        except Exception:
+            versions["torch_tensorrt"] = "unknown"
+        return versions
+
+    @staticmethod
+    def _trt_gpu_identity(cuda_id):
+        """GPU identity for the TensorRT cache fingerprint (see cache_utils.py)."""
+        properties = torch.cuda.get_device_properties(int(cuda_id))
+        return {
+            "name": properties.name,
+            "compute_capability": f"{properties.major}.{properties.minor}",
+            "total_memory": int(properties.total_memory),
+        }
+
     def load_yolo_compiled(
         self,
         weights_path,
@@ -3882,9 +3918,11 @@ class SiamRAMExperimentTracker:
         - precision follows ``yolo_fp16`` (``half=`` on export);
         - the engine is built on ``cuda_id``;
         - it is cached under ``trt_cache_dir`` (falling back to next to the
-          weights when no cache dir is configured) with an imgsz- and
-          precision-tagged filename, so changing ``yolo_imgsz`` or the precision
-          never silently reuses a stale engine;
+          weights when no cache dir is configured) with an imgsz-, precision- and
+          fingerprint-tagged filename (the fingerprint covers the TensorRT / GPU /
+          weights, like the SiamABC and OSNet caches), so changing ``yolo_imgsz``,
+          the precision, the TensorRT version or the GPU never silently reuses a
+          stale or incompatible engine;
         - ``rebuild_trt_cache`` forces a fresh build.
 
         Args:
@@ -3901,7 +3939,20 @@ class SiamRAMExperimentTracker:
         precision = "fp16" if fp16 else "fp32"
 
         stem = os.path.splitext(os.path.basename(weights_path))[0]
-        engine_name = f"{stem}_{imgsz}_{precision}.engine"
+        # Version-tag the engine filename with a fingerprint of the TensorRT /
+        # GPU / weights it is built for, the same way the SiamABC and OSNet caches
+        # do. A TensorRT .engine is only loadable by the version/GPU it was built
+        # for, so without this a TensorRT upgrade silently reuses an incompatible
+        # engine and crashes on deserialize.
+        digest = yolo_cache_suffix(
+            weights_path=weights_path,
+            imgsz=imgsz,
+            precision=precision,
+            cuda_id=device,
+            software_versions=self._trt_software_versions(),
+            gpu_identity=self._trt_gpu_identity(device),
+        )
+        engine_name = f"{stem}_{imgsz}_{precision}_{digest}.engine"
         cache_dir = self._yolo_trt_cache_dir
         if cache_dir:
             os.makedirs(cache_dir, exist_ok=True)

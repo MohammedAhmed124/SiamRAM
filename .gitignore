@@ -195,3 +195,4 @@ training/checkpoints
 # experiments
 experiments/motion_decoupled_imm_pdaf/
 research
+trt_cache

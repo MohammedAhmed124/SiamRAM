@@ -35,6 +35,11 @@ from pathlib import Path
 
 import cv2
 import torch
+_HERE = Path(__file__).resolve().parent
+_SRC = _HERE / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
 # ---------------------------------------------------------------------------
 # Imports from our own code (under src/) and the checkpoint downloader.
 # These come after the sys.path edit above, hence the noqa comments.
@@ -47,17 +52,6 @@ from models.SiamABC.tracker.tracker_setup import (  # noqa: E402
 from models.siamram.config import (OSNET_CHECKPOINT_CHOICES,  # noqa: E402
                                    flatten_ram_tracker_config)
 from models.siamram.tracker import SiamRAMExperimentTracker  # noqa: E402
-
-# ---------------------------------------------------------------------------
-# Put src/ on the import path.
-# Our actual code (models.*, utils.*) lives under src/, but this file sits one
-# level above it. Adding src/ to sys.path lets those imports resolve without us
-# having to edit any file inside src/.
-# ---------------------------------------------------------------------------
-_HERE = Path(__file__).resolve().parent
-_SRC = _HERE / "src"
-if str(_SRC) not in sys.path:
-    sys.path.insert(0, str(_SRC))
 
 # ---------------------------------------------------------------------------
 # Quieten the third-party libraries.
@@ -92,7 +86,7 @@ _CHECKPOINTS_DIR = _HERE / "checkpoints"
 
 # The config we run with. The trailing hash in the name marks which commit's
 # behaviour this config reproduces.
-_CONFIG_PATH = _SRC / "config" / "inference_config_944f2b8.yaml"
+_CONFIG_PATH = _SRC / "config" / "inference_config.yaml"
 
 
 def _resolve_checkpoint_path(path_value: str) -> str:

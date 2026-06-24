@@ -25,7 +25,7 @@ imports two functions from `predictor.py`:
 
 `predictor.py` is the only file we wrote against the framework. Everything it
 relies on lives under `src/`, and every setting comes from one config file
-(`src/config/inference_config_944f2b8.yaml`).
+(`src/config/inference_config.yaml`).
 
 ## How it works
 
@@ -124,7 +124,7 @@ python check_submission.py reference.csv submission.csv
 
 ## Configuration
 
-Every setting lives in `src/config/inference_config_944f2b8.yaml` (the hash
+Every setting lives in `src/config/inference_config.yaml` (the hash
 marks the commit whose behaviour it reproduces). `predictor.py` reads from it
 and does not override it, so the config is the single place to change anything:
 model and tracker hyperparameters, the YOLO/OSNet/SiamABC checkpoint paths, and
@@ -146,7 +146,7 @@ the runtime switches (`use_nvdec` for hardware decoding, `cudnn_benchmark`).
 ├── test.json                  # Example manifest (public_lb split)
 └── src/
     ├── config/
-    │   └── inference_config_944f2b8.yaml   # All settings
+    │   └── inference_config.yaml   # All settings
     ├── models/
     │   ├── siamram/            # SiamRAM tracker, recovery, memory, motion, GMC
     │   └── SiamABC/            # Siamese base tracker (+ TensorRT engine)

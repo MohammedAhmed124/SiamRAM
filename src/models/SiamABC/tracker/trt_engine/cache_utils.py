@@ -90,3 +90,35 @@ def siamabc_cache_prefix(
     ).hexdigest()[:20]
     model_size = str(payload["model"].get("model_size", "unknown"))
     return f"siamabc_{model_size}_{backbone_mode}_{digest}"
+
+
+def yolo_cache_suffix(
+    *,
+    weights_path: str,
+    imgsz: int,
+    precision: str,
+    cuda_id: int,
+    software_versions: Mapping[str, str],
+    gpu_identity: Mapping[str, Any],
+) -> str:
+    """Fingerprint everything that can affect the YOLO TensorRT engine.
+
+    A TensorRT ``.engine`` is only loadable by the same TensorRT version on the
+    same GPU it was built for, so the digest folds in the software versions and
+    GPU identity (exactly like ``siamabc_cache_prefix``). That way a different
+    TensorRT / GPU builds a new file instead of silently reusing an incompatible
+    engine — unlike a fixed ``<stem>_<imgsz>_<precision>.engine`` name.
+    """
+    payload = {
+        "kind": "yolo",
+        "cache_schema": 1,
+        "imgsz": int(imgsz),
+        "precision": str(precision),
+        "cuda_id": int(cuda_id),
+        "software": dict(software_versions),
+        "gpu": dict(gpu_identity),
+        "weights": checkpoint_fingerprint(weights_path),
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:20]

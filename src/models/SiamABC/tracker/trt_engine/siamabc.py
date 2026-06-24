@@ -61,25 +61,16 @@ from typing import Dict, Optional, Sequence, Set, Tuple
 import torch
 import torch.nn as nn
 
-from utils.console import (
-    compile_progress,
-    quiet_external_logs,
-    siamram_log,
-    silence_noisy_libraries,
-)
+from utils.console import (compile_progress, quiet_external_logs, siamram_log,
+                           silence_noisy_libraries)
 
 from ...model import constants
 from ...model.adaptive_batch_norm import AdaptiveBatchNorm
 from ..tracker_setup import load_model
 from .cache_utils import siamabc_cache_prefix
 from .connector import _build_connect_engines, _dispatch_connect
-from .trt_utils import (
-    _AttentionNeck,
-    _EncoderModule,
-    _FeatureExtractorModule,
-    _NeckModule,
-    _cast_module,
-)
+from .trt_utils import (_AttentionNeck, _cast_module, _EncoderModule,
+                        _FeatureExtractorModule, _NeckModule)
 
 log = logging.getLogger(__name__)
 silence_noisy_libraries()

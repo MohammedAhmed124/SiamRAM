@@ -40,13 +40,9 @@ import torch
 import torch.nn as nn
 
 from . import constants
-from .blocks import (
-    AdjustLayer,
-    BoxTower,
-    Encoder,
-    EncoderResNet,
-    FastParallelPolarizedSelfAttention,
-)
+from .blocks import (AdjustLayer, BoxTower, Encoder, EncoderResNet,
+                     FastParallelPolarizedSelfAttention)
+
 
 def _patch_collections_compat_aliases() -> None:
     """

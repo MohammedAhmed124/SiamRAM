@@ -19,27 +19,18 @@ import torch
 from ultralytics import YOLO
 
 from utils.console import siamram_log
-from utils.utils import (
-    _cos_sim,
-    _extract_descriptor,
-    _extract_descriptor_async,
-    _iou,
-    _resolve_descriptor,
-    configure_descriptor_backend,
-    descriptor_async_supported,
-)
+from utils.utils import (_cos_sim, _extract_descriptor,
+                         _extract_descriptor_async, _iou, _resolve_descriptor,
+                         configure_descriptor_backend,
+                         descriptor_async_supported)
 
 from ..SiamABC.tracker.SiamABC_Tracker import SiamABCTracker
 from .camera_motion import CameraMotionSubsystem
 from .memory import AppearanceMemory
 from .motion import BBoxEKF
 from .occlusion_recovery import OcclusionRecoverySubsystem
-from .tracker_state import (
-    CandidateRecord,
-    FrameHistory,
-    FrameRecord,
-    VisualState,
-)
+from .tracker_state import (CandidateRecord, FrameHistory, FrameRecord,
+                            VisualState)
 
 
 class _CompTimer:

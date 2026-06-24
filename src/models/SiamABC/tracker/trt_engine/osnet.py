@@ -32,12 +32,8 @@ from typing import Set
 import torch
 import torch.nn as nn
 
-from utils.console import (
-    compile_progress,
-    quiet_external_logs,
-    siamram_log,
-    silence_noisy_libraries,
-)
+from utils.console import (compile_progress, quiet_external_logs, siamram_log,
+                           silence_noisy_libraries)
 
 log = logging.getLogger(__name__)
 silence_noisy_libraries()

@@ -10,16 +10,14 @@ This module provides:
 
 """
 
-import sys
-import json
 import csv
+import json
+import sys
 import time
 
 import torch
 
-from predictor import load_model
-from predictor import run_tracker
-
+from predictor import load_model, run_tracker
 
 DEVICE = (
     "cuda"

@@ -11,12 +11,8 @@ from typing import List, Optional, Tuple, cast
 
 import numpy as np
 
-from utils.utils import (
-    _cos_sim,
-    _extract_descriptor,
-    _iou,
-    _xcorr_sim_2d_many_to_one,
-)
+from utils.utils import (_cos_sim, _extract_descriptor, _iou,
+                         _xcorr_sim_2d_many_to_one)
 
 
 def _aggregate_drm_anchor_scores(

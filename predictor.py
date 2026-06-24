@@ -35,6 +35,18 @@ from pathlib import Path
 
 import cv2
 import torch
+# ---------------------------------------------------------------------------
+# Imports from our own code (under src/) and the checkpoint downloader.
+# These come after the sys.path edit above, hence the noqa comments.
+# ---------------------------------------------------------------------------
+from omegaconf import OmegaConf  # noqa: E402
+
+from download import download_all_checkpoints  # noqa: E402
+from models.SiamABC.tracker.tracker_setup import (  # noqa: E402
+    get_tracker, normalize_tracker_config_aliases)
+from models.siamram.config import (OSNET_CHECKPOINT_CHOICES,  # noqa: E402
+                                   flatten_ram_tracker_config)
+from models.siamram.tracker import SiamRAMExperimentTracker  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Put src/ on the import path.
@@ -63,23 +75,8 @@ os.environ["TORCHDYNAMO_VERBOSE"] = "0"
 if os.environ.get("TORCH_LOGS") == "":
     os.environ.pop("TORCH_LOGS", None)
 
-# ---------------------------------------------------------------------------
-# Imports from our own code (under src/) and the checkpoint downloader.
-# These come after the sys.path edit above, hence the noqa comments.
-# ---------------------------------------------------------------------------
-from omegaconf import OmegaConf  # noqa: E402
 
-from models.SiamABC.tracker.tracker_setup import (  # noqa: E402
-    get_tracker,
-    normalize_tracker_config_aliases,
-)
-from models.siamram.config import (  # noqa: E402
-    OSNET_CHECKPOINT_CHOICES,
-    flatten_ram_tracker_config,
-)
-from models.siamram.tracker import SiamRAMExperimentTracker  # noqa: E402
 
-from download import download_all_checkpoints  # noqa: E402
 
 
 # When this is True we decode video on a Jetson's NVDEC hardware block instead

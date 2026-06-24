@@ -13,8 +13,8 @@ re-running the submission does not re-fetch gigabytes for no reason.
 """
 
 import os
-import gdown
 
+import gdown
 
 # ---------------------------------------------------------------------------
 # The Google Drive file ID for each checkpoint, keyed by the filename we save

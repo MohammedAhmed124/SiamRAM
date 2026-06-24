@@ -29,6 +29,7 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 import warnings
 from pathlib import Path
 
@@ -377,13 +378,26 @@ def run_tracker(
         raise RuntimeError(f"Cannot open video: '{video_path}'")
 
     # ------------------------------------------------------------------
+    # Latency accounting. Decode (cap.read) runs on the reader thread and
+    # overlaps with tracking (model.update) on this thread, so the two totals
+    # below add up to MORE than the wall-clock time. We report them per frame
+    # so each component's true cost is visible regardless of the overlap.
+    # ------------------------------------------------------------------
+    decode_time = 0.0      # seconds spent inside cap.read(), all frames
+    decode_frames = 0      # number of frames successfully decoded
+    track_time = 0.0       # seconds spent inside model.update(), frames 1..N
+
+    # ------------------------------------------------------------------
     # Frame 0: read it directly and initialise the tracker on it. We do this
     # before starting the reader thread so nothing can race us on frame 0.
     # ------------------------------------------------------------------
+    _t = time.perf_counter()
     success, first_frame = cap.read()
+    decode_time += time.perf_counter() - _t
     if not success or first_frame is None:
         cap.release()
         raise RuntimeError(f"Cannot read first frame from: '{video_path}'")
+    decode_frames += 1
 
     model.initialize(first_frame, init_box)
 
@@ -399,13 +413,19 @@ def run_tracker(
     frame_q: queue.Queue = queue.Queue(maxsize=4)
     stop_event = threading.Event()
     reader_exc: list = []
+    # The reader thread owns these; we read them only after join(), so no lock
+    # is needed. {"time": seconds in cap.read(), "frames": frames decoded}.
+    reader_stats = {"time": 0.0, "frames": 0}
 
     def _frame_reader() -> None:
         try:
             while not stop_event.is_set():
+                _t = time.perf_counter()
                 ret, fr = cap.read()
+                reader_stats["time"] += time.perf_counter() - _t
                 if not ret or fr is None:
                     break
+                reader_stats["frames"] += 1
                 # Wait for room in the queue, but wake up every so often so a
                 # stop request (the consumer finished or errored) can never
                 # leave us blocked forever.
@@ -437,7 +457,9 @@ def run_tracker(
             if frame is None:
                 break
 
+            _t = time.perf_counter()
             bbox_arr, _score, _in_occ, _yolo = model.update(frame)
+            track_time += time.perf_counter() - _t
             x, y, w, h = (float(v) for v in bbox_arr[:4])
             predictions.append(
                 {"frame_idx": frame_idx, "x": x, "y": y, "w": w, "h": h}
@@ -458,5 +480,55 @@ def run_tracker(
 
     if reader_exc:
         raise reader_exc[0]
+
+    # ------------------------------------------------------------------
+    # Per-sequence latency report. reader_stats is final now that the reader
+    # thread has joined, so we fold its decode total into ours and print the
+    # decode (CPU cap.read) and tracker (model.update) costs side by side.
+    # ------------------------------------------------------------------
+    decode_time += reader_stats["time"]
+    decode_frames += reader_stats["frames"]
+    track_frames = frame_idx - 1
+
+    decode_ms = 1000.0 * decode_time / decode_frames if decode_frames else 0.0
+    track_ms = 1000.0 * track_time / track_frames if track_frames else 0.0
+    decode_fps = decode_frames / decode_time if decode_time > 0 else 0.0
+    track_fps = track_frames / track_time if track_time > 0 else 0.0
+
+    print(
+        f"[latency] decode (CPU): {decode_ms:.2f} ms/frame "
+        f"({decode_fps:.1f} FPS, {decode_time:.2f} s over {decode_frames} frames)"
+    )
+    print(
+        f"[latency] tracker:      {track_ms:.2f} ms/frame "
+        f"({track_fps:.1f} FPS, {track_time:.2f} s over {track_frames} frames)"
+    )
+
+    # Per-component breakdown of the tracker cost, if the tracker recorded it.
+    # siamabc / yolo / osnet run *inside* track_update; prescale / homography /
+    # motion_kf are separate pipeline stages. The components do not sum to the
+    # tracker total (track_update also holds bookkeeping; with GPU stream
+    # overlap the model timings are launch-side unless SIAMRAM_PROFILE_SYNC=1).
+    comp_times = getattr(model, "_comp_times", None) or {}
+    comp_counts = getattr(model, "_comp_counts", None) or {}
+    if comp_times:
+        order = [
+            "prescale", "homography", "motion_kf", "track_update",
+            "siamabc", "yolo", "osnet",
+        ]
+        names = [n for n in order if n in comp_times]
+        names += [n for n in comp_times if n not in order]
+        print(
+            "[latency] tracker components "
+            "(siamabc/yolo/osnet are inside track_update):"
+        )
+        for n in names:
+            total = comp_times[n]
+            calls = comp_counts.get(n, 0)
+            per = 1000.0 * total / calls if calls else 0.0
+            print(
+                f"[latency]   {n:<12}: {per:7.2f} ms/call "
+                f"({total:6.2f} s over {calls} calls)"
+            )
 
     return predictions

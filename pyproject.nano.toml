@@ -22,7 +22,10 @@ dependencies = [
   "matplotlib>=3.10.9",
   #TODO: remove mobile cv
   "mobile-cv>=0.1",
-  "numpy>=2.2.6",
+  # numpy<2: the JetPack system torch (2.5.0…nv24.08) is compiled against NumPy
+  # 1.x. NumPy 2's C-ABI break makes torch fail with "_ARRAY_API not found", so
+  # the whole stack must stay on numpy<2.
+  "numpy>=1.26,<2",
   # opencv: NOT installed by uv — JetPack ships a CUDA/GStreamer-enabled OpenCV
   # system-wide. A PyPI opencv-python wheel would shadow it and lose hardware
   # acceleration. The --system-site-packages venv exposes the system build.

@@ -8,6 +8,7 @@ Memory (DRM) for reliable re-acquisition after long-term occlusion.
 """
 
 import os
+import time
 from collections import deque
 from typing import List, Optional, Tuple, TypedDict
 
@@ -38,6 +39,42 @@ from .tracker_state import (
     FrameRecord,
     VisualState,
 )
+
+
+class _CompTimer:
+    """
+    Context manager that accumulates wall time per named tracker component into
+    the tracker's `_comp_times` / `_comp_counts` registries. Used to break the
+    per-frame cost down by component (siamabc backbone, yolo, osnet, homography,
+    motion, ...) for the latency logs.
+
+    GPU work is launched asynchronously, so by default these are launch-side
+    wall times. Set the env var SIAMRAM_PROFILE_SYNC=1 to torch.cuda.synchronize
+    at each timer boundary — that serializes the pipeline (disabling the
+    SiamABC/OSNet stream overlap) but yields true per-component compute time.
+    """
+
+    __slots__ = ("_tracker", "_name", "_t0")
+
+    def __init__(self, tracker: "SiamRAMExperimentTracker", name: str) -> None:
+        self._tracker = tracker
+        self._name = name
+
+    def __enter__(self) -> "_CompTimer":
+        if self._tracker._profile_sync:
+            torch.cuda.synchronize()
+        self._t0 = time.perf_counter()
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        if self._tracker._profile_sync:
+            torch.cuda.synchronize()
+        dt = time.perf_counter() - self._t0
+        ct = self._tracker._comp_times
+        cc = self._tracker._comp_counts
+        ct[self._name] = ct.get(self._name, 0.0) + dt
+        cc[self._name] = cc.get(self._name, 0) + 1
+        return False
 
 
 class DRMKwargs(TypedDict):
@@ -929,6 +966,14 @@ class SiamRAMExperimentTracker:
         # heavy models/TRT engines. Keep that warm state, but reset every adaptive
         # per-sequence accumulator so statistics cannot leak video-to-video.
         self._discard_pending_descriptor()
+        # Per-component latency registries. Reset here so the breakdown printed
+        # after each sequence does not leak timings from the previous video.
+        self._comp_times = {}
+        self._comp_counts = {}
+        self._profile_sync = (
+            os.environ.get("SIAMRAM_PROFILE_SYNC", "0") == "1"
+            and torch.cuda.is_available()
+        )
         self._overlap_active = None
         if self._drm_margin_auto is not None:
             self._drm_margin_auto.reset()
@@ -1061,6 +1106,21 @@ class SiamRAMExperimentTracker:
                 self._siam_stream.wait_stream(torch.cuda.default_stream())
         return self._overlap_active
 
+    def _timed(self, name: str) -> "_CompTimer":
+        """
+        Return a context manager that times a component and accumulates it into
+        the per-sequence registry. Lazily creates the registry so timed calls
+        are safe even before initialize() has run.
+        """
+        if not hasattr(self, "_comp_times"):
+            self._comp_times = {}
+            self._comp_counts = {}
+            self._profile_sync = (
+                os.environ.get("SIAMRAM_PROFILE_SYNC", "0") == "1"
+                and torch.cuda.is_available()
+            )
+        return _CompTimer(self, name)
+
     def update(
         self,
         frame: np.ndarray,
@@ -1092,7 +1152,8 @@ class SiamRAMExperimentTracker:
         Internally all coordinates remain in proc-frame space.
         """
 
-        proc_frame = self._prescale_frame(frame)
+        with self._timed("prescale"):
+            proc_frame = self._prescale_frame(frame)
 
         self.frame_idx += 1
         self._last_yolo = []
@@ -1100,28 +1161,31 @@ class SiamRAMExperimentTracker:
         ekf = self.ekf
         assert ekf is not None
 
-        H, H_reliable, current_gray = self._estimate_homography(proc_frame)
-        self._last_H = H
-        self._last_H_reliable = H_reliable
+        with self._timed("homography"):
+            H, H_reliable, current_gray = self._estimate_homography(proc_frame)
+            self._last_H = H
+            self._last_H_reliable = H_reliable
 
-        # Refresh the heavy-camera-motion verdict every frame (incl. occlusion)
-        # so the viz marker stays live. Cheap: displacement is cached per frame,
-        # and _normal_update re-runs this with the fresh pred bbox afterwards.
-        self._is_heavy_camera_motion(proc_frame)
+            # Refresh the heavy-camera-motion verdict every frame (incl. occlusion)
+            # so the viz marker stays live. Cheap: displacement is cached per frame,
+            # and _normal_update re-runs this with the fresh pred bbox afterwards.
+            self._is_heavy_camera_motion(proc_frame)
 
-        if self.in_occlusion and self._out_of_frame:
-            ekf.P = ekf.P + ekf.Q
-        else:
-            ekf.predict(H=H, H_reliable=H_reliable)
+        with self._timed("motion_kf"):
+            if self.in_occlusion and self._out_of_frame:
+                ekf.P = ekf.P + ekf.Q
+            else:
+                ekf.predict(H=H, H_reliable=H_reliable)
 
-        if self.in_occlusion:
-            bbox, score = self._occlusion_update(proc_frame)
-            self.visual_mode = "occluded"
-            if not self.visual_reason:
-                self.visual_reason = "Occlusion recovery"
-            self.visual_details = ""
-        else:
-            bbox, score = self._normal_update(proc_frame)
+        with self._timed("track_update"):
+            if self.in_occlusion:
+                bbox, score = self._occlusion_update(proc_frame)
+                self.visual_mode = "occluded"
+                if not self.visual_reason:
+                    self.visual_reason = "Occlusion recovery"
+                self.visual_details = ""
+            else:
+                bbox, score = self._normal_update(proc_frame)
 
         self.prev_gray = current_gray
 
@@ -1594,13 +1658,15 @@ class SiamRAMExperimentTracker:
 
         if self._gmc_prior_enabled:
             self._apply_gmc_search_prior(frame)
-        pred_bbox, score, _ = self.tracker.update(frame)
+        with self._timed("siamabc"):
+            pred_bbox, score, _ = self.tracker.update(frame)
         pred_bbox = np.array(pred_bbox, dtype=int)
 
         # Tier-3: the SiamABC forward above just overlapped last frame's OSNet
         # forward on the side stream. Finish + admit that deferred descriptor now,
         # before any appearance-memory consumer runs below.
-        self._resolve_pending_descriptor()
+        with self._timed("osnet"):
+            self._resolve_pending_descriptor()
 
         self._maybe_run_class_warmup(frame)
         self._maybe_run_detectability_probe(frame)
@@ -1803,7 +1869,8 @@ class SiamRAMExperimentTracker:
                     "frame_idx": self.frame_idx,
                 }
             else:
-                desc = _extract_descriptor(frame, pred_bbox)
+                with self._timed("osnet"):
+                    desc = _extract_descriptor(frame, pred_bbox)
                 if desc is not None:
                     self.memory.try_admit(pred_bbox, desc, self.current_bbox)
                     # Adaptive drm_margin: on confident frames, sample how well
@@ -1943,7 +2010,8 @@ class SiamRAMExperimentTracker:
         # (synchronous) OSNet calls, so the side stream is drained and the
         # appearance memory is consistent. Normally a no-op (pending is cleared
         # on occlusion entry).
-        self._resolve_pending_descriptor()
+        with self._timed("osnet"):
+            self._resolve_pending_descriptor()
         return self._occlusion_subsystem.occlusion_update(
             frame=frame,
         )
@@ -3853,14 +3921,15 @@ class SiamRAMExperimentTracker:
         if prev_benchmark:
             torch.backends.cudnn.benchmark = False
         try:
-            return self.yolo.predict(
-                image,
-                conf=self.yolo_conf if conf is None else conf,
-                iou=self.yolo_iou_thr,
-                verbose=False,
-                imgsz=self.yolo_imgsz,
-                augment=self.yolo_augment,
-            )
+            with self._timed("yolo"):
+                return self.yolo.predict(
+                    image,
+                    conf=self.yolo_conf if conf is None else conf,
+                    iou=self.yolo_iou_thr,
+                    verbose=False,
+                    imgsz=self.yolo_imgsz,
+                    augment=self.yolo_augment,
+                )
         finally:
             if prev_benchmark:
                 torch.backends.cudnn.benchmark = prev_benchmark

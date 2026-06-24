@@ -129,7 +129,11 @@ class BBoxEKF:
         z = np.array([cx, cy])
         innov = z - self._H_mat @ self.x
         S = self._H_mat @ self.P @ self._H_mat.T + self.R
-        K = self.P @ self._H_mat.T @ np.linalg.inv(S)
+        PHt = self.P @ self._H_mat.T
+        try:
+            K = np.linalg.solve(S.T, PHt.T).T
+        except np.linalg.LinAlgError:
+            K = PHt @ np.linalg.pinv(S)
         self.x = self.x + K @ innov
         I_KH = np.eye(self.DIM_X) - K @ self._H_mat
         self.P = I_KH @ self.P
@@ -143,7 +147,12 @@ class BBoxEKF:
         Returns:
             np.ndarray: Bounding box [x, y, w, h].
         """
-        cx, cy = self.x[0], self.x[1]
+        cx, cy = np.nan_to_num(
+            self.x[:2],
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        )
         x1 = cx - self._bw / 2.0
         y1 = cy - self._bh / 2.0
         return np.array(

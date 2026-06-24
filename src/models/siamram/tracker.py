@@ -8,6 +8,7 @@ Memory (DRM) for reliable re-acquisition after long-term occlusion.
 """
 
 import os
+import shutil
 import time
 from collections import deque
 from typing import List, Optional, Tuple, TypedDict
@@ -303,6 +304,9 @@ class SiamRAMExperimentTracker:
         yolo_detectability_iou_thr: float = 0.3,
         yolo_undetectable_conf: Optional[float] = None,
         copile_yolo=False,
+        trt_compile_yolo: bool = False,
+        yolo_fp16: bool = False,
+        cuda_id: int = 0,
         debug=True,
         disable_camera_motion: bool = False,
         gmc_prior_enabled: bool = True,
@@ -398,6 +402,10 @@ class SiamRAMExperimentTracker:
             osnet_max_candidate_batch (any): max detections per frame sent to OSNet; 0 disables capping
             osnet_fp16 (any): run the OSNet descriptor backbone in FP16 (CUDA only; ignored on CPU)
             trt_compile_osnet (any): TRT-compile the OSNet descriptor backbone (CUDA only; needs torch_tensorrt)
+            trt_compile_yolo (any): TRT-compile the YOLO re-detector via Ultralytics engine export (CUDA only)
+            yolo_fp16 (any): build the YOLO TRT engine in FP16 (CUDA only; ignored unless compiling)
+            cuda_id (any): GPU device index used to build / run the YOLO TRT engine
+            copile_yolo (any): deprecated typo'd alias for trt_compile_yolo; kept for backwards compatibility
             yolo_warmup_frames (any): initial frame count that uses centered warm-up ROI
             yolo_warmup_center_scale (any): warm-up ROI side ratio relative to frame size
             vel_dir_hard_gate (any): if cosine similarity between candidate and expected velocity is below -this, velocity score is floored to 0.05
@@ -475,7 +483,27 @@ class SiamRAMExperimentTracker:
         self.yolo_augment = bool(yolo_augment)
 
         self.debug = debug
-        if copile_yolo:
+
+        # TensorRT settings for the YOLO re-detector. trt_cache_dir /
+        # trt_rebuild_cache are shared with the SiamABC / OSNet engines (bridged
+        # from the trt_engine config block); yolo_fp16 + cuda_id select the
+        # export precision and device. copile_yolo is the deprecated typo'd alias
+        # for trt_compile_yolo and is honored only for backwards compatibility.
+        self._yolo_fp16 = bool(yolo_fp16)
+        self._cuda_id = int(cuda_id)
+        self._yolo_trt_cache_dir = str(trt_cache_dir or "").strip()
+        self._yolo_trt_rebuild = bool(trt_rebuild_cache)
+        compile_yolo = bool(trt_compile_yolo or copile_yolo)
+        if compile_yolo and not torch.cuda.is_available():
+            siamram_log(
+                "trt_compile_yolo requested but no CUDA device is available; "
+                "falling back to the eager YOLO model.",
+                phase="YOLO",
+                status="warn",
+            )
+            compile_yolo = False
+
+        if compile_yolo:
             self.yolo = self.load_yolo_compiled(yolo_weights)
         else:
             self.yolo = YOLO(yolo_weights)
@@ -3853,28 +3881,81 @@ class SiamRAMExperimentTracker:
         force_recompile=False,
     ):
         """
-        Load a TensorRT compiled YOLO engine, compiling it if necessary.
+        Load a TensorRT-compiled YOLO engine, compiling it if necessary.
+
+        Uses Ultralytics' native ``model.export(format="engine")`` (which keeps
+        the ``.predict()`` / NMS pipeline intact, unlike the raw-TRT path used for
+        SiamABC / OSNet) and wires it into the same ``trt_engine`` settings as the
+        other models:
+
+        - precision follows ``yolo_fp16`` (``half=`` on export);
+        - the engine is built on ``cuda_id``;
+        - it is cached under ``trt_cache_dir`` (falling back to next to the
+          weights when no cache dir is configured) with an imgsz- and
+          precision-tagged filename, so changing ``yolo_imgsz`` or the precision
+          never silently reuses a stale engine;
+        - ``rebuild_trt_cache`` forces a fresh build.
 
         Args:
             weights_path (str): Path to the PyTorch YOLO weights (.pt).
-            force_recompile (bool, optional): Whether to force recompilation. Defaults to False.
+            force_recompile (bool, optional): Force recompilation regardless of
+                cache state. Defaults to False.
 
         Returns:
             YOLO: The loaded YOLO model using the TensorRT engine.
         """
-        engine_path = weights_path.replace(".pt", ".engine")
+        imgsz = int(self.yolo_imgsz)
+        device = int(self._cuda_id)
+        fp16 = bool(self._yolo_fp16)
+        precision = "fp16" if fp16 else "fp32"
 
-        if not os.path.exists(engine_path) or force_recompile:
+        stem = os.path.splitext(os.path.basename(weights_path))[0]
+        engine_name = f"{stem}_{imgsz}_{precision}.engine"
+        cache_dir = self._yolo_trt_cache_dir
+        if cache_dir:
+            os.makedirs(cache_dir, exist_ok=True)
+            engine_path = os.path.join(cache_dir, engine_name)
+        else:
+            engine_path = os.path.join(
+                os.path.dirname(weights_path) or ".", engine_name
+            )
+
+        rebuild = bool(force_recompile or self._yolo_trt_rebuild)
+
+        if rebuild or not os.path.exists(engine_path):
             siamram_log(
-                f"Compiling YOLO engine at {self.yolo_imgsz}x{self.yolo_imgsz} "
-                "(may take a minute)",
+                f"Compiling YOLO engine at {imgsz}x{imgsz} ({precision}) on "
+                f"cuda:{device} (may take a minute)",
                 phase="YOLO",
                 status="build",
             )
 
             model = YOLO(weights_path)
+            exported = model.export(
+                format="engine",
+                half=fp16,
+                device=device,
+                imgsz=imgsz,
+            )
 
-            model.export(format="engine", half=False, device=0, imgsz=self.yolo_imgsz)
+            # Ultralytics writes "<stem>.engine" next to the .pt and returns its
+            # path; relocate it to the imgsz/precision-tagged cache filename so
+            # engines for different sizes / precisions coexist.
+            exported = str(exported) if exported else ""
+            if exported and os.path.abspath(exported) != os.path.abspath(engine_path):
+                shutil.move(exported, engine_path)
+
+            siamram_log(
+                f"YOLO engine ready: {engine_path}",
+                phase="YOLO",
+                status="ok",
+            )
+        else:
+            siamram_log(
+                f"Reusing cached YOLO engine: {engine_path}",
+                phase="YOLO",
+                status="ok",
+            )
 
         return YOLO(engine_path)
 

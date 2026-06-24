@@ -42,6 +42,11 @@ trt_engine:
   osnet_fp16: True
   # OSNet-only async overlap. Pixel descriptors are CPU-only and synchronous.
   osnet_async_overlap: True
+  # TRT-compile the YOLO re-detector via Ultralytics' native engine export.
+  # The engine is cached under trt_cache_dir, tagged by imgsz + precision.
+  trt_compile_yolo: True
+  # FP16 YOLO engine. Matches osnet_fp16 / the SiamABC dynamic_fp16 default.
+  yolo_fp16: True
   # Test-time-augmentation blend factor inside the SiamABC TRT wrapper.
   lambda_tta: 0.1
   # GPU device index to build / run engines on.
@@ -168,7 +173,9 @@ ram_tracker:
     yolo_augment: false
     yolo_filter_class: false
     yolo_class_detect_frames: 5
-    copile_yolo: false
+    # YOLO TensorRT compilation now lives under trt_engine (trt_compile_yolo /
+    # yolo_fp16), alongside the SiamABC and OSNet switches. The old copile_yolo
+    # key here is still accepted by the tracker as a deprecated alias.
     yolo_warmup_frames: 0
     yolo_warmup_center_scale: 0.4
     yolo_search_expand: 100

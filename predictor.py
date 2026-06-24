@@ -193,6 +193,14 @@ def load_model(device: str = "cuda") -> SiamRAMExperimentTracker:
     ram_tracker_kwargs["trt_cache_dir"] = osnet_trt_cache_dir
     ram_tracker_kwargs["trt_rebuild_cache"] = bool(trt_cfg.get("rebuild_trt_cache", False))
 
+    # The YOLO re-detector compiles through Ultralytics' native engine export,
+    # but its switches also live under trt_engine, so bridge them the same way
+    # as the OSNet ones. The engine is cached under the shared trt_cache_dir
+    # (resolved above) and rebuilt when rebuild_trt_cache is set.
+    ram_tracker_kwargs["trt_compile_yolo"] = bool(trt_cfg.get("trt_compile_yolo", False))
+    ram_tracker_kwargs["yolo_fp16"] = bool(trt_cfg.get("yolo_fp16", False))
+    ram_tracker_kwargs["cuda_id"] = int(trt_cfg.get("cuda_id", 0))
+
     if bool(trt_cfg.get("trt_compile_siamabc", False)):
         from models.SiamABC.tracker.trt_engine.siamabc import get_trt_tracker
 

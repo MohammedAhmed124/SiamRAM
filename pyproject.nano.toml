@@ -54,7 +54,7 @@ dependencies = [
   # compilation on Jetson via the system-installed JetPack TRT libraries.
   # triton-windows: not applicable on Jetson.
   "omegaconf>=2.3.0",
-  "torchreid",
+#  "torchreid",
   "cython>=3.0.0",
   "h5py>=3.10.0",
   "future>=1.0.0",

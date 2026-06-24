@@ -378,9 +378,9 @@ def run_tracker(
     init_box = read_init_box(init_box_path)
 
     cap = _open_video(video_path)
-    if not cap.isOpened():
-        cap.release()
-        raise RuntimeError(f"Cannot open video: '{video_path}'")
+    reader: threading.Thread | None = None
+    frame_q: queue.Queue | None = None
+    stop_event: threading.Event | None = None
 
     # ------------------------------------------------------------------
     # Latency accounting. Decode (cap.read) runs on the reader thread and
@@ -392,71 +392,76 @@ def run_tracker(
     decode_frames = 0      # number of frames successfully decoded
     track_time = 0.0       # seconds spent inside model.update(), frames 1..N
 
-    # ------------------------------------------------------------------
-    # Frame 0: read it directly and initialise the tracker on it. We do this
-    # before starting the reader thread so nothing can race us on frame 0.
-    # ------------------------------------------------------------------
-    _t = time.perf_counter()
-    success, first_frame = cap.read()
-    decode_time += time.perf_counter() - _t
-    if not success or first_frame is None:
-        cap.release()
-        raise RuntimeError(f"Cannot read first frame from: '{video_path}'")
-    decode_frames += 1
-
-    model.initialize(first_frame, init_box)
-
-    x0, y0, w0, h0 = init_box
-    predictions: list[dict] = [
-        {"frame_idx": 0, "x": x0, "y": y0, "w": w0, "h": h0}
-    ]
-
-    # ------------------------------------------------------------------
-    # Frames 1..N: the reader thread decodes ahead while the GPU tracks. A
-    # queue depth of 4 keeps the GPU fed without buffering the whole video.
-    # ------------------------------------------------------------------
-    frame_q: queue.Queue = queue.Queue(maxsize=4)
-    stop_event = threading.Event()
     reader_exc: list = []
     # The reader thread owns these; we read them only after join(), so no lock
     # is needed. {"time": seconds in cap.read(), "frames": frames decoded}.
     reader_stats = {"time": 0.0, "frames": 0}
 
-    def _frame_reader() -> None:
-        try:
-            while not stop_event.is_set():
-                _t = time.perf_counter()
-                ret, fr = cap.read()
-                reader_stats["time"] += time.perf_counter() - _t
-                if not ret or fr is None:
-                    break
-                reader_stats["frames"] += 1
-                # Wait for room in the queue, but wake up every so often so a
-                # stop request (the consumer finished or errored) can never
-                # leave us blocked forever.
+    try:
+        if not cap.isOpened():
+            raise RuntimeError(f"Cannot open video: '{video_path}'")
+
+        # --------------------------------------------------------------
+        # Frame 0: read it directly and initialise the tracker on it. This
+        # must stay inside the cleanup scope because initialization can fail
+        # after the decoder has already allocated file or hardware resources.
+        # --------------------------------------------------------------
+        _t = time.perf_counter()
+        success, first_frame = cap.read()
+        decode_time += time.perf_counter() - _t
+        if not success or first_frame is None:
+            raise RuntimeError(f"Cannot read first frame from: '{video_path}'")
+        decode_frames += 1
+
+        model.initialize(first_frame, init_box)
+
+        x0, y0, w0, h0 = init_box
+        predictions: list[dict] = [
+            {"frame_idx": 0, "x": x0, "y": y0, "w": w0, "h": h0}
+        ]
+
+        # --------------------------------------------------------------
+        # Frames 1..N: the reader thread decodes ahead while the GPU tracks.
+        # A queue depth of 4 keeps the GPU fed without buffering the video.
+        # --------------------------------------------------------------
+        frame_q = queue.Queue(maxsize=4)
+        stop_event = threading.Event()
+
+        def _frame_reader() -> None:
+            try:
+                while not stop_event.is_set():
+                    _t = time.perf_counter()
+                    ret, fr = cap.read()
+                    reader_stats["time"] += time.perf_counter() - _t
+                    if not ret or fr is None:
+                        break
+                    reader_stats["frames"] += 1
+                    # Wait for room in the queue, but wake up every so often
+                    # so a stop request can never leave us blocked forever.
+                    while not stop_event.is_set():
+                        try:
+                            frame_q.put(fr, timeout=0.25)
+                            break
+                        except queue.Full:
+                            continue
+            except Exception as exc:
+                reader_exc.append(exc)
+            finally:
+                # Push a None to mark end-of-stream, unless the consumer
+                # already told us to stop.
                 while not stop_event.is_set():
                     try:
-                        frame_q.put(fr, timeout=0.25)
+                        frame_q.put(None, timeout=0.25)
                         break
                     except queue.Full:
                         continue
-        except Exception as exc:
-            reader_exc.append(exc)
-        finally:
-            # Push a None to mark end-of-stream, unless the consumer already
-            # told us to stop.
-            while not stop_event.is_set():
-                try:
-                    frame_q.put(None, timeout=0.25)
-                    break
-                except queue.Full:
-                    continue
 
-    reader = threading.Thread(target=_frame_reader, name="frame-prefetch", daemon=True)
-    reader.start()
+        reader = threading.Thread(
+            target=_frame_reader, name="frame-prefetch", daemon=True
+        )
+        reader.start()
 
-    frame_idx = 1
-    try:
+        frame_idx = 1
         while True:
             frame = frame_q.get()
             if frame is None:
@@ -472,15 +477,18 @@ def run_tracker(
             frame_idx += 1
 
     finally:
-        # Tell the reader to stop, empty the queue so it can unblock from a
-        # put(), wait for it to finish, then release the video.
-        stop_event.set()
-        try:
-            while True:
-                frame_q.get_nowait()
-        except queue.Empty:
-            pass
-        reader.join(timeout=2.0)
+        # Cleanup covers every failure after opening the capture, including
+        # first-frame decoding and model initialization.
+        if stop_event is not None:
+            stop_event.set()
+        if frame_q is not None:
+            try:
+                while True:
+                    frame_q.get_nowait()
+            except queue.Empty:
+                pass
+        if reader is not None and reader.is_alive():
+            reader.join(timeout=2.0)
         cap.release()
 
     if reader_exc:

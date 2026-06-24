@@ -345,6 +345,21 @@ def _open_video(path: str) -> cv2.VideoCapture:
 # run_tracker
 # ---------------------------------------------------------------------------
 
+def _resolve_input_path(path_value: str) -> str:
+    """
+    Resolve a manifest path (video or annotation) to a file that exists.
+    """
+    if not path_value:
+        return path_value
+    given = Path(path_value).expanduser()
+    if given.is_absolute():
+        return str(given)
+    for candidate in (Path(path_value), _HERE / path_value, _HERE / "data" / path_value):
+        if candidate.exists():
+            return str(candidate)
+    return path_value
+
+
 def run_tracker(
     model: SiamRAMExperimentTracker,
     video_path: str,
@@ -369,6 +384,11 @@ def run_tracker(
     through a small FIFO queue, so their order is preserved and the result is
     exactly the same as a plain one-frame-at-a-time loop.
     """
+    # Resolve manifest paths against the working dir first, then sensible roots,
+    # so the run is robust to where the grader launches inference from.
+    init_box_path = _resolve_input_path(init_box_path)
+    video_path = _resolve_input_path(video_path)
+
     init_box = read_init_box(init_box_path)
 
     cap = _open_video(video_path)

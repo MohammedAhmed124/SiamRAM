@@ -126,7 +126,11 @@ class _OSNetDescriptorExtractor:
         cache_prefix: str = "osnet",
     ) -> None:
         try:
-            from torchreid.utils import FeatureExtractor
+            try:
+                from torchreid.utils import FeatureExtractor
+            except ModuleNotFoundError:
+                # Newer deep-person-reid moved everything under torchreid.reid.*
+                from torchreid.reid.utils import FeatureExtractor
         except Exception as exc:
             raise RuntimeError(
                 "OSNet descriptor backend requires torchreid. "

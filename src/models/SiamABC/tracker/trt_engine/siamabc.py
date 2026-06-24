@@ -3,47 +3,21 @@ TRTSiamABCNet
 =============
 Drop-in TensorRT replacement for SiamABCNet for use inside SiamABCTracker.
 
-Architecture
-------------
-get_features      → Selectable TensorRT backbone:
-                    dynamic_fp16/dynamic_fp32 use one dynamic encoder+neck
-                    engine; static_fp16 uses exact-shape encoder+neck engines;
-                    static_fp16_fp32_neck uses exact-shape FP16 encoder engines
-                    followed by the original eager FP32 neck.
+Every stage is a raw-TensorRT engine (ONNX -> TensorRT, see raw_trt.py) — no
+torch_tensorrt, so this runs wherever only the `tensorrt` Python module is
+available (e.g. Jetson). Each stage uses static-shape engines, one per concrete
+input shape:
 
-                    Why TorchScript and not torch.export / dynamo?
-                      Every torch.export path — strict=True or strict=False —
-                      runs produce_guards after tracing and raises
-                      ConstraintViolationError when the backbone's stride-2
-                      divisibility guard Ne(Mod(((size-1)//2), 2), 0) is not
-                      satisfied for every integer in [min_hw, max_hw].
-                      The TorchScript backend is purely trace-based: it records
-                      ops on a dummy input and never inspects symbolic shape
-                      guards.  A single dynamic-shape TRT profile then covers
-                      both discrete crop sizes without any guard validation.
+  get_features  → encoder+neck engine per crop size (template, search).
+  track stage 1 → polarized_self_attention + attention_neck engine per branch
+                  size, dispatched by spatial size (_NeckEngineByHW).
+  track stage 2 → connect_model (BoxTower + AdaptiveBatchNorm), two engines
+                  (lam=0, lam=norm_lambda); see connector.py.
 
-track             → SPLIT into two stages:
-  Stage 1 (torch.compile, FP32) : polarized_self_attention + attention_neck
-                   Single dynamic-shape compiled module — one kernel family =
-                   numerically consistent t_mixed / s_mixed for cross-corr.
-  Stage 2 (FP32) : connect_model (BoxTower + AdaptiveBatchNorm)
-                   AdaptiveBatchNorm has Python-level control flow TRT cannot
-                   lower.  Kept FP32 for classification score precision.
-
-Why not FP16 for connect_model?
-  cls_pred sigmoid feeds hard thresholds (0.55, 0.70, 0.80).  FP16 logit
-  precision near 0 causes borderline scores (~0.56) to fall below threshold
-  → spurious occlusion every frame.  Encoder/neck still run FP16 for speed.
-
-Bug fixes
----------
-  1. Engine built after shape probing (shapes from actual forward pass).
-  2. Attention warm-up channels are probed from the real model output.
-  3. Dead two-engine attention code removed.
-  4. _AttentionNeck deep-copies weights.
-  5. _warm_connect_model dummy uses C_s not C_t.
-  6. Backbone TRT engines use the TorchScript backend — no torch.export,
-     symbolic guard validation, or ConstraintViolationError.
+Precision: engine I/O is always FP32. fp16 only flips the builder's FP16 flag
+for the backbone (internal half precision, FP32 in/out). Neck and connect stay
+FP32 — cls_pred feeds hard score thresholds where FP16 logit noise causes
+spurious occlusion.
 
 Delegated / no-op:
     modules()                   → AdaptiveBatchNorm proxy for lambda discovery
@@ -52,11 +26,9 @@ Delegated / no-op:
 
 from __future__ import annotations
 
-import importlib.util
 import logging
-import os
 from pathlib import Path
-from typing import Dict, Optional, Sequence, Set, Tuple
+from typing import Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -73,59 +45,14 @@ from ...model.adaptive_batch_norm import AdaptiveBatchNorm
 from ..tracker_setup import load_model
 from .cache_utils import siamabc_cache_prefix
 from .connector import _build_connect_engines, _dispatch_connect
-from .trt_utils import (
-    _AttentionNeck,
-    _EncoderModule,
-    _FeatureExtractorModule,
-    _NeckModule,
-    _cast_module,
-)
+from .raw_trt import TRTModule, build_trt_module
+from .trt_utils import _AttentionNeck, _FeatureExtractorModule
 
 log = logging.getLogger(__name__)
 silence_noisy_libraries()
 
 with quiet_external_logs():
     import tensorrt
-    import torch_tensorrt
-    from torch_tensorrt.dynamo import compile as trt_dynamo_compile
-
-
-def _triton_available() -> bool:
-    """
-    True if Triton can be imported.
-
-    torch.compile's default Inductor backend lowers to Triton kernels for CUDA, so
-    without Triton the first compiled call raises. Triton ships no ARM64 wheel and
-    is absent on Jetson, but can also be missing wherever an install failed — so
-    probing the module is more reliable than inferring it from the CPU arch.
-    """
-    return importlib.util.find_spec("triton") is not None
-
-
-def _torch_compile_enabled() -> bool:
-    """
-    Decide whether the attention neck uses torch.compile or the TensorRT path.
-
-    By default this follows _triton_available(): Triton present → torch.compile,
-    Triton absent (e.g. Jetson) → TensorRT (see _build_attention_neck). The
-    SIAMRAM_NECK_BACKEND environment variable forces a backend regardless of
-    detection — useful for exercising the TensorRT-neck path on a Triton-capable
-    host (testing/benchmarking the Jetson path):
-
-        SIAMRAM_NECK_BACKEND=tensorrt   # force the TRT-neck path (skip torch.compile)
-        SIAMRAM_NECK_BACKEND=compile    # force torch.compile (raises if Triton absent)
-        (unset / any other value)       # auto-detect via _triton_available()
-    """
-    override = os.environ.get("SIAMRAM_NECK_BACKEND", "").strip().lower()
-    if override in {"tensorrt", "trt"}:
-        return False
-    if override in {"compile", "torch.compile", "inductor", "triton"}:
-        return True
-    return _triton_available()
-
-
-# Resolved once at import time and reused for every tracker built in the process.
-_TORCH_COMPILE_OK: bool = _torch_compile_enabled()
 
 
 class _NeckEngineByHW:
@@ -222,32 +149,17 @@ class TRTSiamABCNet:
         self._connector_cache_prefix = connector_cache_prefix or cache_prefix
         self._rebuild_cache = bool(rebuild_cache)
 
-        enabled_precisions: Set[torch.dtype] = (
-            {torch.float16} if self._fp16 else {torch.float32}
-        )
-
         with torch.no_grad():
             _t = torch.randn(
-                opt_batch,
-                3,
-                template_size,
-                template_size,
-                device=self._device,
-                dtype=torch.float32,
+                opt_batch, 3, template_size, template_size,
+                device=self._device, dtype=torch.float32,
             )
             _s = torch.randn(
-                opt_batch,
-                3,
-                instance_size,
-                instance_size,
-                device=self._device,
-                dtype=torch.float32,
+                opt_batch, 3, instance_size, instance_size,
+                device=self._device, dtype=torch.float32,
             )
             t_feat_shape: Tuple[int, ...] = tuple(model.get_features(_t).shape)
             s_feat_shape: Tuple[int, ...] = tuple(model.get_features(_s).shape)
-            if self._backbone_mode == "static_fp16_fp32_neck":
-                t_encoder_shape: Tuple[int, ...] = tuple(model.encoder(_t).shape)
-                s_encoder_shape: Tuple[int, ...] = tuple(model.encoder(_s).shape)
 
         _, C, h_t, w_t = t_feat_shape
         _, _, h_s, w_s = s_feat_shape
@@ -257,51 +169,18 @@ class TRTSiamABCNet:
         # the OSNet descriptor, so SiamABC + OSNet render as a single bar.
         compile_progress().begin(3)
         compile_progress().stage("compiling backbone engine")
-        self._trt_feat: Optional[torch.nn.Module] = None
-        self._trt_feat_by_hw: Dict[int, torch.nn.Module] = {}
-        self._fp32_neck: Optional[torch.nn.Module] = None
-        if self._backbone_mode in {"dynamic_fp16", "dynamic_fp32"}:
-            self._trt_feat = self._load_or_compile_backbone_engine(
-                module=_FeatureExtractorModule(model),
-                cache_name="features_dynamic",
-                min_hw=template_size,
-                opt_hw=template_size,
-                max_hw=instance_size,
-                enabled_precisions=enabled_precisions,
-                validation_specs=(
-                    (template_size, t_feat_shape),
-                    (instance_size, s_feat_shape),
-                ),
+        self._trt_feat_by_hw: Dict[int, TRTModule] = {}
+        for tag, hw in (("template", template_size), ("search", instance_size)):
+            self._trt_feat_by_hw[hw] = build_trt_module(
+                _FeatureExtractorModule(model).eval().to(self._device).float(),
+                (torch.randn(1, 3, hw, hw, device=self._device),),
+                device=self._device,
+                input_names=["crop"],
+                output_names=["features"],
+                fp16=self._fp16,
+                cache_path=self._cache_path(f"features_{tag}", "engine"),
+                rebuild_cache=self._rebuild_cache,
             )
-        elif self._backbone_mode == "static_fp16":
-            for tag, hw, shape in (
-                ("template", template_size, t_feat_shape),
-                ("search", instance_size, s_feat_shape),
-            ):
-                self._trt_feat_by_hw[hw] = self._load_or_compile_backbone_engine(
-                    module=_FeatureExtractorModule(model),
-                    cache_name=f"features_{tag}",
-                    min_hw=hw,
-                    opt_hw=hw,
-                    max_hw=hw,
-                    enabled_precisions=enabled_precisions,
-                    validation_specs=((hw, shape),),
-                )
-        else:
-            self._fp32_neck = _NeckModule(model).eval().to(self._device).float()
-            for tag, hw, shape in (
-                ("template", template_size, t_encoder_shape),
-                ("search", instance_size, s_encoder_shape),
-            ):
-                self._trt_feat_by_hw[hw] = self._load_or_compile_backbone_engine(
-                    module=_EncoderModule(model),
-                    cache_name=f"encoder_{tag}",
-                    min_hw=hw,
-                    opt_hw=hw,
-                    max_hw=hw,
-                    enabled_precisions=enabled_precisions,
-                    validation_specs=((hw, shape),),
-                )
         compile_progress().complete()
         compile_progress().stage("compiling attention neck")
 
@@ -346,201 +225,21 @@ class TRTSiamABCNet:
         self._engine_cache_dir.mkdir(parents=True, exist_ok=True)
         return self._engine_cache_dir / f"{self._cache_prefix}_{name}.{suffix}"
 
-    def _load_torchscript_engine(
-        self,
-        path: Optional[Path],
-        validation_specs: Sequence[Tuple[int, Tuple[int, ...]]],
-    ) -> Optional[torch.nn.Module]:
-        if path is None or self._rebuild_cache or not path.exists():
-            return None
-        try:
-            # Cache load/save are silent so they don't interrupt the single-line
-            # compile progress bar; failures below still surface as warn lines.
-            engine = torch.jit.load(str(path), map_location=self._device).eval()
-            self._validate_torchscript_engine(engine, validation_specs)
-            return engine
-        except Exception as exc:
-            siamram_log(
-                f"cached engine load failed ({path.name}): {exc}; rebuilding",
-                phase="TRT",
-                status="warn",
-                indent=1,
-            )
-            return None
-
-    def _save_torchscript_engine(
-        self,
-        engine: torch.nn.Module,
-        path: Optional[Path],
-    ) -> None:
-        if path is None:
-            return
-        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-        try:
-            torch.jit.save(engine, str(temporary))
-            os.replace(temporary, path)
-        except Exception as exc:
-            siamram_log(
-                f"cached engine save failed ({path.name}): {exc}",
-                phase="TRT",
-                status="warn",
-                indent=1,
-            )
-        finally:
-            temporary.unlink(missing_ok=True)
-
-    def _validate_torchscript_engine(
-        self,
-        engine: torch.nn.Module,
-        validation_specs: Sequence[Tuple[int, Tuple[int, ...]]],
-    ) -> None:
-        with torch.no_grad():
-            for hw, expected_shape in validation_specs:
-                batch = int(expected_shape[0])
-                dummy = torch.randn(
-                    batch,
-                    3,
-                    hw,
-                    hw,
-                    device=self._device,
-                    dtype=self._dtype,
-                )
-                output = engine(dummy)
-                if not torch.is_tensor(output):
-                    raise RuntimeError(
-                        f"backbone cache returned {type(output).__name__}, expected Tensor"
-                    )
-                if tuple(output.shape) != tuple(expected_shape):
-                    raise RuntimeError(
-                        f"backbone cache shape {tuple(output.shape)} != {expected_shape}"
-                    )
-                # TRT FP16 engines legitimately return FP32 outputs, and
-                # get_features casts to float regardless, so only require a finite
-                # floating-point tensor rather than an exact dtype match.
-                if not output.is_floating_point():
-                    raise RuntimeError(
-                        f"backbone cache returned non-float dtype {output.dtype}"
-                    )
-                if not bool(torch.isfinite(output.float()).all().item()):
-                    raise RuntimeError("backbone cache returned non-finite values")
-
-    def _load_or_compile_backbone_engine(
-        self,
-        module: nn.Module,
-        cache_name: str,
-        min_hw: int,
-        opt_hw: int,
-        max_hw: int,
-        enabled_precisions: Set[torch.dtype],
-        validation_specs: Sequence[Tuple[int, Tuple[int, ...]]],
-    ) -> torch.nn.Module:
-        cache_path = self._cache_path(cache_name, "ts")
-        engine = self._load_torchscript_engine(cache_path, validation_specs)
-        if engine is not None:
-            return engine
-
-        with quiet_external_logs():
-            engine = self._compile_backbone_engine(
-                module=module,
-                min_hw=min_hw,
-                opt_hw=opt_hw,
-                max_hw=max_hw,
-                enabled_precisions=enabled_precisions,
-            )
-        self._validate_torchscript_engine(engine, validation_specs)
-        self._save_torchscript_engine(engine, cache_path)
-        return engine
-
-    def _compile_backbone_engine(
-        self,
-        module: nn.Module,
-        min_hw: int,
-        opt_hw: int,
-        max_hw: int,
-        enabled_precisions: Set[torch.dtype],
-    ) -> torch.nn.Module:
-        """
-        Trace a backbone module with TorchScript, then compile it for the
-        requested static or dynamic spatial profile.
-
-        torch.jit.trace records concrete ops on the dummy tensor without
-        building a symbolic shape graph — no produce_guards, no
-        ConstraintViolationError.  The resulting ScriptModule is handed to
-        torch_tensorrt.compile which builds one TRT engine with a dynamic
-        spatial profile.
-        """
-        module = module.eval().to(self._device)
-        _cast_module(module, self._dtype)
-
-        dummy = torch.randn(
-            self._opt_batch,
-            3,
-            opt_hw,
-            opt_hw,
-            device=self._device,
-            dtype=self._dtype,
-        )
-
-        with torch.no_grad():
-            scripted = torch.jit.trace(module, dummy)
-
-        return torch_tensorrt.compile(
-            scripted,
-            inputs=[
-                torch_tensorrt.Input(
-                    min_shape=(self._min_batch, 3, min_hw, min_hw),
-                    opt_shape=(self._opt_batch, 3, opt_hw, opt_hw),
-                    max_shape=(self._max_batch, 3, max_hw, max_hw),
-                    dtype=self._dtype,
-                )
-            ],
-            enabled_precisions=enabled_precisions,
-            disable_tf32=self._disable_tf32,
-            truncate_long_and_double=True,
-        )
-
     def _build_attention_neck(
         self,
         module: nn.Module,
         C: int,
         h_t: int,
         h_s: int,
-    ) -> torch.nn.Module:
+    ) -> _NeckEngineByHW:
         """
-        Build the attention-neck stage on the fastest backend the platform offers.
-
-        The neck is the one stage not pre-lowered to a TensorRT engine: it runs as
-        a single dynamic-shape module so the template (h_t) and search (h_s)
-        branches share one kernel family, keeping t_mixed / s_mixed numerically
-        consistent for the downstream cross-correlation.
-
-        Backend selection:
-          1. torch.compile (Inductor) — when Triton is importable (x86 CUDA), the
-             default backend. One dynamic module serves both branch sizes.
-          2. TensorRT engines         — when Triton is absent (Jetson/ARM64), where
-             Inductor would crash. One static engine per branch size, dispatched by
-             size (see _compile_attention_neck_engine, _NeckEngineByHW).
-
-        This class is only built when SiamABC compilation was explicitly requested
-        (trt_engine.trt_compile_siamabc), so a neck that cannot be compiled or whose
-        engine diverges from eager RAISES rather than silently running eager.
+        Build one static TensorRT engine per attention-neck branch size and
+        dispatch by spatial size (_NeckEngineByHW). The neck is only ever called at
+        the template (h_t) and search (h_s) sizes.
         """
-        if _TORCH_COMPILE_OK:
-            return torch.compile(module, dynamic=True, fullgraph=True)
-
-        # No Triton: build one static TRT engine per branch size; compile-or-raise.
-        try:
-            engines: Dict[int, torch.nn.Module] = {}
-            for hw in sorted({int(h_t), int(h_s)}):
-                engine = self._compile_attention_neck_engine(module, C, hw)
-                self._validate_attention_neck(engine, module, C, hw)
-                engines[hw] = engine
-        except Exception as exc:
-            raise RuntimeError(
-                "attention-neck TensorRT compilation failed. SiamABC was built "
-                "with compilation enabled, so this is raised instead of silently "
-                f"falling back to an eager neck. Cause: {exc}"
-            ) from exc
+        engines: Dict[int, TRTModule] = {}
+        for hw in sorted({int(h_t), int(h_s)}):
+            engines[hw] = self._compile_attention_neck_engine(module, C, hw)
         return _NeckEngineByHW(engines)
 
     def _compile_attention_neck_engine(
@@ -548,74 +247,19 @@ class TRTSiamABCNet:
         module: nn.Module,
         C: int,
         hw: int,
-    ) -> torch.nn.Module:
-        """
-        Compile the FP32 attention neck to one static TensorRT engine at size *hw*.
-
-        Uses the dynamo backend (torch.export + torch_tensorrt.dynamo) — the same
-        path the connect engines use — at a fixed spatial size. The dynamic-shape
-        TorchScript path fails on the neck's downsample conv; a static dynamo engine
-        gives the conv a fully concrete input shape and converts cleanly. Input is
-        the concatenated feature pair (1, 2*C, hw, hw); the neck runs in FP32.
-        """
-        module = module.eval().to(self._device).float()
-
-        dummy = torch.randn(
-            1, C * 2, int(hw), int(hw), device=self._device, dtype=torch.float32
+    ) -> TRTModule:
+        """Compile the FP32 attention neck to one static TensorRT engine at *hw*."""
+        hw = int(hw)
+        return build_trt_module(
+            module.eval().to(self._device).float(),
+            (torch.randn(1, C * 2, hw, hw, device=self._device),),
+            device=self._device,
+            input_names=["pair"],
+            output_names=["mixed"],
+            fp16=False,
+            cache_path=self._cache_path(f"neck_{hw}", "engine"),
+            rebuild_cache=self._rebuild_cache,
         )
-        exported = torch.export.export(module, args=(dummy,))
-
-        return trt_dynamo_compile(
-            exported,
-            inputs=[
-                torch_tensorrt.Input(
-                    shape=(1, C * 2, int(hw), int(hw)), dtype=torch.float32
-                )
-            ],
-            enabled_precisions={torch.float32},
-            optimization_level=3,
-            use_fast_partitioner=True,
-        )
-
-    def _validate_attention_neck(
-        self,
-        engine: torch.nn.Module,
-        reference: nn.Module,
-        C: int,
-        hw: int,
-    ) -> None:
-        """
-        Reject a neck engine whose output diverges from eager at FP32 tolerance.
-
-        Runs one branch size through the engine and the eager module and compares.
-        A conversion that silently changed the attention math would degrade tracking
-        with no crash, so the engine is only trusted when its output agrees with
-        eager; otherwise the caller raises (compile-or-raise).
-        """
-        with torch.no_grad():
-            probe = torch.randn(
-                1, C * 2, int(hw), int(hw),
-                device=self._device, dtype=torch.float32,
-            )
-            got = engine(probe)
-            want = reference(probe)
-            if not torch.is_tensor(got):
-                raise RuntimeError(
-                    f"neck engine returned {type(got).__name__}, expected Tensor"
-                )
-            if tuple(got.shape) != tuple(want.shape):
-                raise RuntimeError(
-                    f"neck engine shape {tuple(got.shape)} != {tuple(want.shape)}"
-                )
-            if not bool(torch.isfinite(got.float()).all().item()):
-                raise RuntimeError("neck engine returned non-finite values")
-            if not torch.allclose(
-                got.float(), want.float(), rtol=1e-2, atol=1e-2
-            ):
-                max_diff = (got.float() - want.float()).abs().max().item()
-                raise RuntimeError(
-                    f"neck engine diverges from eager (max abs diff {max_diff:.3g})"
-                )
 
     def get_features(
         self,
@@ -632,13 +276,8 @@ class TRTSiamABCNet:
                 f"Expected {self._template_size} (template) or "
                 f"{self._instance_size} (search)."
             )
-        crop = crop.to(dtype=self._dtype, device=self._device)
-        if self._trt_feat is not None:
-            features = self._trt_feat(crop)
-        else:
-            features = self._trt_feat_by_hw[h](crop)
-            if self._fp32_neck is not None:
-                features = self._fp32_neck(features.float().contiguous())
+        crop = crop.to(dtype=torch.float32, device=self._device).contiguous()
+        features = self._trt_feat_by_hw[h](crop)
         return features.float().contiguous()
 
     def track(
@@ -833,7 +472,6 @@ def _siamabc_cache_prefix(
         software_versions={
             "torch": getattr(torch, "__version__", "unknown"),
             "cuda": str(getattr(torch.version, "cuda", "unknown")),
-            "torch_tensorrt": getattr(torch_tensorrt, "__version__", "unknown"),
             "tensorrt": getattr(tensorrt, "__version__", "unknown"),
         },
         gpu_identity=gpu_identity,

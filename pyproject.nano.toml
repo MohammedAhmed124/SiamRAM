@@ -44,16 +44,23 @@ dependencies = [
   "typing-extensions>=4.15.0",
   "ultralytics>=8.4.41",
   "wandb>=0.26.1",
-  # torch / torchvision / torch-tensorrt: NOT installed by uv. JetPack 6.x ships
-  # these (and TensorRT/cuDNN) pre-built for the Jetson's CUDA. We reuse them via
-  # a --system-site-packages venv rather than re-downloading multi-GB Jetson-index
+  # torch / torchvision: NOT installed by uv. JetPack 6.x ships these (and
+  # TensorRT/cuDNN) pre-built for the Jetson's CUDA. We reuse them via a
+  # --system-site-packages venv rather than re-downloading multi-GB Jetson-index
   # wheels. ultralytics/timm/torchmetrics/pytorch-toolbelt pull torch transitively;
   # since this is installed with `uv pip install` (not `uv sync`), uv treats the
   # system torch as already-satisfied and skips it. See docs/install-nano-system.md.
+  # torch-tensorrt: NOT used at all — it cannot be ABI-matched/installed on the
+  # Jetson, so the TRT path goes straight through the system `tensorrt` Python
+  # module (ONNX -> engine); see trt_engine/raw_trt.py.
   # triton: EXCLUDED — no ARM64/aarch64 wheel exists; TensorRT handles kernel
   # compilation on Jetson via the system-installed JetPack TRT libraries.
   # triton-windows: not applicable on Jetson.
   "omegaconf>=2.3.0",
+  # onnx: required by the raw-TensorRT path. torch.onnx.export (legacy exporter)
+  # serializes each submodule to ONNX bytes that TensorRT's OnnxParser builds into
+  # an engine — this replaces torch_tensorrt entirely. See trt_engine/raw_trt.py.
+  "onnx>=1.16.0",
 #  "torchreid",
   "cython>=3.0.0",
   "h5py>=3.10.0",
@@ -70,12 +77,12 @@ no-build-isolation-package = ["torchreid", "mobile-cv"]
 
 [tool.uv.sources]
 mobile_cv = { git = "https://github.com/facebookresearch/mobile-vision.git" }
-# torch/torchvision/torch-tensorrt are NOT sourced here — they come from the
-# system (JetPack) via a --system-site-packages venv. See the dependencies note.
+# torch/torchvision are NOT sourced here — they come from the system (JetPack)
+# via a --system-site-packages venv. See the dependencies note.
 torchreid = { git = "https://github.com/KaiyangZhou/deep-person-reid.git" }
 
-# NOTE: torch/torchvision/torch-tensorrt are intentionally NOT declared as uv
-# dependencies or sources here — JetPack provides them system-wide and they are
+# NOTE: torch/torchvision are intentionally NOT declared as uv dependencies or
+# sources here — JetPack provides them system-wide and they are
 # exposed to the venv via --system-site-packages. Because the install uses
 # `uv pip install --no-build-isolation` (not `uv sync`), uv treats those
 # already-installed packages as satisfied and does not re-download Jetson-index

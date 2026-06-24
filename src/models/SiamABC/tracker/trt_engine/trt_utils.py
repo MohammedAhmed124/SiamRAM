@@ -1,14 +1,7 @@
 import copy
-from typing import Tuple
 
 import torch
 import torch.nn as nn
-
-from utils.console import quiet_external_logs, silence_noisy_libraries
-
-silence_noisy_libraries()
-with quiet_external_logs():
-    import torch_tensorrt
 
 from ...model.SiamABC import SiamABCNet
 
@@ -103,19 +96,3 @@ def _cast_module(
 ) -> nn.Module:
     """Cast all params/buffers of *module* to *dtype* in-place and return it."""
     return module.half() if dtype == torch.float16 else module.float()
-
-
-def _trt_input(
-    shape: Tuple[int, ...],
-    min_batch: int,
-    opt_batch: int,
-    max_batch: int,
-    dtype: torch.dtype,
-) -> torch_tensorrt.Input:
-    _b, *rest = shape
-    return torch_tensorrt.Input(
-        min_shape=(min_batch, *rest),
-        opt_shape=(opt_batch, *rest),
-        max_shape=(max_batch, *rest),
-        dtype=dtype,
-    )

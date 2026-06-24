@@ -172,6 +172,26 @@ def load_model(device: str = "cuda") -> SiamRAMExperimentTracker:
     trt_cfg = config.get("trt_engine") or {}
     lambda_tta = float(trt_cfg.get("lambda_tta", 0.1))
 
+    # The OSNet descriptor TRT options are declared under trt_engine, but the
+    # tracker only receives the flattened ram_tracker kwargs — flatten_ram_tracker_config
+    # never reads trt_engine. Bridge them across here so trt_compile_osnet (and the
+    # related FP16 / cache switches) actually reach configure_descriptor_backend;
+    # without this they silently stay at their False/"" defaults and OSNet never
+    # compiles. trt_cache_dir is resolved to an absolute path (like the SiamABC
+    # engines) so the cache lands under the repo root regardless of the CWD.
+    osnet_trt_cache_dir = str(trt_cfg.get("trt_cache_dir", "") or "").strip()
+    if osnet_trt_cache_dir:
+        _osnet_cache_path = Path(osnet_trt_cache_dir).expanduser()
+        if not _osnet_cache_path.is_absolute():
+            _osnet_cache_path = _HERE / _osnet_cache_path
+        _osnet_cache_path.mkdir(parents=True, exist_ok=True)
+        osnet_trt_cache_dir = str(_osnet_cache_path)
+    ram_tracker_kwargs["trt_compile_osnet"] = bool(trt_cfg.get("trt_compile_osnet", False))
+    ram_tracker_kwargs["osnet_fp16"] = bool(trt_cfg.get("osnet_fp16", False))
+    ram_tracker_kwargs["osnet_async_overlap"] = bool(trt_cfg.get("osnet_async_overlap", False))
+    ram_tracker_kwargs["trt_cache_dir"] = osnet_trt_cache_dir
+    ram_tracker_kwargs["trt_rebuild_cache"] = bool(trt_cfg.get("rebuild_trt_cache", False))
+
     if bool(trt_cfg.get("trt_compile_siamabc", False)):
         from models.SiamABC.tracker.trt_engine.siamabc import get_trt_tracker
 

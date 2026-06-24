@@ -162,16 +162,48 @@ def load_model(device: str = "cuda") -> SiamRAMExperimentTracker:
             ram_tracker_kwargs["osnet_model_path"]
         )
 
-    # 6. Build the SiamABC backbone in standard PyTorch mode. The SiamABC
-    #    checkpoint path also comes from the config (weights_path), resolved the
-    #    same way. lambda_tta is read from the config's trt_engine block.
+    # 6. Build the SiamABC backbone. The trt_engine.trt_compile_siamabc switch
+    #    selects the backend: standard PyTorch (get_tracker) or the TensorRT-
+    #    compiled backbone (get_trt_tracker). Both return a SiamABCTracker, so the
+    #    rest of load_model is identical either way. The TRT factory is imported
+    #    lazily so the standard path never requires tensorrt / torch_tensorrt. The
+    #    SiamABC checkpoint path and every TRT option come from the config.
     siam_weights_path = _resolve_checkpoint_path(config.get("weights_path", ""))
-    siam_tracker = get_tracker(
-        config=config,
-        weights_path=siam_weights_path,
-        lambda_tta=float((config.get("trt_engine") or {}).get("lambda_tta", 0.1)),
-        continuous=False,
-    )
+    trt_cfg = config.get("trt_engine") or {}
+    lambda_tta = float(trt_cfg.get("lambda_tta", 0.1))
+
+    if bool(trt_cfg.get("trt_compile_siamabc", False)):
+        from models.SiamABC.tracker.trt_engine.siamabc import get_trt_tracker
+
+        # Cache the compiled engines so reruns skip the multi-minute build. The
+        # cache key is derived from the config/weights/shapes, so a stale entry is
+        # never reused for a different setup. Empty dir = caching disabled.
+        engine_cache_dir = str(trt_cfg.get("trt_cache_dir", "") or "").strip()
+        if engine_cache_dir:
+            engine_cache_path = Path(engine_cache_dir).expanduser()
+            if not engine_cache_path.is_absolute():
+                engine_cache_path = _HERE / engine_cache_path
+            engine_cache_path.mkdir(parents=True, exist_ok=True)
+            engine_cache_dir = str(engine_cache_path)
+
+        siam_tracker = get_trt_tracker(
+            config=config,
+            weights_path=siam_weights_path,
+            lambda_tta=lambda_tta,
+            fp16=bool(trt_cfg.get("fp16", True)),
+            cuda_id=int(trt_cfg.get("cuda_id", 0)),
+            backbone_mode=str(trt_cfg.get("backbone_mode", "")),
+            disable_tf32=bool(trt_cfg.get("backbone_disable_tf32", False)),
+            engine_cache_dir=engine_cache_dir,
+            rebuild_cache=bool(trt_cfg.get("rebuild_trt_cache", False)),
+        )
+    else:
+        siam_tracker = get_tracker(
+            config=config,
+            weights_path=siam_weights_path,
+            lambda_tta=lambda_tta,
+            continuous=False,
+        )
 
     # 7. Sanity-check the OSNet checkpoint choice before building the tracker so
     #    a typo in the config gives a clear error instead of a confusing one

@@ -22,7 +22,12 @@ weights_path: "checkpoints/model.pth"
 # =============================================================================
 trt_engine:
   # TRT-compile the SiamABC backbone. Master switch for the SiamABC engine.
-  trt_compile_siamabc: False          # [944f2b8] was True (current default False)
+  trt_compile_siamabc: True           # [944f2b8] was True
+  # Directory for cached TRT engines (relative paths resolve under the repo root).
+  # Reuses compiled engines across runs; empty string disables caching.
+  trt_cache_dir: "trt_cache"
+  # Force a fresh TRT build even if a cached engine exists.
+  rebuild_trt_cache: False
   # Legacy precision fallback used only when backbone_mode is left empty.
   fp16: True
   # SiamABC backbone implementation. Keep dynamic_fp16 until the parity

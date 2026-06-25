@@ -13,8 +13,34 @@ re-running the submission does not re-fetch gigabytes for no reason.
 """
 
 import os
+import sys
 
 import gdown
+
+# ---------------------------------------------------------------------------
+# Logging — use the SiamRAM console helper when available (it is on the path
+# when imported via predictor.py), otherwise fall back to a matching format.
+# ---------------------------------------------------------------------------
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_SRC = os.path.join(_HERE, "src")
+if _SRC not in sys.path:
+    sys.path.insert(0, _SRC)
+
+try:
+    from utils.console import siamram_log as _siamram_log
+except ImportError:
+    def _siamram_log(  # type: ignore[misc]
+        msg: str,
+        *,
+        phase: str = "CKPT",
+        status: str = "info",
+        label: str | None = None,
+        blank_before: bool = False,
+        indent: int = 0,
+    ) -> None:
+        tag = (label if label is not None else status)[:5].ljust(5)
+        lead = "\n" if blank_before else ""
+        print(f"{lead}[SiamRAM][{phase}] {tag} {msg}", flush=True)
 
 # ---------------------------------------------------------------------------
 # The Google Drive file ID for each checkpoint, keyed by the filename we save
@@ -71,11 +97,11 @@ def download_checkpoint(
     checkpoint_path = os.path.join(checkpoint_dir, filename)
 
     if _is_valid_file(checkpoint_path):
-        print(f"[download] '{filename}' already exists — skipping.")
+        _siamram_log(f"'{filename}' already exists — skipping", phase="CKPT", status="ready")
         return checkpoint_path
 
     url = f"https://drive.google.com/uc?id={file_id}"
-    print(f"[download] Downloading '{filename}' from Google Drive …")
+    _siamram_log(f"downloading '{filename}' from Google Drive", phase="CKPT", status="build")
     gdown.download(url, checkpoint_path, quiet=False)
 
     if not _is_valid_file(checkpoint_path):
@@ -84,7 +110,7 @@ def download_checkpoint(
             f"Check that the Google Drive link is publicly accessible."
         )
 
-    print(f"[download] '{filename}' saved to '{checkpoint_path}'.")
+    _siamram_log(f"'{filename}' saved to '{checkpoint_path}'", phase="CKPT", status="done")
     return checkpoint_path
 
 

@@ -46,6 +46,8 @@ if str(_SRC) not in sys.path:
 # ---------------------------------------------------------------------------
 from omegaconf import OmegaConf  # noqa: E402
 
+from utils.console import siamram_log  # noqa: E402
+
 from download import download_all_checkpoints  # noqa: E402
 from models.SiamABC.tracker.tracker_setup import (  # noqa: E402
     get_tracker, normalize_tracker_config_aliases)
@@ -243,7 +245,7 @@ def load_model(device: str = "cuda") -> SiamRAMExperimentTracker:
         **ram_tracker_kwargs,
     )
 
-    print("[predictor] SiamRAM tracker ready.")
+    siamram_log("SiamRAM tracker ready", phase="INIT", status="ready")
     return tracker
 
 
@@ -360,6 +362,7 @@ def _resolve_input_path(path_value: str) -> str:
     return path_value
 
 
+
 def run_tracker(
     model: SiamRAMExperimentTracker,
     video_path: str,
@@ -392,29 +395,31 @@ def run_tracker(
     init_box = read_init_box(init_box_path)
 
     cap = _open_video(video_path)
+    video_name = Path(video_path).stem
     reader: threading.Thread | None = None
     frame_q: queue.Queue | None = None
     stop_event: threading.Event | None = None
 
     # ------------------------------------------------------------------
-    # Latency accounting. Decode (cap.read) runs on the reader thread and
-    # overlaps with tracking (model.update) on this thread, so the two totals
-    # below add up to MORE than the wall-clock time. We report them per frame
-    # so each component's true cost is visible regardless of the overlap.
+    # Decode accounting. The tracker times its own update() calls internally
+    # (per-frame, for percentile stats). We only track decode (cap.read) here
+    # since that happens outside the tracker and is passed to end_sequence().
     # ------------------------------------------------------------------
     decode_time = 0.0      # seconds spent inside cap.read(), all frames
     decode_frames = 0      # number of frames successfully decoded
-    track_time = 0.0       # seconds spent inside model.update(), frames 1..N
 
     reader_exc: list = []
     # The reader thread owns these; we read them only after join(), so no lock
     # is needed. {"time": seconds in cap.read(), "frames": frames decoded}.
     reader_stats = {"time": 0.0, "frames": 0}
 
-    try:
-        if not cap.isOpened():
-            raise RuntimeError(f"Cannot open video: '{video_path}'")
+    if not cap.isOpened():
+        cap.release()
+        raise RuntimeError(f"Cannot open video: '{video_path}'")
 
+    total_frames_hint = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    seq_start = time.perf_counter()
+    try:
         # --------------------------------------------------------------
         # Frame 0: read it directly and initialise the tracker on it. This
         # must stay inside the cleanup scope because initialization can fail
@@ -427,6 +432,9 @@ def run_tracker(
             raise RuntimeError(f"Cannot read first frame from: '{video_path}'")
         decode_frames += 1
 
+        # Register sequence info with the tracker so it can drive the progress
+        # bar and emit a per-sequence summary in end_sequence().
+        model.begin_sequence(video_name, total_frames_hint)
         model.initialize(first_frame, init_box)
 
         x0, y0, w0, h0 = init_box
@@ -481,9 +489,7 @@ def run_tracker(
             if frame is None:
                 break
 
-            _t = time.perf_counter()
             bbox_arr, _score, _in_occ, _yolo = model.update(frame)
-            track_time += time.perf_counter() - _t
             x, y, w, h = (float(v) for v in bbox_arr[:4])
             predictions.append(
                 {"frame_idx": frame_idx, "x": x, "y": y, "w": w, "h": h}
@@ -508,54 +514,19 @@ def run_tracker(
     if reader_exc:
         raise reader_exc[0]
 
-    # ------------------------------------------------------------------
-    # Per-sequence latency report. reader_stats is final now that the reader
-    # thread has joined, so we fold its decode total into ours and print the
-    # decode (CPU cap.read) and tracker (model.update) costs side by side.
-    # ------------------------------------------------------------------
+    seq_elapsed = time.perf_counter() - seq_start
+
+    # Merge reader-thread decode stats into the totals.
     decode_time += reader_stats["time"]
     decode_frames += reader_stats["frames"]
-    track_frames = frame_idx - 1
 
-    decode_ms = 1000.0 * decode_time / decode_frames if decode_frames else 0.0
-    track_ms = 1000.0 * track_time / track_frames if track_frames else 0.0
-    decode_fps = decode_frames / decode_time if decode_time > 0 else 0.0
-    track_fps = track_frames / track_time if track_time > 0 else 0.0
-
-    print(
-        f"[latency] decode (CPU): {decode_ms:.2f} ms/frame "
-        f"({decode_fps:.1f} FPS, {decode_time:.2f} s over {decode_frames} frames)"
+    # Delegate per-sequence summary and optional component latency to the
+    # tracker so all logging is centralised there (no print calls here).
+    # The tracker collected per-frame update() times internally in update().
+    model.end_sequence(
+        elapsed_s=seq_elapsed,
+        decode_time_s=decode_time,
+        decode_frames=decode_frames,
     )
-    print(
-        f"[latency] tracker:      {track_ms:.2f} ms/frame "
-        f"({track_fps:.1f} FPS, {track_time:.2f} s over {track_frames} frames)"
-    )
-
-    # Per-component breakdown of the tracker cost, if the tracker recorded it.
-    # siamabc / yolo / osnet run *inside* track_update; prescale / homography /
-    # motion_kf are separate pipeline stages. The components do not sum to the
-    # tracker total (track_update also holds bookkeeping; with GPU stream
-    # overlap the model timings are launch-side unless SIAMRAM_PROFILE_SYNC=1).
-    comp_times = getattr(model, "_comp_times", None) or {}
-    comp_counts = getattr(model, "_comp_counts", None) or {}
-    if comp_times:
-        order = [
-            "prescale", "homography", "motion_kf", "track_update",
-            "siamabc", "yolo", "osnet",
-        ]
-        names = [n for n in order if n in comp_times]
-        names += [n for n in comp_times if n not in order]
-        print(
-            "[latency] tracker components "
-            "(siamabc/yolo/osnet are inside track_update):"
-        )
-        for n in names:
-            total = comp_times[n]
-            calls = comp_counts.get(n, 0)
-            per = 1000.0 * total / calls if calls else 0.0
-            print(
-                f"[latency]   {n:<12}: {per:7.2f} ms/call "
-                f"({total:6.2f} s over {calls} calls)"
-            )
 
     return predictions

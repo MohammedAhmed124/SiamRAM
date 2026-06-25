@@ -189,7 +189,17 @@ debug_frames/
 
 yolo11n.onnx
 
+src/checkpoints/**.pth
+src/checkpoints/**.onnx
+src/checkpoints/**.engine
+src/checkpoints/reid/
+src/yolo11n.pt
+src/debug_frames/
+
+src/yolo11n.onnx
+
 data_imgs/
+src/training/checkpoints
 training/checkpoints
 
 # experiments

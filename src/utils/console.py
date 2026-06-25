@@ -35,6 +35,11 @@ _NOISY_LOGGERS = (
 )
 
 
+def _logs_enabled() -> bool:
+    """Return True when SiamRAM logging is active (default on; set SIAMRAM_LOG=0 to disable)."""
+    return os.environ.get("SIAMRAM_LOG", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
 def _color_enabled() -> bool:
     value = os.environ.get("SIAMRAM_COLOR", "").strip().lower()
     if value in {"1", "true", "yes", "on"}:
@@ -150,11 +155,13 @@ def siamram_log(
 ) -> None:
     """Print one compact, colored SiamRAM status line.
 
-    `status` picks the accent color (and the default 5-char label); pass
-    `label` to override just the label text while keeping the status color.
-    Set `blank_before` to emit a leading newline so a block visually detaches
-    from the line above it.
+    Gated by SIAMRAM_LOG=1 (default off). `status` picks the accent color (and
+    the default 5-char label); pass `label` to override just the label text
+    while keeping the status color. Set `blank_before` to emit a leading
+    newline so a block visually detaches from the line above it.
     """
+    if not _logs_enabled():
+        return
     labels = {
         "info": ("info", _BLUE),
         "load": ("load", _CYAN),
@@ -204,7 +211,7 @@ class SiamRAMProgressLine:
 
     def update(self, mode: str) -> None:
         """Append one frame state and redraw the line when stdout is a TTY."""
-        if self._closed:
+        if self._closed or not _logs_enabled():
             return
         canonical = self._canonical_mode(mode)
         self._modes.append(canonical)
@@ -216,9 +223,10 @@ class SiamRAMProgressLine:
         """Render the final line and terminate it with one newline."""
         if self._closed:
             return
-        self._write()
-        sys.stdout.write("\n")
-        sys.stdout.flush()
+        if _logs_enabled():
+            self._write()
+            sys.stdout.write("\n")
+            sys.stdout.flush()
         self._closed = True
 
     def _canonical_mode(self, mode: str) -> str:
@@ -356,7 +364,8 @@ class _CompileProgress:
         if not self._active:
             self.begin(1)
         self._message = str(message or "")
-        self._draw("build", _YELLOW)
+        if _logs_enabled():
+            self._draw("build", _YELLOW)
 
     def complete(self) -> None:
         """Mark one stage finished; close the session on the last stage."""
@@ -365,9 +374,10 @@ class _CompileProgress:
         self._done = min(self._total, self._done + 1)
         if self._done >= self._total:
             self._message = "compiled successfully"
-            self._draw("done", _GREEN)
+            if _logs_enabled():
+                self._draw("done", _GREEN)
             self._close()
-        elif self._interactive:
+        elif self._interactive and _logs_enabled():
             # On a TTY, advance the fill in place. In a log file the per-stage
             # stage() line already recorded progress, so skip the extra line.
             self._draw("build", _YELLOW)
@@ -378,11 +388,12 @@ class _CompileProgress:
             return
         self._done = self._total
         self._message = str(message or "")
-        self._draw("done", _GREEN)
+        if _logs_enabled():
+            self._draw("done", _GREEN)
         self._close()
 
     def _close(self) -> None:
-        if self._interactive:
+        if self._interactive and _logs_enabled():
             sys.stdout.write("\n")
             sys.stdout.flush()
         self._active = False
@@ -431,12 +442,14 @@ def siamram_latency(
 ) -> None:
     """Render a latency report as a small block of colored SiamRAM lines.
 
-    `rows` is a list of ``(label, stats)`` pairs where ``stats`` is either
-    ``None`` (rendered as a dim "no data") or a dict with the keys
-    ``n, mean, med, p95, p99, min, max, fps`` (all numeric, times in ms).
-    The group label drives a subtle accent: all=cyan, track=green, occl=amber.
-    `occlusion_pct`, if given, is appended to the ``occl`` row.
+    Gated by SIAMRAM_LOG=1. `rows` is a list of ``(label, stats)`` pairs where
+    ``stats`` is either ``None`` (rendered as a dim "no data") or a dict with
+    the keys ``n, mean, med, p95, p99, min, max, fps`` (all numeric, times in
+    ms). The group label drives a subtle accent: all=cyan, track=green,
+    occl=amber. `occlusion_pct`, if given, is appended to the ``occl`` row.
     """
+    if not _logs_enabled():
+        return
     accent = {
         "all": "load",
         "track": "ready",

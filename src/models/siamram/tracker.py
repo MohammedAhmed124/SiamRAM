@@ -18,7 +18,8 @@ import numpy as np
 import torch
 from ultralytics import YOLO
 
-from utils.console import siamram_log
+from utils.console import (SiamRAMProgressLine, quiet_external_logs,
+                           siamram_latency, siamram_log)
 from utils.utils import (_cos_sim, _extract_descriptor,
                          _extract_descriptor_async, _iou, _resolve_descriptor,
                          configure_descriptor_backend,
@@ -300,6 +301,7 @@ class SiamRAMExperimentTracker:
         yolo_fp16: bool = False,
         cuda_id: int = 0,
         debug=True,
+        log_component_latency: bool = False,
         disable_camera_motion: bool = False,
         gmc_prior_enabled: bool = True,
         gmc_prior_require_reliable_h: bool = True,
@@ -498,7 +500,8 @@ class SiamRAMExperimentTracker:
         if compile_yolo:
             self.yolo = self.load_yolo_compiled(yolo_weights)
         else:
-            self.yolo = YOLO(yolo_weights)
+            with quiet_external_logs():
+                self.yolo = YOLO(yolo_weights)
 
         self._warmup_yolo()
         self._conf_threshold_auto = None
@@ -901,6 +904,11 @@ class SiamRAMExperimentTracker:
         self._camera_motion_subsystem = CameraMotionSubsystem(self)
         self._occlusion_subsystem = OcclusionRecoverySubsystem(self)
 
+        self.log_component_latency: bool = bool(log_component_latency)
+        self._seq_name: str = ""
+        self._seq_total_frames: int = 0
+        self._progress: Optional[SiamRAMProgressLine] = None
+
     def _restore_inner_tracker_sequence_defaults(self) -> None:
         """
         Restore SiamABC fields that SiamRAM may adapt during a sequence.
@@ -990,6 +998,7 @@ class SiamRAMExperimentTracker:
         # after each sequence does not leak timings from the previous video.
         self._comp_times = {}
         self._comp_counts = {}
+        self._frame_times_ms: list[float] = []
         self._profile_sync = (
             os.environ.get("SIAMRAM_PROFILE_SYNC", "0") == "1"
             and torch.cuda.is_available()
@@ -1108,6 +1117,103 @@ class SiamRAMExperimentTracker:
         if desc is not None:
             self.memory.try_admit(bbox, desc, bbox)
 
+        if self._seq_name:
+            self._progress = SiamRAMProgressLine(
+                self._seq_name,
+                total_frames=self._seq_total_frames,
+                phase="RUN",
+                label="state",
+            )
+
+    def begin_sequence(self, name: str, total_frames: int = 0) -> None:
+        """Set the sequence name / length for the next initialize() call.
+
+        Call this before initialize() so the tracker can create an in-place
+        progress bar, collect per-frame timings, and emit a summary after
+        end_sequence(). Logging is gated by SIAMRAM_LOG (default on).
+        """
+        self._seq_name = str(name or "")
+        self._seq_total_frames = max(0, int(total_frames))
+        self._progress = None
+        self._frame_times_ms: list[float] = []
+
+    def end_sequence(
+        self,
+        elapsed_s: float,
+        decode_time_s: float = 0.0,
+        decode_frames: int = 0,
+    ) -> None:
+        """Finish the progress bar and emit per-sequence latency summary.
+
+        Call after the tracking loop completes. Gated by SIAMRAM_LOG (default
+        on). Per-component breakdown requires log_component_latency=true in
+        config (default off).
+        """
+        if self._progress is not None:
+            self._progress.finish()
+            self._progress = None
+
+        def _latency_stats(arr):
+            if not arr:
+                return None
+            a = np.array(arr, dtype=float)
+            mean = float(a.mean())
+            return {
+                "n": len(a),
+                "mean": mean,
+                "med": float(np.median(a)),
+                "p95": float(np.percentile(a, 95)),
+                "p99": float(np.percentile(a, 99)),
+                "min": float(a.min()),
+                "max": float(a.max()),
+                "fps": 1000.0 / mean if mean > 0 else 0.0,
+            }
+
+        def _decode_stats(total_s, n):
+            if not n or total_s <= 0:
+                return None
+            ms = 1000.0 * total_s / n
+            return {"n": n, "mean": ms, "med": ms, "p95": ms, "p99": ms,
+                    "min": ms, "max": ms, "fps": 1000.0 / ms}
+
+        frame_times = getattr(self, "_frame_times_ms", [])
+        n_frames = len(frame_times)
+        stats = _latency_stats(frame_times)
+        fps_str = f"{stats['fps']:.1f}" if stats else "—"
+        siamram_log(
+            f"{self._seq_name or 'video'} · {n_frames} frames · {fps_str} fps",
+            phase="RUN",
+            status="done",
+        )
+
+        if not self.log_component_latency:
+            return
+
+        rows = [("all", stats)]
+        if decode_frames:
+            rows.append(("decode", _decode_stats(decode_time_s, decode_frames)))
+        siamram_latency(rows, header="latency report", phase="PERF")
+
+        comp_times = self._comp_times or {}
+        comp_counts = self._comp_counts or {}
+        if comp_times:
+            order = [
+                "prescale", "homography", "motion_kf", "track_update",
+                "siamabc", "yolo", "osnet",
+            ]
+            names = [n for n in order if n in comp_times]
+            names += [n for n in comp_times if n not in order]
+            for n in names:
+                total = comp_times[n]
+                calls = comp_counts.get(n, 0)
+                per = 1000.0 * total / calls if calls else 0.0
+                siamram_log(
+                    f"{n:<12}: {per:7.2f} ms/call  ({total:.2f} s / {calls} calls)",
+                    phase="PERF",
+                    status="info",
+                    label="comp",
+                )
+
     def _overlap_enabled(self) -> bool:
         """
         Whether the Tier-3 OSNet/SiamABC GPU overlap is active. Resolved lazily on
@@ -1150,11 +1256,20 @@ class SiamRAMExperimentTracker:
         active, the whole per-frame pipeline runs on a dedicated non-default CUDA
         stream so SiamABC(frame N+1) overlaps the OSNet forward queued for
         frame N on the extractor's side stream. Otherwise it's a direct call.
+        After the core update, ticks the per-sequence progress bar (no-op when
+        SIAMRAM_LOG is not enabled or begin_sequence was not called).
         """
+        _t0 = time.perf_counter()
         if self._overlap_enabled():
             with torch.cuda.stream(self._siam_stream):
-                return self._update_impl(frame)
-        return self._update_impl(frame)
+                result = self._update_impl(frame)
+        else:
+            result = self._update_impl(frame)
+        self._frame_times_ms.append((time.perf_counter() - _t0) * 1000.0)
+        if self._progress is not None:
+            in_occ = bool(result[2])
+            self._progress.update("occluded" if in_occ else "tracking")
+        return result
 
     def _update_impl(
         self,
@@ -3972,13 +4087,14 @@ class SiamRAMExperimentTracker:
                 status="build",
             )
 
-            model = YOLO(weights_path)
-            exported = model.export(
-                format="engine",
-                half=fp16,
-                device=device,
-                imgsz=imgsz,
-            )
+            with quiet_external_logs():
+                model = YOLO(weights_path)
+                exported = model.export(
+                    format="engine",
+                    half=fp16,
+                    device=device,
+                    imgsz=imgsz,
+                )
 
             # Ultralytics writes "<stem>.engine" next to the .pt and returns its
             # path; relocate it to the imgsz/precision-tagged cache filename so
@@ -3990,16 +4106,17 @@ class SiamRAMExperimentTracker:
             siamram_log(
                 f"YOLO engine ready: {engine_path}",
                 phase="YOLO",
-                status="ok",
+                status="ready",
             )
         else:
             siamram_log(
                 f"Reusing cached YOLO engine: {engine_path}",
                 phase="YOLO",
-                status="ok",
+                status="ready",
             )
 
-        return YOLO(engine_path)
+        with quiet_external_logs():
+            return YOLO(engine_path)
 
     def _warmup_yolo(
         self,
@@ -4015,7 +4132,8 @@ class SiamRAMExperimentTracker:
         try:
             dummy_size = max(32, int(self.yolo_imgsz))
             dummy = np.zeros((dummy_size, dummy_size, 3), dtype=np.uint8)
-            self._predict_yolo(dummy)
+            with quiet_external_logs():
+                self._predict_yolo(dummy)
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
         except Exception as exc:

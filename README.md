@@ -68,8 +68,23 @@ calls. Everything it relies on lives under `src/`, and every setting comes from
 
 ## Installation
 
-Requires Python 3.10 and a CUDA 12.8 GPU.
-### Option A — pip
+Pick **one** of the two paths below.
+
+### Option A — Docker (GPU, recommended)
+
+The container ships the exact Python 3.10 + CUDA 12.8 environment, so nothing to
+match on the host. Needs Docker with the NVIDIA Container Toolkit. From the repo
+root:
+
+```bash
+docker compose up -d --build   # build once
+docker compose exec gpu bash    # shell into it
+```
+
+The repo is mounted at `/app`, so edits on the host show up inside the container.
+Run every command below from that shell. Stop it with `docker compose down`.
+
+### Option B — pip
 
 Use a **Python 3.10** environment — the pinned wheels are built for it:
 
@@ -81,18 +96,6 @@ pip install -r requirements.txt
 
 The torch / torchvision / torch-tensorrt wheels are pinned to `+cu128` builds and
 pulled from the PyTorch CUDA 12.8 index (declared inside `requirements.txt`).
-
-### Option B — Docker (GPU)
-
-Needs Docker with the NVIDIA Container Toolkit. From the repo root:
-
-```bash
-docker compose up -d --build   # build once
-docker compose exec gpu bash    # shell into it
-```
-
-The repo is mounted at `/app`, so edits on the host show up inside the container.
-Run every command below from that shell. Stop it with `docker compose down`.
 
 ## Usage
 

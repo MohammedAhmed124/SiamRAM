@@ -149,10 +149,6 @@ class SiamRAMExperimentTracker:
         conf_threshold_auto_n_frames: int = 1,
         conf_threshold_auto_min_samples: int = 1,
         occ_siam_reacq_threshold: "float | str" = 0.8,
-        # Adaptive phase-0 SiamABC reacquisition gate, active only when
-        # occ_siam_reacq_threshold == "auto". Tracks the live SiamABC confidence
-        # distribution (the same signal reacq_threshold:auto observes) but with
-        # its own, deliberately stricter band. A numeric value ignores these.
         occ_siam_reacq_threshold_auto_min: float = 0.65,
         occ_siam_reacq_threshold_auto_max: float = 0.90,
         occ_siam_reacq_threshold_auto_delta: float = 0.05,
@@ -174,10 +170,6 @@ class SiamRAMExperimentTracker:
         yolo_imgsz: int = 320,
         yolo_augment: bool = False,
         app_match_threshold: "float | str" = 0.72,
-        # Adaptive phase-0 DRM acceptance gate, active only when
-        # app_match_threshold == "auto". Tracks the target's DRM composite
-        # self-score (the same signal drm_margin:auto observes) with its own
-        # band. A numeric value ignores these.
         app_match_threshold_auto_min: float = 0.55,
         app_match_threshold_auto_max: float = 0.80,
         app_match_threshold_auto_delta: float = 0.10,
@@ -217,14 +209,8 @@ class SiamRAMExperimentTracker:
         drm_dist_sigma_factor: float = 2.5,
         drm_lam_cand_dir: float = 0.15,
         drm_lam_cand_vel: float = 0.20,
-        # How per-anchor DRM scores collapse into one candidate score: "max"
-        # (best anchor wins, legacy behaviour) or "mean" (average; with
-        # drm_score_aggregation_topk set, average only the top-k anchors).
         drm_score_aggregation: str = "max",
         drm_score_aggregation_topk: Optional[int] = None,
-        # Adaptive DRM acceptance margin, active only when drm_margin == "auto".
-        # All defaults reproduce a fixed margin until enough samples accrue, and
-        # a numeric drm_margin ignores every one of these knobs.
         drm_margin_auto_min: float = 0.55,
         drm_margin_auto_max: float = 0.80,
         drm_margin_auto_delta: float = 0.10,
@@ -444,31 +430,15 @@ class SiamRAMExperimentTracker:
             trt_rebuild_cache=trt_rebuild_cache,
         )
 
-        # How often the descriptor backend (OSNet / siamese) is run on the
-        # per-frame normal-tracking memory-admission path. 1 = every confident
-        # frame (default). N>1 only extracts/admits a descriptor every Nth frame
-        # to save compute during stable tracking; event-driven occlusion-recovery
-        # paths still run the descriptor every time they need
-        # it, so appearance fidelity is preserved exactly where it matters.
         self._descriptor_stride = max(1, int(descriptor_stride))
 
-        # Tier-3 GPU overlap: run OSNet for frame N on a side stream concurrently
-        # with SiamABC for frame N+1. Only active for the OSNet/CUDA backend;
-        # otherwise everything stays fully synchronous (no behavior change).
-        # _overlap_active is resolved lazily on the first update so the OSNet
-        # extractor (and thus its CUDA device) has been created.
         self._osnet_async_overlap = bool(osnet_async_overlap)
         self._overlap_active: Optional[bool] = None
-        # Dedicated non-default stream for the SiamABC forward; OSNet uses its own
-        # side stream inside the extractor. Both must be non-default so the legacy
-        # default stream does not serialize them.
         self._siam_stream = (
             torch.cuda.Stream()
             if (self._osnet_async_overlap and torch.cuda.is_available())
             else None
         )
-        # Holds the deferred descriptor for the previous confident frame:
-        # (handle, pred_bbox, ref_bbox, velocity, distractor_bank, sample_drm).
         self._pending_desc: Optional[dict] = None
 
         self.yolo_conf = yolo_conf
@@ -478,11 +448,6 @@ class SiamRAMExperimentTracker:
 
         self.debug = debug
 
-        # TensorRT settings for the YOLO re-detector. trt_cache_dir /
-        # trt_rebuild_cache are shared with the SiamABC / OSNet engines (bridged
-        # from the trt_engine config block); yolo_fp16 + cuda_id select the
-        # export precision and device. copile_yolo is the deprecated typo'd alias
-        # for trt_compile_yolo and is honored only for backwards compatibility.
         self._yolo_fp16 = bool(yolo_fp16)
         self._cuda_id = int(cuda_id)
         self._yolo_trt_cache_dir = str(trt_cache_dir or "").strip()
@@ -541,9 +506,6 @@ class SiamRAMExperimentTracker:
         else:
             self.reacq_threshold = float(reacq_threshold)
 
-        # Adaptive phase-0 SiamABC reacquisition gate (occ_siam_reacq_threshold
-        # == "auto"). Observes the live SiamABC confidence score, exactly like
-        # reacq_threshold:auto, but keeps its own (stricter) band.
         self._occ_siam_reacq_threshold_auto = None
         self._last_occ_siam_reacq_threshold_score: Optional[float] = None
         if (
@@ -565,9 +527,6 @@ class SiamRAMExperimentTracker:
         else:
             self.occ_siam_reacq_threshold = float(occ_siam_reacq_threshold)
 
-        # Adaptive phase-0 DRM acceptance gate (app_match_threshold == "auto").
-        # Observes the target's DRM composite self-score, the same signal
-        # drm_margin:auto consumes, with its own band.
         self._app_match_threshold_auto = None
         if (
             isinstance(app_match_threshold, str)
@@ -677,9 +636,6 @@ class SiamRAMExperimentTracker:
             ),
         }
 
-        # Adaptive DRM acceptance margin (drm_margin == "auto"). A numeric
-        # drm_margin leaves this None, so _active_drm_kwargs and the per-frame
-        # estimator hook below are both no-ops and legacy behaviour is identical.
         self._drm_margin_auto = None
         self._last_drm_self_score: Optional[float] = None
 
@@ -710,8 +666,6 @@ class SiamRAMExperimentTracker:
                 warmup=drm_margin_auto_warmup,
                 min_samples=drm_margin_auto_min_samples,
             )
-            # Seed the stored dict with a concrete float so any reader touching
-            # _drm_kwargs["margin"] directly still gets a number, not "auto".
             self._drm_kwargs["margin"] = self._drm_margin_auto.value
         if (
             self._dynamic_template_drm_admit_enabled
@@ -733,14 +687,7 @@ class SiamRAMExperimentTracker:
         )
         self._vel_score_min_speed = vel_score_min_speed
         self._entry_patience = max(1, entry_patience)
-        # Grace period: refuse to enter occlusion for this many initial frames
-        # (warm-up). 0 = no restriction.
         self._no_occlusion_first_n_frames = max(0, int(no_occlusion_first_n_frames))
-        # Alternate occlusion-entry patience used while camera motion is heavy.
-        # < 1 disables it (always use _entry_patience). Meant as a softer
-        # alternative to block_occlusion_on_camera_motion: set that False and set
-        # a larger patience here to wait longer before declaring loss during pans
-        # (with blocking ON the streak resets each heavy frame, so this is moot).
         self._entry_patience_high_motion = (
             max(1, int(entry_patience_high_motion))
             if int(entry_patience_high_motion) >= 1
@@ -804,7 +751,6 @@ class SiamRAMExperimentTracker:
         self.held_box: Optional[np.ndarray] = None
         self.in_occlusion: bool = False
         self.frame_idx: int = 0
-        # Snapshot of the most recent successful recovery. Consumed by the visualiser.
         self._last_recovery_patch: Optional[np.ndarray] = None
         self._last_recovery_info: Optional[dict] = None
         self.velocity: np.ndarray = np.zeros(2)
@@ -825,8 +771,6 @@ class SiamRAMExperimentTracker:
         self._heavy_motion_cache_frame_idx: int = -1
         self._heavy_motion_cache_weighted_disp: float = 0.0
         self._heavy_motion_cache_inst_disp: float = 0.0
-        # Latest heavy-camera-motion verdict for this frame (for the viz marker
-        # and any consumer that wants the gate's current state).
         self._last_heavy_cam_motion: bool = False
         self._last_heavy_cam_disp: float = 0.0
 
@@ -846,22 +790,11 @@ class SiamRAMExperimentTracker:
         self._class_warmup_done: bool = False
         self._class_votes: dict[int, int] = {}
 
-        # --- Adaptive YOLO-detectability probe -----------------------------
-        # During the first frames of healthy tracking we run YOLO on the
-        # tracker's own search ROI a few times. If YOLO ever lands a box on the
-        # target, the object is "YOLO-detectable" and occlusion recovery leans
-        # on YOLO+DRM (the SiamABC-alone phase-0 commit is shut off). If YOLO
-        # never finds it, we keep relying solely on phase=siam during occlusion.
-        # See _maybe_run_detectability_probe / _occ_phase_siam.
         self._yolo_detectability_enabled = bool(yolo_detectability_enabled)
         self._yolo_detectability_probe_attempts = max(1, int(yolo_detectability_probe_attempts))
         self._yolo_detectability_probe_stride = max(1, int(yolo_detectability_probe_stride))
         self._yolo_detectability_min_hits = max(1, int(yolo_detectability_min_hits))
         self._yolo_detectability_iou_thr = float(yolo_detectability_iou_thr)
-        # YOLO confidence to use during occlusion candidate collection when the
-        # target was found NOT YOLO-detectable. Lower than the normal yolo_conf
-        # so the (otherwise sub-threshold) target still produces candidate boxes
-        # for DRM to rank. Falls back to yolo_conf when unset.
         self._yolo_undetectable_conf = (
             float(yolo_undetectable_conf)
             if yolo_undetectable_conf is not None
@@ -967,8 +900,6 @@ class SiamRAMExperimentTracker:
         try:
             _resolve_descriptor(pending["handle"])
         except Exception:
-            # This is only best-effort cleanup at a sequence boundary. The fresh
-            # initialize below fully resets target state even if cleanup fails.
             pass
 
     def initialize(
@@ -990,12 +921,7 @@ class SiamRAMExperimentTracker:
         is in proc-frame pixel coordinates.  update() scales the output back.
         """
 
-        # A single tracker instance is reused across videos to avoid rebuilding
-        # heavy models/TRT engines. Keep that warm state, but reset every adaptive
-        # per-sequence accumulator so statistics cannot leak video-to-video.
         self._discard_pending_descriptor()
-        # Per-component latency registries. Reset here so the breakdown printed
-        # after each sequence does not leak timings from the previous video.
         self._comp_times = {}
         self._comp_counts = {}
         self._frame_times_ms: list[float] = []
@@ -1226,9 +1152,6 @@ class SiamRAMExperimentTracker:
                 and descriptor_async_supported()
             )
             if self._overlap_active:
-                # Make the SiamABC stream wait for any init work still pending on
-                # the default stream (template features built during initialize),
-                # so the first streamed forward can't race those tensors.
                 self._siam_stream.wait_stream(torch.cuda.default_stream())
         return self._overlap_active
 
@@ -1301,9 +1224,6 @@ class SiamRAMExperimentTracker:
             self._last_H = H
             self._last_H_reliable = H_reliable
 
-            # Refresh the heavy-camera-motion verdict every frame (incl. occlusion)
-            # so the viz marker stays live. Cheap: displacement is cached per frame,
-            # and _normal_update re-runs this with the fresh pred bbox afterwards.
             self._is_heavy_camera_motion(proc_frame)
 
         with self._timed("motion_kf"):
@@ -1797,9 +1717,6 @@ class SiamRAMExperimentTracker:
             pred_bbox, score, _ = self.tracker.update(frame)
         pred_bbox = np.array(pred_bbox, dtype=int)
 
-        # Tier-3: the SiamABC forward above just overlapped last frame's OSNet
-        # forward on the side stream. Finish + admit that deferred descriptor now,
-        # before any appearance-memory consumer runs below.
         with self._timed("osnet"):
             self._resolve_pending_descriptor()
 
@@ -1842,10 +1759,6 @@ class SiamRAMExperimentTracker:
             self._last_conf_threshold_score = score
 
         if self.frame_idx < self._no_occlusion_first_n_frames:
-            # Grace period: never enter occlusion during the first N frames
-            # (warm-up). Low scores while the dynamic template is still settling
-            # must not be treated as target loss, and the entry streak is held
-            # at 0 so it cannot fire the instant the window ends.
             self._entry_streak = 0
             if self.debug and score < effective_threshold:
                 print(
@@ -1967,9 +1880,6 @@ class SiamRAMExperimentTracker:
             score >= effective_threshold
             and descriptor_due
         ):
-            # Whether to compute the target's DRM self-score this frame for any
-            # adaptive estimator that consumes it (drm_margin and/or
-            # app_match_threshold). Each estimator keeps its own cadence.
             sample_drm = (
                 self._drm_margin_auto is not None
                 and self._drm_margin_auto.due(self.frame_idx)
@@ -1978,10 +1888,6 @@ class SiamRAMExperimentTracker:
                 and self._app_match_threshold_auto.due(self.frame_idx)
             )
             if self._overlap_enabled():
-                # Tier-3: queue OSNet on the side stream now and defer admission
-                # to the next frame (resolved after that frame's SiamABC forward,
-                # so this OSNet forward overlaps it). Snapshot every input the
-                # deferred admit / drm sample needs, since tracker state advances.
                 self._pending_desc = {
                     "handle": _extract_descriptor_async(frame, pred_bbox),
                     "pred_bbox": pred_bbox.copy(),
@@ -2008,9 +1914,6 @@ class SiamRAMExperimentTracker:
                     desc = _extract_descriptor(frame, pred_bbox)
                 if desc is not None:
                     self.memory.try_admit(pred_bbox, desc, self.current_bbox)
-                    # Adaptive drm_margin: on confident frames, sample how well
-                    # the genuine target scores against its own DRM anchors and
-                    # feed the estimator. No-op unless drm_margin == "auto".
                     if sample_drm or self._dynamic_template_drm_admit_enabled:
                         self_score = self.memory.score_target_against_drm(
                             target_bbox=pred_bbox,
@@ -2141,10 +2044,6 @@ class SiamRAMExperimentTracker:
         self,
         frame: np.ndarray,
     ) -> Tuple[np.ndarray, float]:
-        # Flush any deferred descriptor before occlusion recovery runs its own
-        # (synchronous) OSNet calls, so the side stream is drained and the
-        # appearance memory is consistent. Normally a no-op (pending is cleared
-        # on occlusion entry).
         with self._timed("osnet"):
             self._resolve_pending_descriptor()
         return self._occlusion_subsystem.occlusion_update(
@@ -2429,8 +2328,6 @@ class SiamRAMExperimentTracker:
     def _active_drm_kwargs(self) -> DRMKwargs:
         """Occlusion-DRM ranking weights for the current episode."""
         if self._drm_margin_auto is not None:
-            # Inject the learned margin at read time. A shallow copy keeps the
-            # stored dict (and its seeded numeric margin) unmutated.
             active = dict(self._drm_kwargs)
             active["margin"] = self._drm_margin_auto.value
             return active  # type: ignore[return-value]
@@ -2985,14 +2882,6 @@ class SiamRAMExperimentTracker:
         time_expand = float(_search_expand_growth_factor ** steps)
         effective_expand = min(_roi_start_expand * time_expand, _yolo_search_expand)
 
-        # Periodic exploration burst: every Nth occlusion frame, run a single
-        # search attempt with the ROI multiplied by occ_explore_burst_mult. The
-        # multiplier is applied *after* the _yolo_search_expand cap so the burst
-        # deliberately reaches beyond the steady-state window (the final
-        # frame-clamp below still bounds it to the visible frame). It applies in
-        # both detectability regimes: detectable and NOT-detectable targets now
-        # both reacquire through YOLO collection, which benefits from the wider
-        # ROI when the target has drifted far from the EKF prediction.
         if (
             self._occ_explore_burst_enabled
             and self._occ_explore_burst_every > 0
@@ -3076,10 +2965,6 @@ class SiamRAMExperimentTracker:
         if crop.size == 0:
             self._yolo_cache = []
             return []
-        # When the target was found NOT YOLO-detectable, collect candidates at a
-        # lower confidence so the otherwise sub-threshold target still surfaces
-        # boxes for DRM to rank. The detectability probe itself is unaffected
-        # (it runs through _yolo_detect_in_roi at the normal conf).
         conf = None
         if self._detectability_policy_active() and not self._yolo_detectable:
             conf = self._yolo_undetectable_conf
@@ -4054,11 +3939,6 @@ class SiamRAMExperimentTracker:
         precision = "fp16" if fp16 else "fp32"
 
         stem = os.path.splitext(os.path.basename(weights_path))[0]
-        # Version-tag the engine filename with a fingerprint of the TensorRT /
-        # GPU / weights it is built for, the same way the SiamABC and OSNet caches
-        # do. A TensorRT .engine is only loadable by the version/GPU it was built
-        # for, so without this a TensorRT upgrade silently reuses an incompatible
-        # engine and crashes on deserialize.
         digest = yolo_cache_suffix(
             weights_path=weights_path,
             imgsz=imgsz,
@@ -4096,9 +3976,6 @@ class SiamRAMExperimentTracker:
                     imgsz=imgsz,
                 )
 
-            # Ultralytics writes "<stem>.engine" next to the .pt and returns its
-            # path; relocate it to the imgsz/precision-tagged cache filename so
-            # engines for different sizes / precisions coexist.
             exported = str(exported) if exported else ""
             if exported and os.path.abspath(exported) != os.path.abspath(engine_path):
                 shutil.move(exported, engine_path)

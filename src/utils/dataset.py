@@ -83,8 +83,6 @@ from utils.utils import (
     get_extended_crop,
 )
  
-# The patterns we try when auto-detecting how a dataset names its frames.
-# Order matters: more common patterns come first so detection is fast.
 _FRAME_PATTERNS = [
     "{:08d}.jpg",
     "img/{:08d}.jpg",
@@ -307,9 +305,6 @@ class TrackingSequence:
                     x, y, w, h = (float(v) for v in vals[:4])
                     bboxes.append(np.array([x, y, w, h], dtype=np.float32))
                 except (ValueError, IndexError):
-                    # print(
-                    #     f"[warn] failed to parse bbox: {self.annot_path!r} | {line!r}"
-                    # )
                     bboxes.append(np.full(4, np.nan, dtype=np.float32))
         self._bboxes = bboxes
  
@@ -536,7 +531,6 @@ class UAVTrackingDataset(Dataset):
             tracking_config["instance_size"]
         )
 
-        # Occlusion/degradation augmentations for positive search crops.
         self.occlusion_aug_prob = float(
             np.clip(tracking_config.get("occlusion_aug_prob", 0.35), 0.0, 1.0)
         )
@@ -556,7 +550,6 @@ class UAVTrackingDataset(Dataset):
             np.clip(tracking_config.get("search_jpeg_prob", 0.15), 0.0, 1.0)
         )
 
-        # Hard negative mining knobs.
         self.neg_cross_seq_prob = float(
             np.clip(tracking_config.get("neg_cross_seq_prob", 0.45), 0.0, 1.0)
         )
@@ -696,7 +689,6 @@ class UAVTrackingDataset(Dataset):
                 max_frame_gap=0,
             )
             if not ok_dyn:
-                # If we can't get a good intermediate frame, reuse the static crops.
                 dt_crop = t_crop
                 ds_crop = s_crop
  
@@ -920,11 +912,9 @@ class UAVTrackingDataset(Dataset):
             strategy_roll = self.rng.random()
             s_crop: Optional[torch.Tensor] = None
 
-            # Hard negative: wrong target from a different sequence.
             if strategy_roll < self.neg_cross_seq_prob:
                 s_crop = self._build_cross_sequence_negative_search(anchor_seq=seq)
 
-            # Hard negative: near-target background from same frame.
             if s_crop is None and strategy_roll < (self.neg_cross_seq_prob + self.neg_shifted_prob):
                 s_crop = self._build_shifted_negative_search(
                     seq,
@@ -933,7 +923,6 @@ class UAVTrackingDataset(Dataset):
                     hard_mode=True,
                 )
 
-            # Wider background fallback.
             if s_crop is None:
                 s_crop = self._build_distractor_negative_search(seq, s_idx, s_bbox)
             if s_crop is None:
@@ -1144,7 +1133,6 @@ class UAVTrackingDataset(Dataset):
                 image_height=H,
             )
  
-            # Hard geometric gate — reject if even one pixel of target is visible.
             if self._bboxes_overlap(context, target_clamped):
                 continue
  
@@ -1222,7 +1210,6 @@ class UAVTrackingDataset(Dataset):
                 image_height=H,
             )
  
-            # Hard geometric gate — same as the shifted strategy.
             if self._bboxes_overlap(context, target_clamped):
                 continue
  

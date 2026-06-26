@@ -28,9 +28,6 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-# ---------------------------------------------------------------------------
-# Path setup — mirrors predictor.py so src/ imports always resolve
-# ---------------------------------------------------------------------------
 _HERE = Path(__file__).resolve().parent  # src/
 _REPO = _HERE.parent                     # repo root
 for _p in (str(_HERE), str(_REPO)):
@@ -62,9 +59,6 @@ except ImportError:
     _HAS_FLOP_COUNTER = False
 
 
-# ---------------------------------------------------------------------------
-# Low-level measurement helpers
-# ---------------------------------------------------------------------------
 
 def _count_gflops(module: nn.Module, *args, **kwargs) -> float:
     """One forward pass through module(*args, **kwargs); return GFLOPs.
@@ -101,9 +95,6 @@ def _time_ms(fn, *args, warmup: int = 20, reps: int = 100, **kwargs) -> float:
     return (time.perf_counter() - t0) * 1000.0 / reps
 
 
-# ---------------------------------------------------------------------------
-# SiamABC: fresh PyTorch net for GFLOPs, deployed net for timing
-# ---------------------------------------------------------------------------
 
 def _siamabc_sizes(config) -> Tuple[int, int]:
     """(template_size, search_size) read from config with safe fallbacks."""
@@ -204,9 +195,6 @@ def _profile_siamabc_timing(
     return result
 
 
-# ---------------------------------------------------------------------------
-# OSNet profiling
-# ---------------------------------------------------------------------------
 
 def _profile_osnet(extractor, warmup: int, reps: int) -> Tuple[float, float]:
     """GFLOPs and ms/call for the OSNet descriptor backbone (one 256×128 crop)."""
@@ -223,9 +211,6 @@ def _profile_osnet(extractor, warmup: int, reps: int) -> Tuple[float, float]:
     return gf, ms
 
 
-# ---------------------------------------------------------------------------
-# YOLO profiling
-# ---------------------------------------------------------------------------
 
 def _yolo_gflops(config, imgsz: int) -> float:
     """GFLOPs for YOLO via FlopCounterMode on a fresh PyTorch model.
@@ -248,8 +233,6 @@ def _yolo_gflops(config, imgsz: int) -> float:
         with quiet_external_logs():
             fresh = YOLO(str(weights_path))
 
-        # fresh.model is DetectionModel — a proper nn.Module with forward().
-        # fresh.model.model is an nn.ModuleList (not callable), so stop here.
         inner: nn.Module = fresh.model.eval()
 
         dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -272,9 +255,6 @@ def _profile_yolo(tracker, config, imgsz: int, warmup: int, reps: int) -> Tuple[
     return gf, ms
 
 
-# ---------------------------------------------------------------------------
-# Video run — realistic call-count statistics
-# ---------------------------------------------------------------------------
 
 def _run_video_counts(tracker, video_path: str, annot_path: str, max_frames: int) -> Dict[str, int]:
     """Run the tracker on one video and count per-component neural-net calls.
@@ -286,14 +266,12 @@ def _run_video_counts(tracker, video_path: str, annot_path: str, max_frames: int
     """
     counts: Dict[str, int] = defaultdict(int)
 
-    # Wrap YOLO
     _orig_yolo = tracker._predict_yolo
     def _yolo_counted(image, conf=None):
         counts["yolo"] += 1
         return _orig_yolo(image, conf)
     tracker._predict_yolo = _yolo_counted
 
-    # Wrap descriptor extraction
     from utils import utils as _utils_mod
     _orig_desc = _utils_mod._extract_descriptor
     def _desc_counted(frame, bbox, **kw):
@@ -302,7 +280,6 @@ def _run_video_counts(tracker, video_path: str, annot_path: str, max_frames: int
     _utils_mod._extract_descriptor = _desc_counted
 
     try:
-        # Read first-frame bounding box
         init_box: List[float] = []
         with open(annot_path) as fh:
             for line in fh:
@@ -341,8 +318,6 @@ def _run_video_counts(tracker, video_path: str, annot_path: str, max_frames: int
 
         cap.release()
 
-        # Harvest OSNet count from tracker's own _comp_counts as a fallback
-        # (covers async paths that bypass the patched _extract_descriptor)
         comp_counts = getattr(tracker, "_comp_counts", {})
         if counts["osnet"] == 0 and "osnet" in comp_counts:
             counts["osnet"] = comp_counts["osnet"]
@@ -354,14 +329,9 @@ def _run_video_counts(tracker, video_path: str, annot_path: str, max_frames: int
     return dict(counts)
 
 
-# ---------------------------------------------------------------------------
-# Console table (SiamRAM style)
-# ---------------------------------------------------------------------------
 
 _SEP = "─"
-# GFLOPs table column widths: component | GFLOPs | calls/fr | GF/fr | avg ms | fps
 _GFC = (30, 8, 9, 9, 8, 7)
-# Latency table column widths: component | avg ms | fps
 _LTC = (38, 10, 10)
 
 
@@ -423,7 +393,6 @@ def _gf_row(
     cpf_s = na if cpf    is None else f"{cpf:.3f}"
     gff_s = na if gf_fr  is None else f"{gf_fr:.3f}"
 
-    # Colorize GF/frame value without breaking right-alignment
     gff_col = (
         _pad_color(gff_s, _GFC[3], _GREEN)
         if gf_fr is not None
@@ -463,9 +432,6 @@ def _lat_row(
     print(_pf() + _paint(label[:5].ljust(5), color) + " " + row, flush=True)
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="SiamRAM GFLOPs + latency profiler")
@@ -479,14 +445,12 @@ def main() -> None:
 
     os.chdir(_REPO)  # so config-relative checkpoint paths resolve correctly
 
-    # ── 1. config ──────────────────────────────────────────────────────────
     from omegaconf import OmegaConf
     from models.SiamABC.tracker.tracker_setup import normalize_tracker_config_aliases
 
     config = OmegaConf.load(str(_CONFIG_PATH))
     normalize_tracker_config_aliases(config)
 
-    # ── 2. load tracker (may compile TRT engines on first run) ─────────────
     siamram_log("loading tracker", phase=_PHASE, status="load", blank_before=True)
     from predictor import load_model
     tracker = load_model(device="cuda" if torch.cuda.is_available() else "cpu")
@@ -499,7 +463,6 @@ def main() -> None:
         phase=_PHASE, status="info",
     )
 
-    # ── 3. GFLOPs on fresh PyTorch model ───────────────────────────────────
     siamram_log("measuring GFLOPs (fresh PyTorch model, no TRT)", phase=_PHASE, status="build")
     if not _HAS_FLOP_COUNTER:
         siamram_log(
@@ -510,31 +473,26 @@ def main() -> None:
     gf = _profile_siamabc_gflops(fresh_net, t_sz, s_sz)
     del fresh_net   # free memory before loading OSNet timing
 
-    # ── 4. timing on deployed backend ──────────────────────────────────────
     siamram_log("timing SiamABC (deployed backend)", phase=_PHASE, status="build")
     ms = _profile_siamabc_timing(siam_net, t_sz, s_sz, args.warmup, args.reps)
 
-    # ── 5. OSNet ──────────────────────────────────────────────────────────
     siamram_log("profiling OSNet", phase=_PHASE, status="build")
     from utils.utils import _DESCRIPTOR_BACKEND, _get_osnet_extractor
     osnet_ext = _get_osnet_extractor() if _DESCRIPTOR_BACKEND == "osnet" else None
     gf_osnet, ms_osnet = _profile_osnet(osnet_ext, args.warmup, args.reps)
 
-    # ── 6. YOLO ───────────────────────────────────────────────────────────
     siamram_log(
         f"profiling YOLO {tracker.yolo_imgsz}×{tracker.yolo_imgsz} (FP16)",
         phase=_PHASE, status="build",
     )
     gf_yolo, ms_yolo = _profile_yolo(tracker, config, tracker.yolo_imgsz, args.warmup, args.reps)
 
-    # ── 7. run video for call-count statistics ─────────────────────────────
     siamram_log("running video — collecting call counts", phase=_PHASE, status="load")
     counts = _run_video_counts(tracker, args.video, args.annot, args.frames)
     total_frames = max(1, counts.get("total_frames", 1))
     yolo_cpf  = counts.get("yolo",  0) / total_frames
     osnet_cpf = counts.get("osnet", 0) / total_frames
 
-    # ── 8. call-frequency estimates from config ────────────────────────────
     try:
         update_interval = int(config.tracker.dynamic_template.update_interval)
     except Exception:
@@ -548,18 +506,15 @@ def main() -> None:
 
     bb_t_cpf   = 1.0 / max(1, update_interval)  # template backbone every N frames
     bb_s_cpf   = 1.0                              # search backbone every frame
-    # PSA is called for both template and search branches each frame
     att_t_cpf  = 1.0
     att_s_cpf  = 1.0
     an_t_cpf   = 1.0   # attn-neck/template
     an_s_cpf   = 1.0   # attn-neck/search
     conn_cpf   = 1.0
 
-    # OSNet/YOLO: use measured call counts from video; fall back to config
     if osnet_cpf == 0.0:
         osnet_cpf = 1.0 / max(1, descriptor_stride)
 
-    # ── 9. GFLOPs table ───────────────────────────────────────────────────
     print("", flush=True)
     siamram_log(
         _paint(
@@ -618,7 +573,6 @@ def main() -> None:
     _summary_row("└─ occlusion mode",   occ_gf_fr,    "     ",  _RED)
     _hline()
 
-    # ── 10. latency table ─────────────────────────────────────────────────
     print("", flush=True)
     _lat_section_header(
         "Latency breakdown  (deployed backend — TRT if configured)"
@@ -656,7 +610,6 @@ def main() -> None:
     )
 
     _hline()
-    # End-to-end estimate for a typical normal-tracking frame
     bb_t_ms  = ms.get("get_features/template", 0.0)
     bb_s_ms  = ms.get("get_features/search",   0.0)
     track_ms = ms.get("track",                 0.0)

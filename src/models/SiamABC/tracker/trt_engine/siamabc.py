@@ -115,7 +115,6 @@ def _torch_compile_enabled() -> bool:
     return _triton_available()
 
 
-# Resolved once at import time and reused for every tracker built in the process.
 _TORCH_COMPILE_OK: bool = _torch_compile_enabled()
 
 
@@ -243,9 +242,6 @@ class TRTSiamABCNet:
         _, C, h_t, w_t = t_feat_shape
         _, _, h_s, w_s = s_feat_shape
 
-        # One shared compile session for the whole TRT phase. begin() no-ops if a
-        # caller (run_inference) already opened a larger session that also covers
-        # the OSNet descriptor, so SiamABC + OSNet render as a single bar.
         compile_progress().begin(3)
         compile_progress().stage("compiling backbone engine")
         self._trt_feat: Optional[torch.nn.Module] = None
@@ -345,8 +341,6 @@ class TRTSiamABCNet:
         if path is None or self._rebuild_cache or not path.exists():
             return None
         try:
-            # Cache load/save are silent so they don't interrupt the single-line
-            # compile progress bar; failures below still surface as warn lines.
             engine = torch.jit.load(str(path), map_location=self._device).eval()
             self._validate_torchscript_engine(engine, validation_specs)
             return engine
@@ -405,9 +399,6 @@ class TRTSiamABCNet:
                     raise RuntimeError(
                         f"backbone cache shape {tuple(output.shape)} != {expected_shape}"
                     )
-                # TRT FP16 engines legitimately return FP32 outputs, and
-                # get_features casts to float regardless, so only require a finite
-                # floating-point tensor rather than an exact dtype match.
                 if not output.is_floating_point():
                     raise RuntimeError(
                         f"backbone cache returned non-float dtype {output.dtype}"
@@ -519,7 +510,6 @@ class TRTSiamABCNet:
         if _TORCH_COMPILE_OK:
             return torch.compile(module, dynamic=True, fullgraph=True)
 
-        # No Triton: build one static TRT engine per branch size; compile-or-raise.
         try:
             engines: Dict[int, torch.nn.Module] = {}
             for hw in sorted({int(h_t), int(h_s)}):
@@ -711,9 +701,6 @@ def get_trt_tracker(
 
     normalize_tracker_config_aliases(config)
     siamram_log("Loading model weights", phase="TRT", status="load")
-    # Building the torchvision backbone with the legacy `pretrained=` argument
-    # emits harmless UserWarnings from native/3rd-party code; keep the load step
-    # quiet so it doesn't interrupt our clean status lines.
     with quiet_external_logs():
         model: nn.Module = instantiate(
             config["model"], inference_mode=True, norm_lambda=lambda_tta

@@ -40,10 +40,6 @@ _SRC = _HERE / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-# ---------------------------------------------------------------------------
-# Imports from our own code (under src/) and the checkpoint downloader.
-# These come after the sys.path edit above, hence the noqa comments.
-# ---------------------------------------------------------------------------
 from omegaconf import OmegaConf  # noqa: E402
 
 from utils.console import siamram_log  # noqa: E402
@@ -55,12 +51,6 @@ from models.siamram.config import (OSNET_CHECKPOINT_CHOICES,  # noqa: E402
                                    flatten_ram_tracker_config)
 from models.siamram.tracker import SiamRAMExperimentTracker  # noqa: E402
 
-# ---------------------------------------------------------------------------
-# Quieten the third-party libraries.
-# Torch, TensorRT and Ultralytics print a lot of info/warning noise that makes
-# the real output hard to read. We turn their log levels down before importing
-# anything heavy so the startup stays clean.
-# ---------------------------------------------------------------------------
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", message=".*LeafSpec.*")
 logging.basicConfig(level=logging.ERROR)
@@ -75,19 +65,10 @@ if os.environ.get("TORCH_LOGS") == "":
 
 
 
-# When this is True we decode video on a Jetson's NVDEC hardware block instead
-# of the CPU. load_model() sets it from the config key runtime.use_nvdec. We
-# keep it False by default so on any normal (non-Jetson) machine we use the
-# plain OpenCV decoder, which is the original behaviour.
 _USE_NVDEC: bool = False
 
-# The folder where the checkpoints get downloaded. We build it from this file's
-# location rather than hardcoding an absolute path, so it follows the submission
-# wherever it is unzipped.
 _CHECKPOINTS_DIR = _HERE / "checkpoints"
 
-# The config we run with. The trailing hash in the name marks which commit's
-# behaviour this config reproduces.
 _CONFIG_PATH = _SRC / "config" / "inference_config.yaml"
 
 
@@ -107,9 +88,6 @@ def _resolve_checkpoint_path(path_value: str) -> str:
     return str((_HERE / path).resolve())
 
 
-# ---------------------------------------------------------------------------
-# load_model
-# ---------------------------------------------------------------------------
 
 def load_model(device: str = "cuda") -> SiamRAMExperimentTracker:
     """
@@ -126,27 +104,18 @@ def load_model(device: str = "cuda") -> SiamRAMExperimentTracker:
     config says is what the tracker gets, so the config file is the single place
     to change anything.
     """
-    # 1. Make sure the three checkpoint files are present (model, YOLO, OSNet).
     download_all_checkpoints(checkpoint_dir=str(_CHECKPOINTS_DIR))
 
-    # 2. Load the config and fill in the legacy SiamABC key names the tracker
-    #    still reads internally (this only renames keys, it changes no values).
     config = OmegaConf.load(str(_CONFIG_PATH))
     normalize_tracker_config_aliases(config)
 
-    # 3. Apply the process-level runtime switches the config asks for.
     global _USE_NVDEC
     runtime_cfg = config.get("runtime", {}) or {}
     torch.backends.cudnn.benchmark = bool(runtime_cfg.get("cudnn_benchmark", False))
     _USE_NVDEC = bool(runtime_cfg.get("use_nvdec", False))
 
-    # 4. Flatten the grouped ram_tracker config into the flat keyword arguments
-    #    the tracker constructor expects.
     ram_tracker_kwargs = flatten_ram_tracker_config(config)
 
-    # 5. The YOLO and OSNet weight paths come from the config as relative paths.
-    #    Resolve them to absolute so they load no matter where we run from. This
-    #    only fixes up paths; it does not change any tracker setting.
     if ram_tracker_kwargs.get("yolo_weights"):
         ram_tracker_kwargs["yolo_weights"] = _resolve_checkpoint_path(
             ram_tracker_kwargs["yolo_weights"]
@@ -156,23 +125,10 @@ def load_model(device: str = "cuda") -> SiamRAMExperimentTracker:
             ram_tracker_kwargs["osnet_model_path"]
         )
 
-    # 6. Build the SiamABC backbone. The trt_engine.trt_compile_siamabc switch
-    #    selects the backend: standard PyTorch (get_tracker) or the TensorRT-
-    #    compiled backbone (get_trt_tracker). Both return a SiamABCTracker, so the
-    #    rest of load_model is identical either way. The TRT factory is imported
-    #    lazily so the standard path never requires tensorrt / torch_tensorrt. The
-    #    SiamABC checkpoint path and every TRT option come from the config.
     siam_weights_path = _resolve_checkpoint_path(config.get("weights_path", ""))
     trt_cfg = config.get("trt_engine") or {}
     lambda_tta = float(trt_cfg.get("lambda_tta", 0.1))
 
-    # The OSNet descriptor TRT options are declared under trt_engine, but the
-    # tracker only receives the flattened ram_tracker kwargs — flatten_ram_tracker_config
-    # never reads trt_engine. Bridge them across here so trt_compile_osnet (and the
-    # related FP16 / cache switches) actually reach configure_descriptor_backend;
-    # without this they silently stay at their False/"" defaults and OSNet never
-    # compiles. trt_cache_dir is resolved to an absolute path (like the SiamABC
-    # engines) so the cache lands under the repo root regardless of the CWD.
     osnet_trt_cache_dir = str(trt_cfg.get("trt_cache_dir", "") or "").strip()
     if osnet_trt_cache_dir:
         _osnet_cache_path = Path(osnet_trt_cache_dir).expanduser()
@@ -186,10 +142,6 @@ def load_model(device: str = "cuda") -> SiamRAMExperimentTracker:
     ram_tracker_kwargs["trt_cache_dir"] = osnet_trt_cache_dir
     ram_tracker_kwargs["trt_rebuild_cache"] = bool(trt_cfg.get("rebuild_trt_cache", False))
 
-    # The YOLO re-detector compiles through Ultralytics' native engine export,
-    # but its switches also live under trt_engine, so bridge them the same way
-    # as the OSNet ones. The engine is cached under the shared trt_cache_dir
-    # (resolved above) and rebuilt when rebuild_trt_cache is set.
     ram_tracker_kwargs["trt_compile_yolo"] = bool(trt_cfg.get("trt_compile_yolo", False))
     ram_tracker_kwargs["yolo_fp16"] = bool(trt_cfg.get("yolo_fp16", False))
     ram_tracker_kwargs["cuda_id"] = int(trt_cfg.get("cuda_id", 0))
@@ -197,9 +149,6 @@ def load_model(device: str = "cuda") -> SiamRAMExperimentTracker:
     if bool(trt_cfg.get("trt_compile_siamabc", False)):
         from models.SiamABC.tracker.trt_engine.siamabc import get_trt_tracker
 
-        # Cache the compiled engines so reruns skip the multi-minute build. The
-        # cache key is derived from the config/weights/shapes, so a stale entry is
-        # never reused for a different setup. Empty dir = caching disabled.
         engine_cache_dir = str(trt_cfg.get("trt_cache_dir", "") or "").strip()
         if engine_cache_dir:
             engine_cache_path = Path(engine_cache_dir).expanduser()
@@ -227,9 +176,6 @@ def load_model(device: str = "cuda") -> SiamRAMExperimentTracker:
             continuous=False,
         )
 
-    # 7. Sanity-check the OSNet checkpoint choice before building the tracker so
-    #    a typo in the config gives a clear error instead of a confusing one
-    #    later from torchreid.
     osnet_ckpt = str(
         ram_tracker_kwargs.get("osnet_pretrained_checkpoint", "imagenet")
     ).strip()
@@ -239,7 +185,6 @@ def load_model(device: str = "cuda") -> SiamRAMExperimentTracker:
             f"Expected one of: {', '.join(sorted(OSNET_CHECKPOINT_CHOICES))}."
         )
 
-    # 8. Wrap the backbone in the full SiamRAM tracker and hand it back.
     tracker = SiamRAMExperimentTracker(
         siam_tracker=siam_tracker,
         **ram_tracker_kwargs,
@@ -249,9 +194,6 @@ def load_model(device: str = "cuda") -> SiamRAMExperimentTracker:
     return tracker
 
 
-# ---------------------------------------------------------------------------
-# Reading the first-frame bounding box
-# ---------------------------------------------------------------------------
 
 def read_init_box(path: str) -> list[float]:
     """
@@ -276,9 +218,6 @@ def read_init_box(path: str) -> list[float]:
     raise ValueError(f"Annotation file is empty: '{path}'")
 
 
-# ---------------------------------------------------------------------------
-# Opening a video: Jetson hardware decode when asked, CPU decode otherwise
-# ---------------------------------------------------------------------------
 
 @functools.lru_cache(maxsize=1)
 def _nvv4l2decoder_available() -> bool:
@@ -324,16 +263,6 @@ def _open_video(path: str):
     only capture methods run_tracker calls.
     """
     if _USE_NVDEC and _nvv4l2decoder_available():
-        # A few appsink options worth explaining:
-        #   sync=false    : deliver frames as fast as the decoder can produce
-        #                   them instead of pacing to the video's real frame
-        #                   rate, otherwise we would be capped at e.g. 30 FPS.
-        #   drop=false    : never throw frames away. Tracking needs one output
-        #                   row per frame, so a dropped frame would shift every
-        #                   later frame's box in the CSV.
-        #   max-buffers=4 : let at most four decoded frames wait in the queue.
-        #                   When it is full the decoder pauses, which stops the
-        #                   pipeline from racing ahead and eating memory.
         gst = (
             f"filesrc location={path} ! "
             "qtdemux ! h264parse ! nvv4l2decoder ! "
@@ -362,9 +291,6 @@ def _open_video(path: str):
     return cv2.VideoCapture(path)
 
 
-# ---------------------------------------------------------------------------
-# run_tracker
-# ---------------------------------------------------------------------------
 
 def _resolve_input_path(path_value: str) -> str:
     """
@@ -406,8 +332,6 @@ def run_tracker(
     through a small FIFO queue, so their order is preserved and the result is
     exactly the same as a plain one-frame-at-a-time loop.
     """
-    # Resolve manifest paths against the working dir first, then sensible roots,
-    # so the run is robust to where the grader launches inference from.
     init_box_path = _resolve_input_path(init_box_path)
     video_path = _resolve_input_path(video_path)
 
@@ -419,17 +343,10 @@ def run_tracker(
     frame_q: queue.Queue | None = None
     stop_event: threading.Event | None = None
 
-    # ------------------------------------------------------------------
-    # Decode accounting. The tracker times its own update() calls internally
-    # (per-frame, for percentile stats). We only track decode (cap.read) here
-    # since that happens outside the tracker and is passed to end_sequence().
-    # ------------------------------------------------------------------
     decode_time = 0.0      # seconds spent inside cap.read(), all frames
     decode_frames = 0      # number of frames successfully decoded
 
     reader_exc: list = []
-    # The reader thread owns these; we read them only after join(), so no lock
-    # is needed. {"time": seconds in cap.read(), "frames": frames decoded}.
     reader_stats = {"time": 0.0, "frames": 0}
 
     if not cap.isOpened():
@@ -439,11 +356,6 @@ def run_tracker(
     total_frames_hint = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     seq_start = time.perf_counter()
     try:
-        # --------------------------------------------------------------
-        # Frame 0: read it directly and initialise the tracker on it. This
-        # must stay inside the cleanup scope because initialization can fail
-        # after the decoder has already allocated file or hardware resources.
-        # --------------------------------------------------------------
         _t = time.perf_counter()
         success, first_frame = cap.read()
         decode_time += time.perf_counter() - _t
@@ -451,8 +363,6 @@ def run_tracker(
             raise RuntimeError(f"Cannot read first frame from: '{video_path}'")
         decode_frames += 1
 
-        # Register sequence info with the tracker so it can drive the progress
-        # bar and emit a per-sequence summary in end_sequence().
         model.begin_sequence(video_name, total_frames_hint)
         model.initialize(first_frame, init_box)
 
@@ -461,10 +371,6 @@ def run_tracker(
             {"frame_idx": 0, "x": x0, "y": y0, "w": w0, "h": h0}
         ]
 
-        # --------------------------------------------------------------
-        # Frames 1..N: the reader thread decodes ahead while the GPU tracks.
-        # A queue depth of 4 keeps the GPU fed without buffering the video.
-        # --------------------------------------------------------------
         frame_q = queue.Queue(maxsize=4)
         stop_event = threading.Event()
 
@@ -477,8 +383,6 @@ def run_tracker(
                     if not ret or fr is None:
                         break
                     reader_stats["frames"] += 1
-                    # Wait for room in the queue, but wake up every so often
-                    # so a stop request can never leave us blocked forever.
                     while not stop_event.is_set():
                         try:
                             frame_q.put(fr, timeout=0.25)
@@ -488,8 +392,6 @@ def run_tracker(
             except Exception as exc:
                 reader_exc.append(exc)
             finally:
-                # Push a None to mark end-of-stream, unless the consumer
-                # already told us to stop.
                 while not stop_event.is_set():
                     try:
                         frame_q.put(None, timeout=0.25)
@@ -516,8 +418,6 @@ def run_tracker(
             frame_idx += 1
 
     finally:
-        # Cleanup covers every failure after opening the capture, including
-        # first-frame decoding and model initialization.
         if stop_event is not None:
             stop_event.set()
         if frame_q is not None:
@@ -535,13 +435,9 @@ def run_tracker(
 
     seq_elapsed = time.perf_counter() - seq_start
 
-    # Merge reader-thread decode stats into the totals.
     decode_time += reader_stats["time"]
     decode_frames += reader_stats["frames"]
 
-    # Delegate per-sequence summary and optional component latency to the
-    # tracker so all logging is centralised there (no print calls here).
-    # The tracker collected per-frame update() times internally in update().
     model.end_sequence(
         elapsed_s=seq_elapsed,
         decode_time_s=decode_time,

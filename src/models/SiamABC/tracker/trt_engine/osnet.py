@@ -80,10 +80,6 @@ def build_osnet_trt(
         else None
     )
 
-    # Advance the shared one-time compile progress bar (the same bar SiamABC
-    # uses). stage()/complete() auto-open a lone session if SiamABC's has already
-    # closed, so OSNet still renders a clean 0-100% bar. Cache load/save are
-    # silent so they don't break the single line; failures still warn.
     compile_progress().stage("compiling osnet descriptor engine")
     try:
         if cache_path is not None and cache_path.exists() and not rebuild_cache:
@@ -116,7 +112,6 @@ def build_osnet_trt(
                 truncate_long_and_double=True,
             )
 
-            # Warm the engine so the first real frame doesn't pay the lazy-init cost.
             with torch.no_grad():
                 engine(dummy)
 

@@ -121,19 +121,16 @@ def _prepare_windows_dll_search() -> None:
 
     candidate_dirs: list[str] = []
 
-    # Honour an explicit CUDA_PATH / CUDA_PATH_V12_x if it points at a real bin.
     for env_key in ("CUDA_PATH_V12_8", "CUDA_PATH_V12_6", "CUDA_PATH_V12_4", "CUDA_PATH"):
         root = os.environ.get(env_key)
         if root:
             candidate_dirs.append(os.path.join(root, "bin"))
 
-    # Common CUDA 12.x toolkit install locations on Windows.
     program_files = os.environ.get("ProgramFiles", r"C:\Program Files")
     cuda_root = os.path.join(program_files, "NVIDIA GPU Computing Toolkit", "CUDA")
     for minor in ("v12.8", "v12.6", "v12.5", "v12.4", "v12.3", "v12.2", "v12.1", "v12.0"):
         candidate_dirs.append(os.path.join(cuda_root, minor, "bin"))
 
-    # torch ships cudart64_12.dll under its lib/ directory; use it as a fallback.
     try:
         import torch  # noqa: PLC0415 - imported lazily, only on Windows.
 
@@ -150,7 +147,6 @@ def _prepare_windows_dll_search() -> None:
             if os.path.isdir(directory):
                 os.add_dll_directory(directory)
         except Exception:
-            # A bad path must never break import; just move on to the next one.
             continue
 
 
@@ -176,8 +172,6 @@ class NvdecVideoCapture:
         self._gpu_id = int(gpu_id)
         self._opened = False
 
-        # Lazily-bound handles and per-instance state. Kept as attributes so
-        # release() can drop them and isOpened() can reason about them.
         self._nvc = None            # the PyNvVideoCodec module
         self._torch = None          # torch, used for the zero-copy surface read
         self._demuxer = None        # packet iterator over the container
@@ -197,14 +191,11 @@ class NvdecVideoCapture:
             self._opened = False
             self._release_handles()
 
-    # -- construction helpers ------------------------------------------------
 
     def _open(self) -> None:
         """Import the library, create the demuxer/decoder, and prime the first frame."""
         _prepare_windows_dll_search()
 
-        # Imported lazily (and only when NVDEC is actually requested) so the
-        # standard CPU-decode path never needs PyNvVideoCodec installed.
         import PyNvVideoCodec as nvc  # noqa: PLC0415
         import torch  # noqa: PLC0415
 
@@ -253,7 +244,6 @@ class NvdecVideoCapture:
         except Exception:
             return 0, 0, 0
 
-    # -- decode pump ---------------------------------------------------------
 
     def _surface_to_bgr(self, frame) -> np.ndarray:
         """

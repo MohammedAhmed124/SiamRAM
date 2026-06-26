@@ -753,12 +753,6 @@ class SiamABCTracker(Tracker):
         """
         pred_bbox, pred_score, sim_score = self.run_track(search)
 
-        # Promote the primary-track classification maps (raw + after penalty)
-        # captured in _postprocess() to the display slots read by the video
-        # visualiser. Done here (not in _postprocess) so candidate/recovery
-        # forwards that run later in the frame can't overwrite the map shown for
-        # the accepted prediction. Gated by _viz_capture so the no-video fast
-        # path pays nothing.
         if getattr(self, "_viz_capture", False):
             self.viz_cls_map = getattr(self, "_viz_cls_latest", None)
             self.viz_cls_pen_map = getattr(self, "_viz_cls_pen_latest", None)
@@ -1060,8 +1054,6 @@ class SiamABCTracker(Tracker):
             and gate_ready
             and gate_iou < self.iou_gate_threshold
         ):
-            # Keep a confidence penalty instead of hard-zeroing the score.
-            # Hard-zero caused frequent false occlusion entries with noisy IoU maps.
             peak_cls_score *= 0.25
             self._last_iou_gate_pass = False
         else:
@@ -1070,14 +1062,6 @@ class SiamABCTracker(Tracker):
         sim_score_raw = track_result[constants.TRACKER_TARGET_SEARCH_SIM_SCORE]
         sim_score = sim_score_raw.item() if sim_score_raw is not None else 0.0
 
-        # Stash the classification head map before and after the scale/Hanning
-        # penalty, for the bottom-left video insets. "Before" is the raw
-        # per-location sigmoid (cls_score, already numpy [H, W]); "after" is
-        # classification_map from _confidence_postprocess() -- which equals the
-        # raw map when the hanning_window_penalty block is disabled. Both are
-        # already computed for decoding, so this only adds a squeeze/copy, and
-        # only when capture is enabled (so the no-video fast path pays nothing).
-        # update() promotes these "latest" buffers to its display slots.
         if getattr(self, "_viz_capture", False):
             self._viz_cls_latest = cls_score  # numpy [H, W] in [0, 1], pre-penalty
             if classification_map is not None:

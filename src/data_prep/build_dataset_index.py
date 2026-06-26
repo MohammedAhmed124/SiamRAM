@@ -145,9 +145,6 @@ def _validate_frame_dir(
     return len(good), len(bad)
 
 
-# ---------------------------------------------------------------------------
-# Path helpers
-# ---------------------------------------------------------------------------
 
 def _resolve_data_dir(path_value: Optional[str]) -> Path:
     if not path_value:
@@ -200,9 +197,6 @@ def _seq_img_dir(seq_dir: Path, dataset_root: Path, imgs_root: Path, dataset_nam
     return imgs_root / dataset_name / rel / "img"
 
 
-# ---------------------------------------------------------------------------
-# Video extraction
-# ---------------------------------------------------------------------------
 
 def _find_video_file(seq_dir: Path) -> Optional[Path]:
     """Return the first video file found directly inside seq_dir."""
@@ -265,7 +259,6 @@ def _extract_frames_ffmpeg(video_path: Path, img_dir: Path, jpg_quality: int) ->
     if extracted > 0:
         return extracted
 
-    # ffmpeg wrote nothing — log the tail of stderr for diagnostics.
     print(
         f"  [warn] ffmpeg produced 0 frames from {video_path.name} "
         f"(rc={result.returncode}).\n"
@@ -327,7 +320,6 @@ def _extract_frames_cv2(video_path: Path, img_dir: Path, jpg_quality: int) -> in
                 break
             idx += 1
     except OSError as exc:
-        # Common on unstable mounts / external disks / Docker bind mounts.
         print(f"  [warn] cv2 extraction I/O error for {video_path.name}: {exc}")
         return 0
     except Exception as exc:
@@ -474,7 +466,6 @@ def extract_all_videos(
                 if not ok:
                     failed.append(seq_dir)
             except OSError as exc:
-                # Keep going when a worker fails due to storage/mount errors.
                 seq_dir, _ = futures[fut]
                 failed.append(seq_dir)
                 print(f"  [warn] worker OSError on {seq_dir}: {exc}")
@@ -491,9 +482,6 @@ def extract_all_videos(
             print(f"    ... and {len(failed) - 10} more")
 
 
-# ---------------------------------------------------------------------------
-# Image / annotation helpers
-# ---------------------------------------------------------------------------
 
 def _image_files(directory: Path) -> List[Path]:
     if not directory.is_dir():
@@ -719,7 +707,6 @@ def _build_record(
         start_idx=start_idx,
         max_end_idx=end_idx_from_ann,
     )
-    # Keep index range aligned to both annotations and actually present frames.
     n_frames = end_idx - start_idx + 1
     if n_frames <= 0:
         return None
@@ -732,7 +719,6 @@ def _build_record(
     class_name = _clean_class_name(seq_dir.name)
 
     return {
-        # seq_path == frame_dir so TrackingSequence.frame_path() works directly.
         "seq_path":      str(frame_dir.resolve()),
         "img_path":      str(frame_dir.resolve()),
         "annot_path":    str(annot_path.resolve()),
@@ -744,14 +730,10 @@ def _build_record(
         "W":             int(w),
         "class":         class_name,
         "dataset":       dataset_name,
-        # Pattern is relative to seq_path (== frame_dir); no subdir prefix needed.
         "frame_pattern": _infer_frame_pattern(frame_dir),
     }
 
 
-# ---------------------------------------------------------------------------
-# Compatibility filter
-# ---------------------------------------------------------------------------
 
 def _compat_filter(df: pd.DataFrame) -> Tuple[pd.DataFrame, int]:
     if df.empty:
@@ -781,9 +763,6 @@ def _compat_filter(df: pd.DataFrame) -> Tuple[pd.DataFrame, int]:
     return df.reset_index(drop=True), dropped
 
 
-# ---------------------------------------------------------------------------
-# Discovery
-# ---------------------------------------------------------------------------
 
 def discover_dataset_rows(
     dataset_root: Path,
@@ -814,9 +793,6 @@ def discover_dataset_rows(
     return pd.DataFrame(rows)
 
 
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(

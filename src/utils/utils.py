@@ -108,8 +108,6 @@ class _OSNetDescriptorExtractor:
 
     _IMAGENET_MEAN: Tuple[float, float, float] = (0.485, 0.456, 0.406)
     _IMAGENET_STD: Tuple[float, float, float] = (0.229, 0.224, 0.225)
-    # torchreid/OSNet convention is (H, W) = (256, 128). Kept fixed so the
-    # ImageNet-pretrained weights see their training resolution.
     _INPUT_H: int = 256
     _INPUT_W: int = 128
 
@@ -129,7 +127,6 @@ class _OSNetDescriptorExtractor:
             try:
                 from torchreid.utils import FeatureExtractor
             except ModuleNotFoundError:
-                # Newer deep-person-reid moved everything under torchreid.reid.*
                 from torchreid.reid.utils import FeatureExtractor
         except Exception as exc:
             raise RuntimeError(
@@ -172,8 +169,6 @@ class _OSNetDescriptorExtractor:
                     "trt_compile_osnet requires a CUDA device; got "
                     f"'{self._device}'."
                 )
-            # Lazy import: keeps utils free of any torch_tensorrt / models.*
-            # dependency unless TRT is actually requested.
             from models.SiamABC.tracker.trt_engine.osnet import build_osnet_trt
 
             self._engine = build_osnet_trt(
@@ -188,14 +183,7 @@ class _OSNetDescriptorExtractor:
             )
 
         self._forward = self._engine if self._engine is not None else self._model
-        # The TRT engine is a static batch-1 graph (see build_osnet_trt), so feed
-        # it one crop at a time. The eager backbone handles any batch, but we
-        # still bound it by the candidate cap to keep memory predictable.
         self._chunk = 1 if self._engine is not None else self._max_batch
-        # Dedicated non-default CUDA stream for the async (Tier-3) overlap path.
-        # OSNet(frame N) runs here while SiamABC(frame N+1) runs on its own
-        # non-default stream — both must be non-default or the legacy default
-        # stream would serialize them.
         self._stream = (
             torch.cuda.Stream(device=self._device)
             if self._device.type == "cuda"
@@ -261,7 +249,6 @@ class _OSNetDescriptorExtractor:
             return np.zeros((0, 0), dtype=np.float32)
         if "result" in pending:
             return pending["result"]
-        # Wait for the queued OSNet forward to finish before reading it back.
         self._stream.synchronize()
         features_t = torch.nn.functional.normalize(
             pending["gpu"].float(), p=2, dim=1
@@ -389,26 +376,14 @@ class _SiameseDescriptorExtractor:
                 self._model.train()
 
         if self._comparison_mode == "xcorr":
-            # Per-spatial-cell L2 normalization. Each (C,) channel vector at
-            # every spatial location ends up unit-length, so downstream
-            # cross-correlation produces a response map whose values are
-            # bounded in [-1, 1] per cell. The caller / _cos_sim dispatches
-            # on the 3D shape to do the conv2d-based comparison.
             normalized = torch.nn.functional.normalize(features, p=2, dim=1)
             return normalized.detach().cpu().numpy().astype(np.float32)
 
         if self._comparison_mode == "similarity":
-            # Whole-map cosine: flatten the full (C, H, W) feature map into one
-            # long vector and L2-normalize it, so the standard 1D cosine path
-            # compares the entire spatial layout at once. Keeps spatial detail
-            # (unlike "pooled", which averages it away) but has NO translation
-            # tolerance (unlike "xcorr", which slides and takes the peak).
             flat = features.flatten(start_dim=1)
             normalized = torch.nn.functional.normalize(flat, p=2, dim=1)
             return normalized.detach().cpu().numpy().astype(np.float32)
 
-        # comparison_mode == "pooled": global avg pool then L2-normalize the
-        # resulting vector so the standard cosine path applies.
         pooled = features.mean(dim=(2, 3))
         normalized = torch.nn.functional.normalize(pooled, p=2, dim=1)
         return normalized.detach().cpu().numpy().astype(np.float32)
@@ -666,12 +641,6 @@ def configure_descriptor_backend(
         siamese_comparison_mode.strip().lower() if siamese_comparison_mode else "xcorr"
     )
 
-    # Compile the OSNet descriptor engine now, at setup, rather than lazily on the
-    # first frame. The engine, weights and outputs are identical — only the build
-    # *timing* moves earlier — so this changes no tracking behavior; it just folds
-    # the OSNet compile into the one-time TensorRT progress bar and removes the
-    # first-frame stall. Only the TRT-compiled OSNet backend has a compile step;
-    # the siamese / pixel backends stay lazy (nothing to build).
     if _DESCRIPTOR_BACKEND == "osnet" and _TRT_COMPILE_OSNET:
         _get_osnet_extractor()
 
@@ -683,9 +652,6 @@ def _get_osnet_extractor() -> _OSNetDescriptorExtractor:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         else:
             device = _OSNET_DEVICE
-        # TRT engine batch profile upper bound. Tie it to the candidate cap when
-        # set; otherwise fall back to a generous default and let extract_batch
-        # chunk anything larger.
         max_batch = _OSNET_MAX_CANDIDATE_BATCH if _OSNET_MAX_CANDIDATE_BATCH > 0 else 16
         _OSNET_EXTRACTOR = _OSNetDescriptorExtractor(
             model_name=_OSNET_MODEL_NAME,

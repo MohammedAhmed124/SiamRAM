@@ -81,9 +81,6 @@ def silence_noisy_libraries() -> None:
 
     warnings.filterwarnings("ignore", category=FutureWarning)
     warnings.filterwarnings("ignore", category=UserWarning, module="albumentations.*")
-    # torchvision emits two UserWarnings when a backbone is built with the
-    # legacy `pretrained=...` argument; they are harmless and only clutter the
-    # weight-loading step, so silence them by both module and message.
     warnings.filterwarnings("ignore", category=UserWarning, module=r"torchvision(\..*)?")
     warnings.filterwarnings("ignore", message=r".*'pretrained' is deprecated.*")
     warnings.filterwarnings("ignore", message=r".*Arguments other than a weight enum.*")
@@ -264,8 +261,6 @@ class SiamRAMProgressLine:
             f"d={self._counts['distractor']}"
         )
 
-        # Keep the rendered line inside the terminal width, even for long
-        # sequence names and narrow consoles.
         min_bar = 1
         fixed_len = _visible_len(lead) + _visible_len(summary) + min_bar + 3
         name_width = max(0, term_width - fixed_len)
@@ -355,8 +350,6 @@ class _CompileProgress:
         self._done = 0
         self._message = ""
         self._active = True
-        # No initial draw: the first stage() renders the 0% frame, which keeps
-        # non-TTY logs free of an empty leading line.
         return True
 
     def stage(self, message: str) -> None:
@@ -378,8 +371,6 @@ class _CompileProgress:
                 self._draw("done", _GREEN)
             self._close()
         elif self._interactive and _logs_enabled():
-            # On a TTY, advance the fill in place. In a log file the per-stage
-            # stage() line already recorded progress, so skip the extra line.
             self._draw("build", _YELLOW)
 
     def finish(self, message: str = "compiled successfully") -> None:
@@ -409,13 +400,10 @@ class _CompileProgress:
         pct = int(round(100 * self._done / max(1, self._total)))
         pct_text = f"{pct:3d}%"
         if not self._interactive:
-            # Non-TTY (log file): one clean plain line per stage, no carriage
-            # returns. Keeps captured logs readable.
             print(f"{prefix} {accent} {pct_text} · {self._message}", flush=True)
             return
         term_width = max(40, shutil.get_terminal_size((100, 20)).columns - 1)
         message = _fit_text(self._message, 40)
-        # "<prefix> <accent> [<bar>] <pct> · <message>" — the bar fills the slack.
         fixed = _visible_len(prefix) + 1 + 5 + 1 + 1 + 1 + len(pct_text) + 3 + len(message)
         bar_width = max(8, term_width - fixed)
         filled = int(round(bar_width * self._done / max(1, self._total)))

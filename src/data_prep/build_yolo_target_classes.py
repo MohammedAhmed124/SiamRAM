@@ -147,9 +147,6 @@ def main() -> None:
 
     if not args.input.exists():
         raise FileNotFoundError(f"Input CSV not found: {args.input}")
-    # Allow Ultralytics to auto-download known checkpoint names (e.g. yolo11l.pt).
-    # We only hard-fail when a non-current-directory path is explicitly provided
-    # but does not exist.
     if not args.weights.exists() and args.weights.parent not in {Path("."), Path("")}:
         raise FileNotFoundError(
             f"YOLO weights not found at explicit path: {args.weights}. "

@@ -76,7 +76,6 @@ def freeze_backbone_only(
         model.polarized_self_attention,
         model.attention_neck,
         model.connect_model,
-        # model.similarity_avgpool,
     ]
     if (
         model.build_simsiam_heads
@@ -84,7 +83,6 @@ def freeze_backbone_only(
         and hasattr(model, "predictor")
     ):
         trainable_modules += [
-            # model.avgpool,
             model.classifier,
             model.predictor
             ]
@@ -268,7 +266,6 @@ def _train_one_epoch(
     log_every = max(1, int(log_every))
 
     if train_mode == "cls_head_only":
-        # Keep all frozen BN layers fully static; only cls branch BN updates.
         set_bn_eval(model)
         set_cls_bn_train(model)
 
@@ -289,7 +286,6 @@ def _train_one_epoch(
         if iou_label is not None:
             iou_label = iou_label.to(device)
 
-        # SiamABC Forward Pass: Processes 4 input crops simultaneously[cite: 1]
         out = model((template, dynamic_template, search, dynamic_search))
         cls_pred = out[constants.TARGET_CLASSIFICATION_KEY]
         bbox_pred = out[constants.TARGET_REGRESSION_LABEL_KEY]
@@ -309,7 +305,6 @@ def _train_one_epoch(
         optimizer.zero_grad(set_to_none=True)
         losses["total"].backward()
 
-        # Stabilize training by limiting the magnitude of gradient updates
         nn.utils.clip_grad_norm_(
             [p for p in model.parameters() if p.requires_grad],
             max_norm=5.0,

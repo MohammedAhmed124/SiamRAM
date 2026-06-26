@@ -104,10 +104,6 @@ def _repair_path_if_needed(
 
     if "/app/" in norm:
         candidates.append(os.path.join(repo_root, norm.split("/app/", 1)[1]))
-    # The legacy layout split frames into a sibling `data_imgs/` tree; the new
-    # layout merges them under `data/`. Any path that contains `data_imgs/`
-    # gets transparently retargeted into `data/` here so older CSV indexes
-    # keep loading without manual edits.
     if "/data_imgs/" in norm:
         tail = norm.split("/data_imgs/", 1)[1]
         candidates.append(os.path.join(repo_root, "data", tail))
@@ -647,7 +643,6 @@ def train(cfg: dict) -> None:
         if epoch_mode != active_mode:
             stage_total_epochs = num_epochs - epoch + 1
             if active_mode is None:
-                # On resumed runs (start_epoch > 1), don't replay warmup.
                 warmup_override = (
                     0
                     if int(start_epoch) > 1

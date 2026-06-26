@@ -32,15 +32,7 @@ class DescriptorConfig:
     osnet_model_path: str = ""
     osnet_device: str = "auto"
     osnet_max_candidate_batch: int = 0
-    # Supported backends: "osnet", "siamese", "pixel descriptors".
-    # Only consulted when backend == "siamese". Picks which SiamABC layer to
-    # pool into the appearance embedding. "neck" → ~256-d, "encoder" → ~1024-d.
     siamese_feature_source: str = "neck"
-    # Only consulted when backend == "siamese". Selects how two descriptors
-    # are compared:
-    #   "xcorr"  — keep (C, H, W) feature map, compare via 2D cross-correlation.
-    #              Matches how SiamABC was trained. Default.
-    #   "pooled" — global avg pool to a (C,) vector, compare via cosine.
     siamese_comparison_mode: str = "xcorr"
 
 

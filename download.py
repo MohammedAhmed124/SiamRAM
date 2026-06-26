@@ -17,10 +17,6 @@ import sys
 
 import gdown
 
-# ---------------------------------------------------------------------------
-# Logging — use the SiamRAM console helper when available (it is on the path
-# when imported via predictor.py), otherwise fall back to a matching format.
-# ---------------------------------------------------------------------------
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SRC = os.path.join(_HERE, "src")
 if _SRC not in sys.path:
@@ -42,10 +38,6 @@ except ImportError:
         lead = "\n" if blank_before else ""
         print(f"{lead}[SiamRAM][{phase}] {tag} {msg}", flush=True)
 
-# ---------------------------------------------------------------------------
-# The Google Drive file ID for each checkpoint, keyed by the filename we save
-# it as. To swap a checkpoint, change the ID here.
-# ---------------------------------------------------------------------------
 _GDRIVE_IDS = {
     "model.pth":                 "1VQdAZj0Mpf_ZMxvoZOaCRp3uo6wOPuDC",
     "yolo11n.pt":                "1WUAArjVjMwrluMWBBlTqGO7NBkDy_CMv",

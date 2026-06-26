@@ -393,7 +393,6 @@ class SiamABCBoxCoder(BoxCoder):
         loc = pred_location[0]
 
         H, W = cls_map.shape
-        # One device->host sync (argmax) instead of two (// and % each .item()).
         flat_idx = int(torch.argmax(cls_map).item())
         r_max, c_max = divmod(flat_idx, W)
 

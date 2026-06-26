@@ -103,9 +103,6 @@ class Tracker(ABC):
         self.net = model
         self.box_coder = self.get_box_coder(tracking_config, cuda_id)
         self._template_features = None
-        # Image normalization is done on-GPU in _preprocess_image; the previous
-        # albumentations transforms were built here but never applied (the
-        # transform arg was ignored), so they are dropped entirely.
         self.window = self._get_tracking_window(
             tracking_config["windowing"], tracking_config["score_size"]
         )

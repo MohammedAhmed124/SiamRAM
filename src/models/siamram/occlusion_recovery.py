@@ -213,13 +213,6 @@ class OcclusionRecoverySubsystem:
         held_box = self._host.held_box
         assert held_box is not None
 
-        # Adaptive YOLO-detectability policy: once the probe has a verdict, do
-        # NOT let SiamABC reacquire on its own from the EKF-centred seed. Skip
-        # the phase-0 seed+commit entirely and fall straight through to YOLO
-        # candidate collection + DRM ranking (phase 1). Detectable targets are
-        # collected at the normal yolo_conf; NOT-detectable targets are collected
-        # at the lower yolo_undetectable_conf (see _yolo_detect) so they still
-        # surface candidate boxes for DRM to rank.
         if self._host._detectability_policy_active():
             if self._host.debug:
                 regime = (

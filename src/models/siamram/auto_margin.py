@@ -54,8 +54,6 @@ class AutoDrmMargin:
         self.ema_alpha = min(1.0, max(0.0, float(ema_alpha)))
         self.n_frames = max(1, int(n_frames))
         self.min_samples = max(0, int(min_samples))
-        # Keep the warm-up default inside the clamp range so `value` is always
-        # a legal margin even before any sample arrives.
         self.warmup = min(self.max_margin, max(self.min_margin, float(warmup)))
 
         self._ema: Optional[float] = None

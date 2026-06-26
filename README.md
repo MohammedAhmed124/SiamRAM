@@ -13,7 +13,9 @@ reacquisition. This branch is our **MTC-AIC4 Phase 2** submission.
 - [Overview](#overview)
 - [Repository structure](#repository-structure)
 - [Installation](#installation)
+- [Checkpoints (download links)](#checkpoints-download-links)
 - [Usage](#usage)
+- [Training](#training)
 - [Configuration](#configuration)
 - [Profiler](#profiler)
 - [Authors](#authors)
@@ -55,16 +57,19 @@ calls. Everything it relies on lives under `src/`, and every setting comes from
 ├── predictor.py            # The file we wrote: load_model + run_tracker
 ├── inference.py            # Grader's runner (provided): manifest → CSV
 ├── check_submission.py     # Grader's CSV validator (provided)
-├── download.py             # Fetches the three checkpoints from Google Drive
+├── download.py             # Fetches the three inference checkpoints from Google Drive
 ├── requirements.txt        # x86_64 + CUDA 12.8 dependencies (pinned)
 ├── Dockerfile.gpu          # Docker (GPU) image
 ├── docker-compose.yml      # Docker (GPU) build + run
 ├── test.json               # Example manifest (public_lb split)
 └── src/
-    ├── config/inference_config.yaml   # All settings
+    ├── config/inference_config.yaml   # Inference settings
+    ├── config/training_config.yaml    # Training settings
     ├── models/siamram/     # Tracker, recovery, memory, motion, GMC
     ├── models/SiamABC/     # Siamese base tracker
-    └── utils/              # Shared helpers
+    ├── data_prep/          # build_dataset_index.py — frame index builder
+    ├── training/           # train_head.py — SiamABC head fine-tuning
+    └── utils/              # Shared helpers (dataset, losses, training loop)
 ```
 
 ## Installation
@@ -97,6 +102,21 @@ pip install -r requirements.txt
 
 The torch / torchvision / torch-tensorrt wheels are pinned to `+cu128` builds and
 pulled from the PyTorch CUDA 12.8 index (declared inside `requirements.txt`).
+
+## Checkpoints (download links)
+
+All weights are hosted on Google Drive. `python download.py` fetches the three
+inference checkpoints automatically, but here are the **direct download links**
+so they can be grabbed manually and dropped into `checkpoints/`:
+
+| File | Used for | Direct download |
+|------|----------|-----------------|
+| `model.pth` (SiamABC backbone) | Inference + training init | [download](https://drive.google.com/uc?export=download&id=1VQdAZj0Mpf_ZMxvoZOaCRp3uo6wOPuDC) · [view](https://drive.google.com/file/d/1VQdAZj0Mpf_ZMxvoZOaCRp3uo6wOPuDC/view) |
+| `yolo11n.pt` (YOLO re-detector) | Inference | [download](https://drive.google.com/uc?export=download&id=1WUAArjVjMwrluMWBBlTqGO7NBkDy_CMv) · [view](https://drive.google.com/file/d/1WUAArjVjMwrluMWBBlTqGO7NBkDy_CMv/view) |
+| `osnet_x0_25_imagenet.pth` (OSNet descriptor) | Inference | [download](https://drive.google.com/uc?export=download&id=1rb8UN5ZzPKRc_xvtHlyDh-cSz88YX9hs) · [view](https://drive.google.com/file/d/1rb8UN5ZzPKRc_xvtHlyDh-cSz88YX9hs/view) |
+| `SiamABC_init_checkpoint.pth` (raw SiamABC, broken head) | Optional training-from-scratch init | [download](https://drive.google.com/uc?export=download&id=1sM88OYPNgu1-iLgcjn4OBt9rdXLEE9AW) · [view](https://drive.google.com/file/d/1sM88OYPNgu1-iLgcjn4OBt9rdXLEE9AW/view) |
+
+All four files also live in one [Google Drive folder](https://drive.google.com/drive/folders/1BRPhnBnU9CDLU5qQPv-zQeKtqv1HMsl4?usp=drive_link).
 
 ## Usage
 
@@ -144,6 +164,58 @@ reference CSV before submitting:
 ```bash
 python check_submission.py reference.csv submission.csv
 ```
+    
+## Training
+
+The training entry point is `src/training/train_head.py`. It fine-tunes the
+SiamABC classification + bbox head (backbone frozen) so the confidence score
+becomes discriminative. It is a **two-step** process: build a frame-level index
+from the raw videos, then fine-tune against it. All hyperparameters live in
+`src/config/training_config.yaml`. Run every command from the repo root.
+
+### Step 0 — Checkpoint the trainer starts from
+
+The training config (`model.weights_path`) starts from
+`checkpoints/inference_checkpoint.pth`, which is the same file as `model.pth`.
+After `python download.py`, make that name available:
+
+```bash
+cp checkpoints/model.pth checkpoints/inference_checkpoint.pth
+```
+
+> To instead fine-tune the raw (pre-fix) head, download
+> `SiamABC_init_checkpoint.pth` from the links above into `checkpoints/` and set
+> `model.weights_path` to it in `src/config/training_config.yaml`.
+
+### Step 1 — Build the dataset index
+
+This decodes the videos under `data/` into frames at `data/<dataset>/<seq>/img/`
+and writes the CSV index the training loader expects
+(`data/train_dataframe.csv`). Run it once per dataset:
+
+```bash
+python src/data_prep/build_dataset_index.py --data data
+```
+
+If the frames are already extracted, add `--skip-extraction` to only (re)build
+the CSV.
+
+### Step 2 — Fine-tune the head
+
+```bash
+python src/training/train_head.py --config src/config/training_config.yaml
+```
+
+Override the dataset CSV without editing the config with `--csv_path`:
+
+```bash
+python src/training/train_head.py --config src/config/training_config.yaml --csv_path data/train_dataframe.csv
+```
+
+Checkpoints are written to the `output.checkpoint_dir` set in the config
+(`training/checkpoints/training_run1/` by default) as `head_epoch_<NNN>.pth`. To
+run inference with a freshly trained checkpoint, point `model.pth` (or the
+SiamABC `weights_path` in `src/config/inference_config.yaml`) at it.
 
 ## Configuration
 

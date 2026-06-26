@@ -15,6 +15,7 @@ reacquisition. This branch is our **MTC-AIC4 Phase 2** submission.
 - [Installation](#installation)
 - [Usage](#usage)
 - [Configuration](#configuration)
+- [Profiler](#profiler)
 - [Authors](#authors)
 - [Citation](#citation)
 
@@ -150,6 +151,23 @@ Every setting lives in `src/config/inference_config.yaml` — model and tracker
 hyperparameters, the SiamABC/YOLO/OSNet checkpoint paths, and runtime switches.
 `predictor.py` reads from it and never overrides it, so the config is the single
 place to change behaviour.
+
+## Profiler
+
+`src/profiler.py` measures where SiamRAM spends its compute. It profiles each
+neural component, runs a real video to count how often each one fires, and
+prints two tables: a **GFLOPs breakdown** (weighted GFLOPs/frame, split into
+normal tracking vs occlusion-mode YOLO) and a **latency breakdown** (per-component
+ms/fps on the deployed backend, with an end-to-end estimate).
+
+Run it from the repo root — it defaults to the `RcCar4` sequence:
+
+```bash
+python src/profiler.py
+python src/profiler.py --video VIDEO.mp4 --annot ANNOT.txt  # different sequence
+python src/profiler.py --frames 200                         # 0 = full video
+python src/profiler.py --warmup 10 --reps 50                # faster, less precise
+```
 
 ## Authors
 

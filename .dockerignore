@@ -12,3 +12,7 @@ outputs/
 .venv/
 .vscode/
 .idea/
+data/
+trt_cache/
+*.log
+*.mp4

@@ -137,6 +137,7 @@ pydantic==2.13.3
 pydantic-core==2.46.3
 pyflakes==3.4.0
 pygments==2.20.0
+pynvvideocodec==2.1.0
 pyparsing==3.3.2
 pyreadline3==3.5.4 ; sys_platform == 'win32'
 pysocks==1.7.1

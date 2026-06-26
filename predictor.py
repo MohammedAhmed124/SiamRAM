@@ -301,19 +301,27 @@ def _nvv4l2decoder_available() -> bool:
         return False
 
 
-def _open_video(path: str) -> cv2.VideoCapture:
+def _open_video(path: str):
     """
     Open a video file for reading.
 
-    If the config turned on runtime.use_nvdec AND we are actually on a Jetson
-    (the nvv4l2decoder plugin is present), we build a GStreamer pipeline that
-    decodes the video on the Jetson's NVDEC hardware. That keeps the CPU free for
-    the rest of the pipeline and is far faster per frame than software decoding.
+    runtime.use_nvdec is the single master switch for hardware H.264 decode.
+    When it is on we pick the best NVDEC backend available for this machine and
+    fall back to the next option whenever one is missing, so turning it on never
+    crashes the run — it only loses the speed-up:
 
-    On anything else (an x86 machine, CI, the eval server) we fall back to the
-    normal OpenCV reader, which is exactly the original behaviour. We also fall
-    back if the GStreamer pipeline refuses to open for any reason, so choosing
-    the wrong option never crashes the run, it only loses the hardware speed-up.
+      1. Jetson: if the nvv4l2decoder GStreamer plugin is present we decode on
+         the Jetson's NVDEC block through a GStreamer pipeline (original branch).
+      2. x86 + CUDA: otherwise we try PyNvVideoCodec (NvdecVideoCapture), which
+         decodes on the desktop/server GPU's NVDEC block. It is API-compatible
+         with the subset of cv2.VideoCapture this module uses, so run_tracker
+         consumes it unchanged.
+      3. CPU: if neither hardware decoder opens the file we fall back to the
+         plain OpenCV reader, which is exactly the original behaviour.
+
+    The returned object is always either a cv2.VideoCapture or an
+    NvdecVideoCapture; both expose isOpened(), read(), get() and release(), the
+    only capture methods run_tracker calls.
     """
     if _USE_NVDEC and _nvv4l2decoder_available():
         # A few appsink options worth explaining:
@@ -340,6 +348,17 @@ def _open_video(path: str) -> cv2.VideoCapture:
             cap.release()
         except Exception:
             pass
+    if _USE_NVDEC:
+        try:
+            from utils.nvdec_reader import NvdecVideoCapture
+
+            nvdec_cap = NvdecVideoCapture(path)
+            if nvdec_cap.isOpened():
+                return nvdec_cap
+            nvdec_cap.release()
+        except Exception:
+            pass
+
     return cv2.VideoCapture(path)
 
 

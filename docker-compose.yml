@@ -5,6 +5,8 @@ services:
       dockerfile: Dockerfile.gpu
     image: siamram-gpu
     command: ["bash", "-lc", "sleep infinity"]
+    environment:
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
     volumes:
       - .:/app
       - siamram_venv_gpu:/app/.venv

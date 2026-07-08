@@ -10,6 +10,8 @@ services:
     volumes:
       - .:/app
       - siamram_venv_gpu:/app/.venv
+      - C:/Users/afara/PycharmProjects/SiamRAM-final/Data:/app/data:ro
+      - siamram_training:/app/training_data
     ipc: host
     deploy:
       resources:
@@ -20,3 +22,4 @@ services:
 
 volumes:
   siamram_venv_gpu:
+  siamram_training:

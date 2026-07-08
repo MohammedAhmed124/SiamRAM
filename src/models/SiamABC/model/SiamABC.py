@@ -237,6 +237,7 @@ class SiamABCNet(nn.Module):
             conv_block=conv_block,
             inference_mode=inference_mode,
             norm_lambda=norm_lambda,
+            model_size=model_size,
         )
         iou_hidden = max(32, adjust_channels // 2)
         self.iou_head = (

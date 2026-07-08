@@ -16,6 +16,8 @@
 # the submission still works no matter which directory you launch it from. If you
 # ever want to point at a different checkpoint, change it here, not in the code.
 weights_path: "checkpoints/model.pth"
+# OPTION: To switch to SiamABC-Tiny, uncomment the line below and comment the model.pth line above:
+# weights_path: "checkpoints/model_S_Tiny_v1.pt"
 
 # =============================================================================
 # trt_engine: all TensorRT / FP16 options (GPU-only), grouped in one place.
@@ -87,6 +89,7 @@ model:
   # Number of stacked tower blocks in the prediction head.
   towernum: 2
   # Preset model size (S / M / L) controlling channel depth.
+  # Use M for default SiamABC-Medium, or S for SiamABC-Tiny.
   model_size: M
   # How many backbone stages to keep — caps depth of feature extraction.
   max_layer: 4

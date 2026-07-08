@@ -44,6 +44,10 @@ _GDRIVE_IDS = {
     "osnet_x0_25_imagenet.pth":  "1rb8UN5ZzPKRc_xvtHlyDh-cSz88YX9hs",
 }
 
+_URLS = {
+    "model_S_Tiny_v1.pt":        "https://github.com/wvuvl/SiamABC/raw/main/assets/S_Tiny/model_S_Tiny_v1.pt"
+}
+
 
 def _is_valid_file(path: str) -> bool:
     """
@@ -106,9 +110,55 @@ def download_checkpoint(
     return checkpoint_path
 
 
+def download_from_url(
+    url: str,
+    filename: str,
+    checkpoint_dir: str = "./checkpoints",
+) -> str:
+    """
+    Download one checkpoint from a URL, unless we already have it.
+
+    Args:
+        url:            the URL to fetch from.
+        filename:       what to name the file inside checkpoint_dir.
+        checkpoint_dir: the folder to save it in.
+
+    Returns:
+        The path to the checkpoint file on disk.
+    """
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    checkpoint_path = os.path.join(checkpoint_dir, filename)
+
+    if _is_valid_file(checkpoint_path):
+        _siamram_log(f"'{filename}' already exists — skipping", phase="CKPT", status="ready")
+        return checkpoint_path
+
+    _siamram_log(f"downloading '{filename}' from URL", phase="CKPT", status="build")
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        )
+        with urllib.request.urlopen(req) as response, open(checkpoint_path, "wb") as out_file:
+            out_file.write(response.read())
+    except Exception as e:
+        if os.path.exists(checkpoint_path):
+            os.remove(checkpoint_path)
+        raise RuntimeError(f"Download of '{filename}' from URL failed: {e}")
+
+    if not _is_valid_file(checkpoint_path):
+        raise RuntimeError(
+            f"Download of '{filename}' failed or produced an invalid file."
+        )
+
+    _siamram_log(f"'{filename}' saved to '{checkpoint_path}'", phase="CKPT", status="done")
+    return checkpoint_path
+
+
 def download_all_checkpoints(checkpoint_dir: str = "./checkpoints") -> dict:
     """
-    Download all three checkpoints the tracker needs.
+    Download all checkpoints the tracker needs, including the tiny SiamABC checkpoint.
 
     Args:
         checkpoint_dir: the folder to save the checkpoints in.
@@ -120,6 +170,12 @@ def download_all_checkpoints(checkpoint_dir: str = "./checkpoints") -> dict:
     for filename, file_id in _GDRIVE_IDS.items():
         paths[filename] = download_checkpoint(
             file_id=file_id,
+            filename=filename,
+            checkpoint_dir=checkpoint_dir,
+        )
+    for filename, url in _URLS.items():
+        paths[filename] = download_from_url(
+            url=url,
             filename=filename,
             checkpoint_dir=checkpoint_dir,
         )

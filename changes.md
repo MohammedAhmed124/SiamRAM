@@ -1,4 +1,4 @@
-﻿# SiamRAM — Model Changes & Additions
+# SiamRAM — Model Changes & Additions
 
 This document describes two significant changes made to the SiamRAM tracker on the
 `feature/siamabc-tiny` branch:
@@ -243,4 +243,86 @@ All changes are on the `feature/siamabc-tiny` branch.
 
 ```
 git checkout feature/siamabc-tiny
+```
+
+---
+
+## 3. SiamABC-Tiny Classification Head Fine-Tuning on Hard-Negatives
+
+After the Medium fine-tuning run, the same process was applied to the **SiamABC-Tiny** model with minor adjustments.
+
+### Differences from the Medium run
+
+| Setting | Medium run | Tiny run |
+|---|---|---|
+| `weights_path` | `checkpoints/model.pth` | `checkpoints/model_S_Tiny_v1.pt` |
+| `model_size` | `M` | `S` |
+| `pretrained` | `true` | `false` (FBNet has no online weights) |
+| `num_epochs` | 20 | **25** |
+| Checkpoint size | 42 MB/epoch | **9.1 MB/epoch** (smaller model, cls head only) |
+| Checkpoint location | Docker named volume | **Local project dir** (directly accessible on host) |
+| Starting cls loss | ~0.0073 | ~0.051 (Tiny head had more to learn) |
+| Final cls loss (ep. 25) | train=0.0046 / val=0.0050 | **train=0.0049 / val=0.0071** |
+
+Both models converged cleanly with no overfitting. The Tiny head started from a much higher initial loss (~10x) because the FBNet-based classification branch had never seen any hard-negatives at all.
+
+### Checkpoint Location
+
+All 25 checkpoints are saved directly on the **host machine** — no Docker copy step needed:
+
+```
+C:\Users\afara\PycharmProjects\SiamRAM-master\training\checkpoints\cls_hardneg_tiny_run1\
+    head_epoch_001.pth  (9.1 MB)
+    ...
+    head_epoch_025.pth  (9.1 MB)  <- recommended for use
+```
+
+### How to Use the Fine-Tuned Tiny Weights
+
+The fine-tuned checkpoint contains **only the cls head parameters** (with `module.` prefixed keys). You need to merge it with the base Tiny weights before using it at inference:
+
+```python
+import torch
+
+base = torch.load("checkpoints/model_S_Tiny_v1.pt", map_location="cpu")
+finetuned = torch.load(
+    "training/checkpoints/cls_hardneg_tiny_run1/head_epoch_025.pth",
+    map_location="cpu"
+)
+
+# Strip the "module." prefix and keep only cls head keys
+cls_keys = {
+    k.replace("module.", ""): v
+    for k, v in finetuned.items()
+    if any(x in k for x in ["cls_encode", "cls_dw", "cls_tower", "cls_pred"])
+}
+
+base.update(cls_keys)
+torch.save(base, "checkpoints/model_S_Tiny_cls_finetuned.pth")
+print(f"Merged {len(cls_keys)} cls keys into base Tiny weights")
+```
+
+Then update `inference_config.yaml`:
+
+```yaml
+weights_path: "checkpoints/model_S_Tiny_cls_finetuned.pth"
+
+model:
+  model_size: S
+  pretrained: false
+```
+
+> **Fine-tuned Tiny weights download link:**
+> <!-- TODO: replace this line with the direct download URL once uploaded -->
+> `model_S_Tiny_cls_finetuned.pth` — *link to be added after weights are uploaded*
+
+### How to Reproduce
+
+```bash
+# training_config.yaml is already committed with Tiny settings.
+docker exec siamram-master-gpu-1 bash -c "
+  cd /app && python src/training/train_head.py \
+    --config src/config/training_config.yaml
+"
+# Checkpoints appear live in training/checkpoints/cls_hardneg_tiny_run1/ as each epoch finishes.
 ```

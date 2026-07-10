@@ -1,6 +1,5 @@
-data:
-  # Path to the combined CSV built by build_dataset_index.py.
-  # Written to the writable training_data volume at /app/training_data/.
+﻿data:
+  # CSV built by build_dataset_index.py (stored in the persistent named volume).
   csv_path: "training_data/train_dataframe.csv"
   seed: 42
 
@@ -22,72 +21,66 @@ tracking:
   occlusion_max_patches: 2
   search_blur_prob: 0.15
   search_jpeg_prob: 0.15
-  # Hard-negative sampling probabilities - higher values push the head to
-  # see more cross-sequence negatives (completely wrong target) and
-  # same-class distractors (hardest negatives: correct class, wrong instance).
-  neg_cross_seq_prob: 0.55   # up from 0.45 - more cross-sequence negatives
-  neg_same_class_prob: 0.75  # up from 0.70 - more same-class distractors
-  neg_shifted_prob: 0.40     # unchanged - keeps boundary-case negatives
+  # Hard-negative sampling probabilities.
+  neg_cross_seq_prob: 0.55
+  neg_same_class_prob: 0.75
+  neg_shifted_prob: 0.40
 
 dataset:
-  # 8000 training samples per epoch across ~320+ sequences from datasets 2-5.
   train_num_samples: 8000
-  # 65% of training samples are hard-negatives (search crop does NOT contain
-  # the target). This forces the classification head to discriminate rather
-  # than always firing "positive".
-  train_neg_ratio: 0.65
+  train_neg_ratio: 0.65      # 65% negatives - same as Medium run
   val_num_samples: 800
-  val_neg_ratio: 0.5          # balanced for honest val loss measurement
+  val_neg_ratio: 0.5
   val_split_ratio: 0.1
 
 dataloader:
   train_batch_size: 32
   val_batch_size: 32
-  num_workers: 4              # parallel workers inside Docker GPU container
+  num_workers: 4
 
 model:
   _target_: models.SiamABC.model.SiamABC.SiamABCNet
-  # Finetune the default Medium model (ResNet-50 backbone + CorrelationConcatAtt)
-  weights_path: "checkpoints/model.pth"
+  # SiamABC-Tiny: FBNet backbone, no correlation-level attention.
+  weights_path: "checkpoints/model_S_Tiny_v1.pt"
   backbone: custom_fbnet
-  pretrained: true
+  # FBNet has no online pretrained weights - must be false for model_size S.
+  pretrained: false
   num_channels: 3
   align: false
   img_size: 256
   stride: 2
   conv_block: sep_conv
   towernum: 2
-  model_size: M
+  model_size: S              # S = Tiny
   max_layer: 4
   build_simsiam_heads: false
   build_iou_head: true
 
 training:
-  num_epochs: 20
+  num_epochs: 25
   start_epoch: 1
-  # cls_head_only: freeze backbone + bbox head, train ONLY the classification
-  # branch (cls_encode, cls_dw, cls_tower, cls_pred). bbox_weight and
-  # iou_weight are automatically zeroed by build_criterion() in this mode.
   train_mode: cls_head_only
-  # Two-stage schedule is disabled (stage1_epochs: 0). Single-mode run.
   stage1_epochs: 0
   stage1_mode: cls_head_only
   stage2_mode: cls_head_only
   stage2_warmup_epochs: 0
-  backbone_lr: 0.0            # backbone is fully frozen in cls_head_only mode
-  head_lr: 1.0e-4             # conservative LR - fine-tuning not training from scratch
+  backbone_lr: 0.0
+  head_lr: 1.0e-4
   weight_decay: 1.0e-4
-  warmup_epochs: 2            # short linear warm-up before cosine decay
+  warmup_epochs: 2
   eta_min: 1.0e-6
   batch_level_logs: true
-  log_every: 10               # log every 10 steps (250 steps/epoch @ bs32)
+  log_every: 10
 
 loss:
   cls_weight: 1.0
-  bbox_weight: 1.0            # zeroed automatically in cls_head_only mode
-  iou_weight: 1.0             # zeroed automatically in cls_head_only mode
-  focal_alpha: 0.25           # standard focal loss alpha for class imbalance
-  focal_gamma: 2.0            # up from 1.5 - stronger focus on hard misclassified examples
+  bbox_weight: 1.0           # zeroed automatically in cls_head_only mode
+  iou_weight: 1.0            # zeroed automatically in cls_head_only mode
+  focal_alpha: 0.25
+  focal_gamma: 2.0
 
 output:
-  checkpoint_dir: "training_data/checkpoints/cls_hardneg_run1/"
+  # Under /app/training/ which is the bind-mounted project dir ->
+  # directly accessible on the host at:
+  # C:\Users\afara\PycharmProjects\SiamRAM-master\training\checkpoints\cls_hardneg_tiny_run1\
+  checkpoint_dir: "training/checkpoints/cls_hardneg_tiny_run1/"

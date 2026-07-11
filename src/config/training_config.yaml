@@ -47,7 +47,7 @@ model:
   stride: 2
   conv_block: sep_conv
   towernum: 2
-  model_size: M
+  model_size: S
   max_layer: 4
   build_simsiam_heads: false
   build_iou_head: true

@@ -42,10 +42,11 @@ _GDRIVE_IDS = {
     "model.pth":                 "1VQdAZj0Mpf_ZMxvoZOaCRp3uo6wOPuDC",
     "yolo11n.pt":                "1WUAArjVjMwrluMWBBlTqGO7NBkDy_CMv",
     "osnet_x0_25_imagenet.pth":  "1rb8UN5ZzPKRc_xvtHlyDh-cSz88YX9hs",
+    "tiny_checkpoint.pth":       "1j8pj2P7F1__sIqSWjSASbL1QzzH6gdZ0"
 }
 
 _URLS = {
-    "model_S_Tiny_v1.pt":        "https://github.com/wvuvl/SiamABC/raw/main/assets/S_Tiny/model_S_Tiny_v1.pt"
+    "model_S_Tiny_v1.pt":        "https://github.com/wvuvl/SiamABC/raw/master/assets/S_Tiny/model_S_Tiny_v1.pt"
 }
 
 

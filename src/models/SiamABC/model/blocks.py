@@ -436,7 +436,7 @@ class BoxTower(nn.Module):
         gaussian_map=False,
         inference_mode: bool = False,
         norm_lambda: float = 0.1,
-        model_size: str = "M",
+        model_size: str = "S",
     ):
         """
         Initialise the BoxTower regression and classification head.
@@ -449,7 +449,7 @@ class BoxTower(nn.Module):
             gaussian_map (bool): Reserved for auxiliary heatmap prediction.
             inference_mode (bool): Whether to build the block for inference.
             norm_lambda (float): Normalization momentum factor.
-            model_size (str): Preset model size ('S' or 'M').
+            model_size (str): Preset model size ('S' or 'tiny').
         """
         super().__init__()
         tower = []
@@ -462,7 +462,7 @@ class BoxTower(nn.Module):
             in_channels=inchannels, out_channels=outchannels, conv_block=conv_block
         )
 
-        if model_size == "S":
+        if model_size == "tiny":
             self.cls_dw = CorrelationConcat(
                 num_channels=outchannels,
                 inference_mode=inference_mode,

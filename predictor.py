@@ -323,10 +323,12 @@ def _open_jetson_gstreamer(path: str):
     """Open and validate Jetson NVDEC, preserving its already-decoded frame."""
     gst = (
         f"filesrc location={_quote_gstreamer_path(path)} ! "
-        "qtdemux ! queue ! parsebin ! nvv4l2decoder ! "
+        "qtdemux ! queue max-size-buffers=2 max-size-bytes=0 "
+        "max-size-time=0 ! parsebin ! "
+        "nvv4l2decoder num-extra-surfaces=0 ! "
         "nvvidconv ! video/x-raw,format=BGRx ! "
         "videoconvert ! video/x-raw,format=BGR ! "
-        "appsink sync=false drop=false max-buffers=4"
+        "appsink sync=false drop=false max-buffers=1"
     )
     capture = None
     try:

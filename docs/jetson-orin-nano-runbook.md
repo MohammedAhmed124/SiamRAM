@@ -115,9 +115,16 @@ JetPack's GStreamer-enabled OpenCV wheel.
 uv pip install --python .venv/bin/python \
   --no-deps ultralytics==8.4.45
 
-uv pip install --python .venv/bin/python --no-deps \
+python -c 'import Cython, numpy, scipy; print("torchreid build inputs: OK")'
+
+uv pip install --python .venv/bin/python \
+  --no-deps --no-build-isolation \
   'git+https://github.com/KaiyangZhou/deep-person-reid.git@f8cd150fdf77e8d9e1ed143b7f308c2c609ded50'
 ```
+
+The torchreid command also requires `--no-build-isolation`: its legacy
+`setup.py` imports NumPy while building. An isolated uv build environment does
+not inherit JetPack's system NumPy and fails with `No module named 'numpy'`.
 
 Verify imports and make sure OpenCV still has GStreamer:
 
@@ -225,7 +232,9 @@ The application checks OpenCV's GStreamer support and all required pipeline
 elements. It then opens the pipeline, decodes one frame to prove delayed
 GStreamer linking succeeded, and returns that prefetched frame as frame zero.
 This avoids losing the first frame. The appsink uses `drop=false`, so frames are
-not discarded when inference is slower than decoding.
+not discarded when inference is slower than decoding. The pipeline requests no
+extra decoder surfaces and retains only one decoded appsink frame, which keeps
+peak memory lower for the 2160x3840 videos in this subset.
 
 Run the application-level probe on one downloaded video:
 
@@ -254,6 +263,33 @@ The output should include:
 
 If it instead reports CPU fallback, rerun the checks in section 1 and confirm
 that uv did not install a second OpenCV package inside `.venv`.
+
+If the GStreamer log contains `NvMapMemAllocInternalTagged` with `error 12`, the
+decoder was found but Jetson could not allocate its required NVMM surfaces. Run
+these unprivileged checks before loading any models:
+
+```bash
+free -h
+ps -eo pid,rss,comm --sort=-rss | head -15
+
+test -f /sys/fs/cgroup/memory.current && \
+  cat /sys/fs/cgroup/memory.current
+test -f /sys/fs/cgroup/memory.max && \
+  cat /sys/fs/cgroup/memory.max
+
+gst-launch-1.0 -e \
+  filesrc location=data_subset/dataset1/cows/cows.mp4 ! \
+  qtdemux ! queue max-size-buffers=2 max-size-bytes=0 max-size-time=0 ! \
+  h264parse ! nvv4l2decoder num-extra-surfaces=0 ! \
+  fakesink sync=false
+```
+
+If the standalone `gst-launch-1.0` command reports the same allocation error,
+the problem is below OpenCV and SiamRAM. Stop other GPU processes or restart the
+workspace/device, then run this decoder probe before TensorRT engines or models
+are loaded. Also check whether `memory.max` imposes a container limit. Do not add
+`disable-dpb=true`: `cows.mp4` contains B-frames, and NVIDIA supports that option
+only for streams without B-frames. CPU fallback remains correct but is slower.
 
 ## 7. Run inference
 

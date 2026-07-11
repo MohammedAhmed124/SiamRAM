@@ -27,7 +27,9 @@ def test_jetson_capture_validates_and_preserves_first_frame() -> None:
 
     assert wrapped is not None
     pipeline = open_cap.call_args.args[0]
-    assert "parsebin ! nvv4l2decoder" in pipeline
+    assert "nvv4l2decoder num-extra-surfaces=0" in pipeline
+    assert "queue max-size-buffers=2" in pipeline
+    assert "appsink sync=false drop=false max-buffers=1" in pipeline
     assert 'filesrc location="' in pipeline
     ok, frame = wrapped.read()
     assert ok and frame is first

@@ -326,21 +326,12 @@ class _PrefetchedCapture:
 
 class _BGRxCapture(_PrefetchedCapture):
     """
-    Adapter that strips the padding byte from 4-channel BGRx frames.
+    Adapter that preserves 4-channel BGRx frames until tracker prescaling.
 
     The VIC engine behind nvvidconv cannot emit 24-bit BGR, so the pipeline
-    delivers BGRx and the fourth byte is dropped here with cv2.cvtColor,
-    which runs SIMD-vectorised and multithreaded — far cheaper than the
-    single-threaded full-frame conversion GStreamer's videoconvert would do.
+    delivers BGRx.  The tracker drops the fourth byte after reducing the frame
+    to its working resolution, avoiding a full-resolution colour conversion.
     """
-
-    def read(self):
-        ok, frame = super().read()
-        if not ok or frame is None:
-            return ok, frame
-        if frame.ndim == 3 and frame.shape[2] == 4:
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
-        return True, frame
 
 
 def _try_gstreamer_capture(pipeline: str):
@@ -367,18 +358,19 @@ def _open_jetson_gstreamer(path: str):
     Open and validate Jetson NVDEC, preserving its already-decoded frame.
 
     The pipeline stops at BGRx: nvvidconv (VIC hardware) writes BGRx straight
-    into system memory and the padding byte is stripped on the CPU by
-    _BGRxCapture. Asking GStreamer for BGR instead would insert videoconvert,
-    whose single-threaded full-frame conversion caps 4K decode at ~14 fps.
+    into system memory. _BGRxCapture preserves it until the tracker has
+    downscaled the frame, then the padding byte is stripped on the smaller
+    image. Asking GStreamer for BGR instead would insert videoconvert, whose
+    single-threaded full-frame conversion caps 4K decode at ~14 fps.
     """
     head = (
         f"filesrc location={_quote_gstreamer_path(path)} ! "
         "qtdemux ! queue max-size-buffers=2 max-size-bytes=0 "
         "max-size-time=0 ! parsebin ! "
-        "nvv4l2decoder num-extra-surfaces=0 ! "
+        "nvv4l2decoder enable-max-performance=1 num-extra-surfaces=2 ! "
         "nvvidconv ! video/x-raw,format=BGRx ! "
     )
-    tail = "appsink sync=false drop=false max-buffers=1"
+    tail = "appsink sync=false drop=false max-buffers=2"
 
     capture, first_frame = _try_gstreamer_capture(head + tail)
     if capture is not None:

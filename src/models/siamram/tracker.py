@@ -4057,17 +4057,22 @@ class SiamRAMExperimentTracker:
         Downscale frame to at most the configured long-edge cap.
         Uses self._frame_scale set once during initialize().
 
-        Returns the original frame unchanged if _frame_scale == 1.0 (no copy,
-        no allocation — zero cost for inputs already at or below the cap).
+        BGRx input is resized before its padding channel is stripped, avoiding
+        a full-resolution colour conversion. Three-channel input is returned
+        unchanged when _frame_scale == 1.0.
         """
         if self._frame_scale == 1.0:
-            return frame
-        h, w = frame.shape[:2]
-        return cv2.resize(
-            frame,
-            (int(w * self._frame_scale), int(h * self._frame_scale)),
-            interpolation=cv2.INTER_LINEAR,
-        )
+            scaled = frame
+        else:
+            h, w = frame.shape[:2]
+            scaled = cv2.resize(
+                frame,
+                (int(w * self._frame_scale), int(h * self._frame_scale)),
+                interpolation=cv2.INTER_LINEAR,
+            )
+        if scaled.ndim == 3 and scaled.shape[2] == 4:
+            return cv2.cvtColor(scaled, cv2.COLOR_BGRA2BGR)
+        return scaled
 
     @property
     def running_dynamic_bbox(

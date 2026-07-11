@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import os
+import platform
 from pathlib import Path
 from typing import Sequence
 
@@ -12,6 +13,10 @@ import torch
 import torch.nn as nn
 
 _TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
+_MIB = 1 << 20
+_JETSON_WORKSPACE_BYTES = 256 * _MIB
+_JETSON_TACTIC_DRAM_BYTES = 512 * _MIB
+_DESKTOP_WORKSPACE_BYTES = 1 << 30
 _TRT_TO_TORCH = {
     trt.DataType.FLOAT: torch.float32,
     trt.DataType.HALF: torch.float16,
@@ -129,6 +134,7 @@ def _build_serialized_engine(
     *,
     fp16: bool,
     workspace_bytes: int,
+    tactic_dram_bytes: int | None,
 ) -> bytes:
     builder = trt.Builder(_TRT_LOGGER)
     network = builder.create_network(
@@ -141,6 +147,10 @@ def _build_serialized_engine(
 
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace_bytes)
+    if tactic_dram_bytes is not None and hasattr(trt.MemoryPoolType, "TACTIC_DRAM"):
+        config.set_memory_pool_limit(
+            trt.MemoryPoolType.TACTIC_DRAM, tactic_dram_bytes
+        )
     if fp16:
         if not builder.platform_has_fast_fp16:
             raise RuntimeError("FP16 requested but TensorRT reports no fast FP16 support")
@@ -149,6 +159,39 @@ def _build_serialized_engine(
     if serialized is None:
         raise RuntimeError("TensorRT failed to build the serialized engine")
     return bytes(serialized)
+
+
+def _memory_limit_from_env(name: str) -> int | None:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return None
+    try:
+        value_mb = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a positive integer number of MiB") from exc
+    if value_mb <= 0:
+        raise ValueError(f"{name} must be a positive integer number of MiB")
+    return value_mb * _MIB
+
+
+def _resolve_builder_memory_limits(
+    workspace_bytes: int | None,
+    tactic_dram_bytes: int | None,
+) -> tuple[int, int | None]:
+    """Return bounded builder pools, with conservative defaults on Jetson."""
+    jetson = platform.machine().lower() in {"aarch64", "arm64"}
+    if workspace_bytes is None:
+        workspace_bytes = _memory_limit_from_env("SIAMRAM_TRT_WORKSPACE_MB")
+    if workspace_bytes is None:
+        workspace_bytes = (
+            _JETSON_WORKSPACE_BYTES if jetson else _DESKTOP_WORKSPACE_BYTES
+        )
+
+    if tactic_dram_bytes is None:
+        tactic_dram_bytes = _memory_limit_from_env("SIAMRAM_TRT_TACTIC_DRAM_MB")
+    if tactic_dram_bytes is None and jetson:
+        tactic_dram_bytes = _JETSON_TACTIC_DRAM_BYTES
+    return workspace_bytes, tactic_dram_bytes
 
 
 def _deserialize(serialized: bytes) -> trt.ICudaEngine:
@@ -178,7 +221,8 @@ def build_raw_trt_module(
     fp16: bool = False,
     cache_path: Path | None = None,
     rebuild_cache: bool = False,
-    workspace_bytes: int = 1 << 30,
+    workspace_bytes: int | None = None,
+    tactic_dram_bytes: int | None = None,
 ) -> RawTRTModule:
     """Build or load a static-shape raw TensorRT engine."""
     if cache_path is not None and cache_path.exists() and not rebuild_cache:
@@ -191,12 +235,26 @@ def build_raw_trt_module(
         except (OSError, RuntimeError):
             cache_path.unlink(missing_ok=True)
 
-    prepared = module.eval().to(device).float()
-    inputs = tuple(item.to(device, dtype=torch.float32) for item in example_inputs)
-    onnx_bytes = _export_onnx(prepared, inputs, input_names, output_names)
-    serialized = _build_serialized_engine(
-        onnx_bytes, fp16=fp16, workspace_bytes=workspace_bytes
+    workspace_bytes, tactic_dram_bytes = _resolve_builder_memory_limits(
+        workspace_bytes, tactic_dram_bytes
     )
+
+    prepared = module.eval().cpu().float()
+    export_inputs = tuple(
+        item.detach().to(device="cpu", dtype=torch.float32) for item in example_inputs
+    )
+    onnx_bytes = _export_onnx(prepared, export_inputs, input_names, output_names)
+    del export_inputs
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    serialized = _build_serialized_engine(
+        onnx_bytes,
+        fp16=fp16,
+        workspace_bytes=workspace_bytes,
+        tactic_dram_bytes=tactic_dram_bytes,
+    )
+    prepared.to(device)
+    inputs = tuple(item.to(device, dtype=torch.float32) for item in example_inputs)
     wrapper = RawTRTModule(_deserialize(serialized), device, input_names, output_names)
     _validate_finite(wrapper, inputs)
 

@@ -298,7 +298,14 @@ first run so the intended backend is unambiguous:
 
 ```bash
 export SIAMRAM_TRT_BACKEND=raw
+export SIAMRAM_TRT_WORKSPACE_MB=256
+export SIAMRAM_TRT_TACTIC_DRAM_MB=512
 ```
+
+The memory limits are also the automatic defaults on aarch64. They prevent the
+TensorRT optimizer's embedded-device tactic pool from consuming most of the
+Jetson's unified memory during engine compilation. They affect first-run engine
+selection, not model precision or output shapes.
 
 Run the eight-sequence subset:
 
@@ -387,15 +394,23 @@ No action is required. The Jetson path uses ONNX and raw TensorRT.
 
 ### TensorRT compilation runs out of memory
 
-Stop unrelated workloads, keep swap enabled, remove incomplete caches, and try
-again:
+Messages saying TensorRT is `Skipping tactic` are recoverable while compilation
+continues; wait unless the process exits or reports that it failed to build the
+serialized engine. If the build does fail, stop unrelated workloads, remove
+incomplete caches, lower the two builder pools, and try again:
 
 ```bash
 rm -rf trt_cache
 mkdir trt_cache
 export SIAMRAM_TRT_BACKEND=raw
+export SIAMRAM_TRT_WORKSPACE_MB=128
+export SIAMRAM_TRT_TACTIC_DRAM_MB=256
 python inference.py data_subset_manifest.json public_lb subset_predictions.csv
 ```
+
+If TensorRT cannot find an implementation at those limits, retry with the
+defaults (`256` and `512`). Build the engines before opening a video so NVDEC
+surfaces and TensorRT tactic profiling do not compete for unified memory.
 
 ### Google Drive throttles the download
 

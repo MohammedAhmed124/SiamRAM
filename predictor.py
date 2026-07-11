@@ -272,14 +272,19 @@ def _opencv_has_gstreamer() -> bool:
 
 @functools.lru_cache(maxsize=1)
 def _jetson_gstreamer_available() -> bool:
-    """Check every element used by the Jetson hardware-decode pipeline."""
+    """
+    Check every element used by the Jetson hardware-decode pipeline.
+
+    videoconvert is deliberately not required: only the legacy fallback
+    pipeline uses it, and when it is missing that fallback simply fails to
+    open and the caller drops to CPU decode.
+    """
     plugins = (
         "qtdemux",
         "queue",
         "parsebin",
         "nvv4l2decoder",
         "nvvidconv",
-        "videoconvert",
         "appsink",
     )
     return _opencv_has_gstreamer() and all(
@@ -319,32 +324,77 @@ class _PrefetchedCapture:
         self._capture.release()
 
 
+class _BGRxCapture(_PrefetchedCapture):
+    """
+    Adapter that strips the padding byte from 4-channel BGRx frames.
+
+    The VIC engine behind nvvidconv cannot emit 24-bit BGR, so the pipeline
+    delivers BGRx and the fourth byte is dropped here with cv2.cvtColor,
+    which runs SIMD-vectorised and multithreaded — far cheaper than the
+    single-threaded full-frame conversion GStreamer's videoconvert would do.
+    """
+
+    def read(self):
+        ok, frame = super().read()
+        if not ok or frame is None:
+            return ok, frame
+        if frame.ndim == 3 and frame.shape[2] == 4:
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+        return True, frame
+
+
+def _try_gstreamer_capture(pipeline: str):
+    """Open one GStreamer launch string and decode its first frame."""
+    capture = None
+    try:
+        capture = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+        if not capture.isOpened():
+            capture.release()
+            return None, None
+        success, first_frame = capture.read()
+        if not success or first_frame is None:
+            capture.release()
+            return None, None
+        return capture, first_frame
+    except Exception:
+        if capture is not None:
+            capture.release()
+        return None, None
+
+
 def _open_jetson_gstreamer(path: str):
-    """Open and validate Jetson NVDEC, preserving its already-decoded frame."""
-    gst = (
+    """
+    Open and validate Jetson NVDEC, preserving its already-decoded frame.
+
+    The pipeline stops at BGRx: nvvidconv (VIC hardware) writes BGRx straight
+    into system memory and the padding byte is stripped on the CPU by
+    _BGRxCapture. Asking GStreamer for BGR instead would insert videoconvert,
+    whose single-threaded full-frame conversion caps 4K decode at ~14 fps.
+    """
+    head = (
         f"filesrc location={_quote_gstreamer_path(path)} ! "
         "qtdemux ! queue max-size-buffers=2 max-size-bytes=0 "
         "max-size-time=0 ! parsebin ! "
         "nvv4l2decoder num-extra-surfaces=0 ! "
         "nvvidconv ! video/x-raw,format=BGRx ! "
-        "videoconvert ! video/x-raw,format=BGR ! "
-        "appsink sync=false drop=false max-buffers=1"
     )
-    capture = None
-    try:
-        capture = cv2.VideoCapture(gst, cv2.CAP_GSTREAMER)
-        if not capture.isOpened():
-            capture.release()
-            return None
-        success, first_frame = capture.read()
-        if not success or first_frame is None:
-            capture.release()
-            return None
+    tail = "appsink sync=false drop=false max-buffers=1"
+
+    capture, first_frame = _try_gstreamer_capture(head + tail)
+    if capture is not None:
+        if first_frame.ndim == 3 and first_frame.shape[2] == 4:
+            return _BGRxCapture(capture, first_frame)
+        # The backend already handed us 3-channel BGR; use it as-is.
         return _PrefetchedCapture(capture, first_frame)
-    except Exception:
-        if capture is not None:
-            capture.release()
+
+    # Older OpenCV GStreamer backends cannot negotiate BGRx at appsink; keep
+    # the legacy videoconvert pipeline so hardware decode still works there.
+    capture, first_frame = _try_gstreamer_capture(
+        head + "videoconvert ! video/x-raw,format=BGR ! " + tail
+    )
+    if capture is None:
         return None
+    return _PrefetchedCapture(capture, first_frame)
 
 
 def _log_decode_backend_once(backend: str, message: str, status: str) -> None:

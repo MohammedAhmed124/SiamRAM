@@ -436,6 +436,7 @@ class BoxTower(nn.Module):
         gaussian_map=False,
         inference_mode: bool = False,
         norm_lambda: float = 0.1,
+        model_size: str = "S",
     ):
         """
         Initialise the BoxTower regression and classification head.
@@ -446,6 +447,9 @@ class BoxTower(nn.Module):
             inchannels (int): Input channel count.
             outchannels (int): Hidden and output channel count for the branches.
             gaussian_map (bool): Reserved for auxiliary heatmap prediction.
+            inference_mode (bool): Whether to build the block for inference.
+            norm_lambda (float): Normalization momentum factor.
+            model_size (str): Preset model size ('S' or 'tiny').
         """
         super().__init__()
         tower = []
@@ -458,16 +462,28 @@ class BoxTower(nn.Module):
             in_channels=inchannels, out_channels=outchannels, conv_block=conv_block
         )
 
-        self.cls_dw = CorrelationConcatAtt(
-            num_channels=outchannels,
-            inference_mode=inference_mode,
-            norm_lambda=norm_lambda,
-        )
-        self.reg_dw = CorrelationConcatAtt(
-            num_channels=outchannels,
-            inference_mode=inference_mode,
-            norm_lambda=norm_lambda,
-        )
+        if model_size == "tiny":
+            self.cls_dw = CorrelationConcat(
+                num_channels=outchannels,
+                inference_mode=inference_mode,
+                norm_lambda=norm_lambda,
+            )
+            self.reg_dw = CorrelationConcat(
+                num_channels=outchannels,
+                inference_mode=inference_mode,
+                norm_lambda=norm_lambda,
+            )
+        else:
+            self.cls_dw = CorrelationConcatAtt(
+                num_channels=outchannels,
+                inference_mode=inference_mode,
+                norm_lambda=norm_lambda,
+            )
+            self.reg_dw = CorrelationConcatAtt(
+                num_channels=outchannels,
+                inference_mode=inference_mode,
+                norm_lambda=norm_lambda,
+            )
 
         for i in range(4):
             tower.append(
@@ -570,6 +586,8 @@ class CorrelationConcat(nn.Module):
         self,
         num_channels: int,
         num_corr_channels: int = 64,
+        inference_mode: bool = False,
+        norm_lambda: float = 0.1,
     ):
         """
         Initialise the CorrelationConcat module.
@@ -577,13 +595,15 @@ class CorrelationConcat(nn.Module):
         Args:
             num_channels (int): Output channel count.
             num_corr_channels (int): Number of correlation map channels.
+            inference_mode (bool): Whether to build the block for inference.
+            norm_lambda (float): Normalization momentum factor.
         """
         super().__init__()
 
         in_size = num_channels + num_corr_channels
-        self.enc = nn.Sequential(
+        self.enc = AdaptiveSequential(
             ConvBlock(in_size, num_channels, kernel_size=3, padding=1),
-            nn.BatchNorm2d(num_channels),
+            _make_norm(num_channels, inference_mode, norm_lambda),
             nn.ReLU(inplace=True),
         )
 
@@ -592,6 +612,7 @@ class CorrelationConcat(nn.Module):
         z,
         x,
         d,
+        lam: torch.Tensor = None,
     ):
         """
         Perform correlation via matrix multiplication and concatenation.
@@ -600,6 +621,7 @@ class CorrelationConcat(nn.Module):
             z (torch.Tensor): Template feature map (reshaped).
             x (torch.Tensor): Search region feature map.
             d (torch.Tensor): Original search features for residual connection.
+            lam (torch.Tensor, optional): Lambda value for test-time adaptation.
 
         Returns:
             torch.Tensor: Combined correlation features.
@@ -607,7 +629,9 @@ class CorrelationConcat(nn.Module):
         b, c, w, h = x.size()
         s = torch.matmul(z.permute(0, 2, 1), x.view(b, c, -1)).view(b, -1, w, h)
         s = torch.cat([s, d], dim=1)
-        s = self.enc(s)
+        if lam is None:
+            lam = torch.zeros(1, device=x.device)
+        s = self.enc(s, lam)
         return s
 
 

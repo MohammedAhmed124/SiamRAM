@@ -70,7 +70,17 @@ _LOGGED_DECODE_BACKENDS: set[str] = set()
 
 _CHECKPOINTS_DIR = _HERE / "checkpoints"
 
-_CONFIG_PATH = _SRC / "config" / "inference_config.yaml"
+# Which inference config to load. Defaults to the standard (Small) config so
+# existing behaviour is unchanged. Set SIAMRAM_INFERENCE_CONFIG to a path (or a
+# bare filename resolved against src/config) to run a different model, e.g.
+# SIAMRAM_INFERENCE_CONFIG=inference_config_tiny.yaml for SiamABC-Tiny.
+_DEFAULT_CONFIG_PATH = _SRC / "config" / "inference_config.yaml"
+_config_override = os.environ.get("SIAMRAM_INFERENCE_CONFIG", "").strip()
+if _config_override:
+    _override_path = Path(_config_override).expanduser()
+    _CONFIG_PATH = _override_path if _override_path.is_absolute() else (_SRC / "config" / _override_path)
+else:
+    _CONFIG_PATH = _DEFAULT_CONFIG_PATH
 
 
 def _resolve_checkpoint_path(path_value: str) -> str:

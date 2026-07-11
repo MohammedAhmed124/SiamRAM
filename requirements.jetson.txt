@@ -6,14 +6,17 @@
 # setup sessions on the machine whose prompt was codex@63db505fa9ee. It targets
 # Python 3.10 on a Jetson Orin Nano. Do NOT use the x86 CUDA requirements.txt.
 #
-# Create the venv with access to JetPack's Python packages, then install with:
+# Create the environment with uv and access to JetPack's Python packages, then
+# install with uv (python3-venv and an in-environment pip are not required):
 #
-#   python3 -m venv --system-site-packages .venv
+#   uv venv --python /usr/bin/python3 --system-site-packages .venv
 #   source .venv/bin/activate
-#   python -m pip install --upgrade pip wheel
-#   python -m pip install -r requirements.jetson.txt --no-build-isolation
-#   python -m pip install --no-deps ultralytics==8.4.45
-#   python -m pip install --no-deps \
+#   uv pip install --python .venv/bin/python 'setuptools<60' wheel
+#   uv pip install --python .venv/bin/python \
+#       --no-deps --no-build-isolation -r requirements.jetson.txt
+#   uv pip install --python .venv/bin/python \
+#       --no-deps ultralytics==8.4.45
+#   uv pip install --python .venv/bin/python --no-deps \
 #       git+https://github.com/KaiyangZhou/deep-person-reid.git@f8cd150fdf77e8d9e1ed143b7f308c2c609ded50
 #
 # Before installing, this must succeed:
@@ -34,6 +37,14 @@
 # torch_tensorrt. YOLO already uses Ultralytics' native TensorRT engine export.
 # Set SIAMRAM_TRT_BACKEND=raw to force the same path elsewhere. torch_tensorrt is
 # intentionally absent from this file.
+#
+# IMPORTANT UV NOTE:
+# This file is a flat, explicitly enumerated Jetson runtime dependency set. It
+# MUST be installed with --no-deps. uv otherwise resolves timm's and
+# ultralytics-thop's declared dependencies from PyPI and installs torch and
+# torchvision into .venv, shadowing NVIDIA's CUDA-enabled system builds. The
+# same resolution can replace JetPack's NumPy and Pillow. Do not remove
+# --no-deps from the command above.
 #
 # Some packages are deliberately MISSING from this list, on purpose:
 #
@@ -62,7 +73,7 @@
 #                           opencv-python-headless, which would clobber the
 #                           base OpenCV described above.
 #
-# IMPORTANT: keep the venv's system-site-packages access. The earlier setup hit a
+# IMPORTANT: keep the uv environment's system-site-packages access. The earlier setup hit a
 # torchreid/numpy.distutils build failure on aarch64; setuptools<60 fixes that
 # specific failure when --no-build-isolation is used.
 # =============================================================================
@@ -113,6 +124,30 @@ iopath==0.1.10
 portalocker==3.2.0
 tabulate==0.10.0
 termcolor==3.3.0
+
+# Explicit safe transitive dependencies. These are listed because uv is invoked
+# with --no-deps to protect the JetPack-managed binary packages.
+beautifulsoup4==4.14.3
+soupsieve==2.8.3
+certifi==2026.6.17
+charset-normalizer==3.4.9
+idna==3.18
+urllib3==2.7.0
+PySocks==1.7.1
+humanfriendly==10.0
+huggingface-hub==0.29.3
+safetensors==0.8.0
+protobuf==7.35.1
+contourpy==1.3.2
+cycler==0.12.1
+fonttools==4.63.0
+kiwisolver==1.5.0
+pyparsing==3.3.2
+python-dateutil==2.9.0.post0
+joblib==1.5.3
+threadpoolctl==3.6.0
+Shapely==2.1.2
+wget==3.2
 
 # MobileCV is required by the SiamABC backbone blocks. torchreid is installed
 # separately with --no-deps using the command at the top of this file.

@@ -3,8 +3,9 @@
 This runbook sets up and runs SiamRAM in a managed Jetson Orin Nano workspace
 with JetPack 6.x. It assumes the system Python already provides CUDA, TensorRT,
 PyTorch, OpenCV, the NVIDIA GStreamer plugins, and the native build tools needed
-by Python packages. No root access or `sudo` commands are required. Run every
-command from an SSH shell on the Jetson.
+by Python packages. It also assumes `uv` is available. The `python3-venv` system
+package is not required. No root access or `sudo` commands are required. Run
+every command from an SSH shell on the Jetson.
 
 The deployment deliberately does not install Torch-TensorRT. On aarch64,
 SiamRAM automatically exports its PyTorch modules to ONNX and builds native
@@ -16,6 +17,7 @@ Ultralytics' native TensorRT engine export.
 ```bash
 uname -m
 python3 --version
+uv --version
 nvcc --version
 
 python3 - <<'PY'
@@ -79,28 +81,41 @@ system Python. A normal isolated venv would hide TensorRT and the
 GStreamer-enabled OpenCV build. Do not install or replace CUDA, PyTorch,
 TensorRT, OpenCV, GStreamer, or NVIDIA multimedia packages.
 
-Create and activate the environment:
+Create the environment with `uv`, exposing the system Python packages, then
+activate it. `uv` creates the environment directly and does not depend on
+`python3 -m venv` or the missing `python3-venv` package.
 
 ```bash
-python3 -m venv --system-site-packages .venv
+uv venv --python /usr/bin/python3 --system-site-packages .venv
 source .venv/bin/activate
-python -m pip install --upgrade pip wheel
 ```
 
-Install the safe dependency set:
+Install the build tools first because the remaining source packages are built
+without isolation, then install the safe dependency set. Use `uv pip`; a
+uv-created environment does not need to contain the `pip` module.
 
 ```bash
-python -m pip install -r requirements.jetson.txt --no-build-isolation
+uv pip install --python .venv/bin/python 'setuptools<60' wheel
+uv pip install --python .venv/bin/python \
+  --no-deps --no-build-isolation -r requirements.jetson.txt
 ```
+
+`--no-deps` is required here. Unlike pip, uv resolves transitive dependencies
+without treating the JetPack packages exposed through `--system-site-packages`
+as satisfying the solve. Without this flag, `timm` and `ultralytics-thop` make
+uv download PyPI builds of Torch and TorchVision, and other packages can make it
+replace NumPy or Pillow. `requirements.jetson.txt` therefore lists the safe
+runtime dependency closure explicitly.
 
 Install Ultralytics and torchreid without their declared dependencies. Both
 projects declare `opencv-python`; allowing pip to resolve it would replace
 JetPack's GStreamer-enabled OpenCV wheel.
 
 ```bash
-python -m pip install --no-deps ultralytics==8.4.45
+uv pip install --python .venv/bin/python \
+  --no-deps ultralytics==8.4.45
 
-python -m pip install --no-deps \
+uv pip install --python .venv/bin/python --no-deps \
   'git+https://github.com/KaiyangZhou/deep-person-reid.git@f8cd150fdf77e8d9e1ed143b7f308c2c609ded50'
 ```
 
@@ -110,7 +125,9 @@ Verify imports and make sure OpenCV still has GStreamer:
 python - <<'PY'
 import cv2
 import mobile_cv
+import numpy
 import onnx
+from pathlib import Path
 import tensorrt
 import torch
 import torchreid
@@ -119,6 +136,12 @@ import ultralytics
 assert torch.cuda.is_available()
 assert any("GStreamer" in line and "YES" in line.upper()
            for line in cv2.getBuildInformation().splitlines())
+venv = (Path.cwd() / ".venv").resolve()
+for name, module in {"torch": torch, "numpy": numpy, "cv2": cv2}.items():
+    module_path = Path(module.__file__).resolve()
+    assert venv not in module_path.parents, (
+        f"{name} shadows the JetPack package: {module_path}"
+    )
 print("Python environment: OK")
 print("torch:", torch.__version__)
 print("TensorRT:", tensorrt.__version__)
@@ -127,9 +150,9 @@ print("OpenCV:", cv2.__version__, cv2.__file__)
 PY
 ```
 
-If the GStreamer assertion fails, remove `.venv`, recreate it with
-`--system-site-packages`, and repeat the commands above. Do not fix it by
-installing `opencv-python` or `opencv-python-headless`.
+If the GStreamer assertion fails, remove `.venv`, recreate it with the `uv venv
+--system-site-packages` command above, and repeat the install commands. Do not
+fix it by installing `opencv-python` or `opencv-python-headless`.
 
 ## 4. Download checkpoints
 
@@ -230,7 +253,7 @@ The output should include:
 ```
 
 If it instead reports CPU fallback, rerun the checks in section 1 and confirm
-that pip did not install a second OpenCV package inside `.venv`.
+that uv did not install a second OpenCV package inside `.venv`.
 
 ## 7. Run inference
 
@@ -302,8 +325,24 @@ The environment was probably created without system packages. Recreate it:
 ```bash
 deactivate 2>/dev/null || true
 rm -rf .venv
-python3 -m venv --system-site-packages .venv
+uv venv --python /usr/bin/python3 --system-site-packages .venv
 source .venv/bin/activate
+```
+
+### uv tries to download Torch, TorchVision, NumPy, or OpenCV
+
+Stop the installation. The requirements command is missing `--no-deps`, or an
+older version of this runbook was used. Recreate the environment to remove any
+packages that may already shadow JetPack, then repeat section 3 exactly:
+
+```bash
+deactivate 2>/dev/null || true
+rm -rf .venv
+uv venv --python /usr/bin/python3 --system-site-packages .venv
+source .venv/bin/activate
+uv pip install --python .venv/bin/python 'setuptools<60' wheel
+uv pip install --python .venv/bin/python \
+  --no-deps --no-build-isolation -r requirements.jetson.txt
 ```
 
 ### Torch-TensorRT is missing

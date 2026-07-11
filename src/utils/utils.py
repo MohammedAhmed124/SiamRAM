@@ -691,14 +691,14 @@ def _osnet_cache_prefix(device: str) -> str:
         "fp16": bool(_OSNET_FP16),
         "torch": getattr(torch, "__version__", "unknown"),
     }
-    try:
-        import torch_tensorrt
+    from models.SiamABC.tracker.trt_engine.backend import (
+        backend_version,
+        select_trt_backend,
+    )
 
-        payload["torch_tensorrt"] = getattr(
-            torch_tensorrt, "__version__", "unknown"
-        )
-    except Exception:
-        payload["torch_tensorrt"] = "unavailable"
+    trt_backend = select_trt_backend()
+    payload["trt_backend"] = trt_backend
+    payload["trt_backend_version"] = backend_version(trt_backend)
     digest = hashlib.sha1(
         json.dumps(payload, sort_keys=True).encode("utf-8")
     ).hexdigest()[:16]

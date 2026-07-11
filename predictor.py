@@ -66,6 +66,7 @@ if os.environ.get("TORCH_LOGS") == "":
 
 
 _USE_NVDEC: bool = False
+_LOGGED_DECODE_BACKENDS: set[str] = set()
 
 _CHECKPOINTS_DIR = _HERE / "checkpoints"
 
@@ -229,15 +230,117 @@ def _nvv4l2decoder_available() -> bool:
     spawning a subprocess for every single video. If gst-inspect is missing or
     errors out we just treat the plugin as unavailable.
     """
+    return _jetson_gstreamer_available()
+
+
+@functools.lru_cache(maxsize=None)
+def _gstreamer_plugin_available(name: str) -> bool:
+    """Return whether one GStreamer element can be inspected successfully."""
     try:
         result = subprocess.run(
-            ["gst-inspect-1.0", "nvv4l2decoder"],
+            ["gst-inspect-1.0", name],
             capture_output=True,
             timeout=2,
+            check=False,
         )
         return result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+@functools.lru_cache(maxsize=1)
+def _opencv_has_gstreamer() -> bool:
+    """Return whether this OpenCV build can consume GStreamer pipelines."""
+    try:
+        return any(
+            "GStreamer" in line and "YES" in line.upper()
+            for line in cv2.getBuildInformation().splitlines()
+        )
     except Exception:
         return False
+
+
+@functools.lru_cache(maxsize=1)
+def _jetson_gstreamer_available() -> bool:
+    """Check every element used by the Jetson hardware-decode pipeline."""
+    plugins = (
+        "qtdemux",
+        "queue",
+        "parsebin",
+        "nvv4l2decoder",
+        "nvvidconv",
+        "videoconvert",
+        "appsink",
+    )
+    return _opencv_has_gstreamer() and all(
+        _gstreamer_plugin_available(plugin) for plugin in plugins
+    )
+
+
+def _quote_gstreamer_path(path: str) -> str:
+    """Quote a filename for a GStreamer launch string property."""
+    resolved = str(Path(path).expanduser().resolve())
+    escaped = resolved.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+class _PrefetchedCapture:
+    """VideoCapture adapter that returns a frame decoded during validation."""
+
+    def __init__(self, capture, first_frame) -> None:
+        self._capture = capture
+        self._first_frame = first_frame
+
+    def isOpened(self) -> bool:
+        return self._capture.isOpened()
+
+    def read(self):
+        if self._first_frame is not None:
+            frame = self._first_frame
+            self._first_frame = None
+            return True, frame
+        return self._capture.read()
+
+    def get(self, property_id: int) -> float:
+        return self._capture.get(property_id)
+
+    def release(self) -> None:
+        self._first_frame = None
+        self._capture.release()
+
+
+def _open_jetson_gstreamer(path: str):
+    """Open and validate Jetson NVDEC, preserving its already-decoded frame."""
+    gst = (
+        f"filesrc location={_quote_gstreamer_path(path)} ! "
+        "qtdemux ! queue ! parsebin ! nvv4l2decoder ! "
+        "nvvidconv ! video/x-raw,format=BGRx ! "
+        "videoconvert ! video/x-raw,format=BGR ! "
+        "appsink sync=false drop=false max-buffers=4"
+    )
+    capture = None
+    try:
+        capture = cv2.VideoCapture(gst, cv2.CAP_GSTREAMER)
+        if not capture.isOpened():
+            capture.release()
+            return None
+        success, first_frame = capture.read()
+        if not success or first_frame is None:
+            capture.release()
+            return None
+        return _PrefetchedCapture(capture, first_frame)
+    except Exception:
+        if capture is not None:
+            capture.release()
+        return None
+
+
+def _log_decode_backend_once(backend: str, message: str, status: str) -> None:
+    """Report the selected decoder once without printing for every sequence."""
+    if backend in _LOGGED_DECODE_BACKENDS:
+        return
+    _LOGGED_DECODE_BACKENDS.add(backend)
+    siamram_log(message, phase="DECODE", status=status)
 
 
 def _open_video(path: str):
@@ -263,31 +366,36 @@ def _open_video(path: str):
     only capture methods run_tracker calls.
     """
     if _USE_NVDEC and _nvv4l2decoder_available():
-        gst = (
-            f"filesrc location={path} ! "
-            "qtdemux ! h264parse ! nvv4l2decoder ! "
-            "nvvidconv ! video/x-raw,format=BGRx ! "
-            "videoconvert ! video/x-raw,format=BGR ! "
-            "appsink sync=false drop=false max-buffers=4"
-        )
-        try:
-            cap = cv2.VideoCapture(gst, cv2.CAP_GSTREAMER)
-            if cap.isOpened():
-                return cap
-            cap.release()
-        except Exception:
-            pass
+        cap = _open_jetson_gstreamer(path)
+        if cap is not None:
+            _log_decode_backend_once(
+                "jetson-gstreamer",
+                "Using Jetson nvv4l2decoder through OpenCV/GStreamer",
+                "ready",
+            )
+            return cap
     if _USE_NVDEC:
         try:
             from utils.nvdec_reader import NvdecVideoCapture
 
             nvdec_cap = NvdecVideoCapture(path)
             if nvdec_cap.isOpened():
+                _log_decode_backend_once(
+                    "pynvvideocodec",
+                    "Using PyNvVideoCodec NVDEC",
+                    "ready",
+                )
                 return nvdec_cap
             nvdec_cap.release()
         except Exception:
             pass
 
+    if _USE_NVDEC:
+        _log_decode_backend_once(
+            "opencv-cpu",
+            "Hardware decoder unavailable for this file; using OpenCV CPU decode",
+            "warn",
+        )
     return cv2.VideoCapture(path)
 
 

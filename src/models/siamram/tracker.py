@@ -3873,8 +3873,9 @@ class SiamRAMExperimentTracker:
 
         Mirrors what the SiamABC cache fingerprint records (see
         trt_engine/cache_utils.py) so the YOLO engine invalidates on the same
-        software changes. tensorrt / torch_tensorrt are imported lazily because
-        the non-TRT path never needs them.
+        software changes. TensorRT is imported lazily because the non-TRT path
+        never needs it. YOLO uses Ultralytics ONNX-to-engine export and does not
+        depend on Torch-TensorRT.
         """
         versions = {
             "torch": getattr(torch, "__version__", "unknown"),
@@ -3885,11 +3886,7 @@ class SiamRAMExperimentTracker:
             versions["tensorrt"] = getattr(tensorrt, "__version__", "unknown")
         except Exception:
             versions["tensorrt"] = "unknown"
-        try:
-            import torch_tensorrt
-            versions["torch_tensorrt"] = getattr(torch_tensorrt, "__version__", "unknown")
-        except Exception:
-            versions["torch_tensorrt"] = "unknown"
+        versions["trt_backend"] = "ultralytics_onnx"
         return versions
 
     @staticmethod

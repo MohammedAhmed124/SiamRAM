@@ -69,6 +69,57 @@ so subsequent runs skip the slow parts. Engines are fingerprinted with the
 TensorRT version and GPU, so a cache built by this container is only reused by
 this container — never copy `trt_cache/` between images or devices.
 
+## Using the published image on the Jetson
+
+The tested image is published at `docker.io/ysif8/siamram-jetson:jetpack72`
+(digest `sha256:b901825b...`). It already contains the code and pinned
+environment — the repo checkout on the Jetson is only needed for the things
+that deliberately live *outside* the image: evaluation videos, downloaded
+checkpoints, and the TensorRT engine cache.
+
+```bash
+# One-time host setup (JetPack 7.2 ships both; configure if not done)
+sudo nvidia-ctk runtime configure --runtime=docker
+sudo systemctl restart docker
+
+docker pull ysif8/siamram-jetson:jetpack72
+
+# 1) Certify the stack on the device (TRT engine build/run + NVDEC decode)
+docker run --rm --runtime nvidia ysif8/siamram-jetson:jetpack72 \
+    python docker/verify_stack.py --gpu
+
+# 2) Run inference. From the repo checkout (holds data/, checkpoints/,
+#    trt_cache/); manifest paths must match the mounted /app/data locations.
+docker run --rm --runtime nvidia --ipc host \
+    -v "$PWD/data:/app/data:ro" \
+    -v "$PWD/checkpoints:/app/checkpoints" \
+    -v "$PWD/trt_cache:/app/trt_cache" \
+    -v "$PWD/outputs:/app/outputs" \
+    ysif8/siamram-jetson:jetpack72 \
+    python inference.py /app/data/manifest.json public_lb /app/outputs/submission.csv
+```
+
+To use the compose file with the published image instead of a local build,
+pull first and tag it with the compose image name:
+
+```bash
+docker pull ysif8/siamram-jetson:jetpack72
+docker tag ysif8/siamram-jetson:jetpack72 siamram-jetson
+docker compose -f docker-compose.jetson.yml run --rm jetson \
+    python docker/verify_stack.py --gpu
+```
+
+(Compose only builds when the `siamram-jetson` image is absent locally, so
+the tag makes it use the pulled, tested artifact.)
+
+Notes:
+- The first inference run builds all TensorRT engines into `trt_cache/`
+  (persisted by the mount) and downloads any missing checkpoints into
+  `checkpoints/` (needs network once).
+- If the code in the repo checkout has diverged from the image, the image's
+  copy wins unless you bind-mount the repo over `/app` — don't do that for
+  judging; the submission is the image.
+
 ## Known caveats
 
 - **sm_87 kernels**: the cu130 PyTorch wheels ship no native Orin (sm_87)

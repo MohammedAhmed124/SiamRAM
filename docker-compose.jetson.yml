@@ -1,0 +1,40 @@
+# docker-compose.jetson.yml — Jetson Orin Nano / JetPack 7.2 (L4T r39.2).
+#
+# Host prerequisites (ship with the JetPack 7.2 ISO): Docker + NVIDIA
+# Container Toolkit configured for it (`sudo nvidia-ctk runtime configure
+# --runtime=docker`). On Jetson the iGPU is exposed through `runtime: nvidia`;
+# the dGPU-style `--gpus all` / device_requests syntax is NOT supported.
+#
+#   docker compose -f docker-compose.jetson.yml build
+#   docker compose -f docker-compose.jetson.yml run --rm jetson \
+#       python docker/verify_stack.py
+#   docker compose -f docker-compose.jetson.yml run --rm jetson \
+#       python inference.py test.json public_lb submission.csv
+#
+# Building on an x86_64 machine instead of the device needs qemu binfmt once:
+#   docker run --privileged --rm tonistiigi/binfmt --install arm64
+
+services:
+  jetson:
+    build:
+      context: .
+      dockerfile: Dockerfile.jetson
+    image: siamram-jetson
+    platform: linux/arm64
+    runtime: nvidia
+    ipc: host
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+    volumes:
+      # Persist the hardware-specific TensorRT engines (first build takes
+      # minutes) and the downloaded checkpoints across container runs.
+      - ./trt_cache:/app/trt_cache
+      - ./checkpoints:/app/checkpoints
+      # Mount the evaluation videos/manifest here if they live on the host:
+      # - ./data:/app/data
+    # Deliberately NO mem_limit / cgroup memory cap: NVDEC surfaces and
+    # TensorRT engine builds share Jetson unified memory, and a container
+    # memory.max causes NvMapMemAllocInternalTagged error 12
+    # (docs/jetson-orin-nano-runbook.md section 6).
+    command: ["bash", "-lc", "sleep infinity"]

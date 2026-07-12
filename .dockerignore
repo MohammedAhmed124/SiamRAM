@@ -16,3 +16,12 @@ data/
 trt_cache/
 *.log
 *.mp4
+*.rar
+SiamRAM_Ablation_Tables.pdf
+# Never let local secrets enter the build context / image (COPY . .).
+.env
+.env.*
+*.pem
+*.key
+id_rsa*
+*credentials*

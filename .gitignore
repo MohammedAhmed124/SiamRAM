@@ -207,6 +207,7 @@ training/checkpoints
 experiments/motion_decoupled_imm_pdaf/
 research
 trt_cache
+ablation/
 # Custom manifests
 custom_manifest.json
 car6_2_manifest.json

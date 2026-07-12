@@ -1,0 +1,134 @@
+# =============================================================================
+# requirements.jetson7.txt — Jetson Orin Nano / JetPack 7.2 container deps
+#
+# Companion to Dockerfile.jetson (Ubuntu 24.04, Python 3.12, CUDA 13,
+# TensorRT 10.16). Do NOT use this on bare-metal JetPack 6 — that is
+# requirements.jetson.txt — and do NOT use the x86 requirements.txt on Jetson.
+#
+# Like requirements.jetson.txt, this is a flat, fully enumerated dependency
+# set that MUST be installed with --no-deps: several packages below declare
+# opencv-python (which would replace Ubuntu's GStreamer-enabled cv2) or
+# torch/numpy (which would replace the CUDA wheels / the numpy 1.26 that
+# Ubuntu's cv2 ABI requires). Dockerfile.jetson runs:
+#
+#   pip install --no-deps --no-build-isolation -r requirements.jetson7.txt
+#   pip install --no-deps ultralytics==8.4.45
+#   pip install --no-deps --no-build-isolation \
+#       git+https://github.com/KaiyangZhou/deep-person-reid.git@f8cd150fdf77e8d9e1ed143b7f308c2c609ded50
+#
+# Deliberately MISSING (provided elsewhere):
+#   torch, torchvision   -> installed from download.pytorch.org/whl/cu130
+#                           (2.9.1+cu130 / 0.24.1+cu130, aarch64 wheels)
+#   tensorrt             -> apt python3-libnvinfer=10.16.1.11-1+cuda13.2,
+#                           visible through the --system-site-packages venv
+#   opencv, numpy        -> apt python3-opencv 4.6.0 (GStreamer+FFmpeg build)
+#                           and its matching python3-numpy 1.26; pinning numpy
+#                           here would break the cv2 ABI (numpy 2 is not
+#                           binary-compatible with modules built against 1.x)
+#   torch_tensorrt       -> intentionally absent; aarch64 uses the raw
+#                           ONNX->TensorRT backend (SIAMRAM_TRT_BACKEND=raw)
+#   albumentations       -> training-only, drags in opencv-python-headless
+#   pynvvideocodec       -> dGPU-only; Jetson NVDEC goes through GStreamer
+#
+# Changes vs requirements.jetson.txt (JetPack 6 / Python 3.10):
+#   onnx 1.17.0 -> 1.18.0   torch 2.9.1's CI-tested onnx, and exactly the
+#                           release the TensorRT 10.16 ONNX parser supports
+#                           (onnx-tensorrt release/10.16-GA). The tracker
+#                           exports at opset 17, well inside both ranges.
+#   setuptools<60 dropped   that pin was a py3.10/numpy.distutils workaround
+#                           and does not support Python 3.12.
+#   pillow/scipy/pandas/... added below: on JetPack 6 these came from the
+#                           l4t-ml base image; this container must carry them.
+# =============================================================================
+
+# Build tooling for the source builds (torchreid Cython extension, mobile-cv).
+Cython==3.0.11
+wheel==0.47.0
+
+# Packages the JetPack 6 base image used to provide (aarch64 cp312 wheels).
+pillow==12.2.0
+scipy==1.15.3
+pandas==2.3.3
+pytz==2025.2
+tzdata==2025.2
+
+# Core inference dependencies.
+omegaconf==2.3.0
+gdown==6.0.0
+fire==0.7.1
+got10k==0.1.3
+timm==1.0.26
+onnx==1.18.0
+ultralytics-thop==2.0.19
+py-cpuinfo==9.0.0
+# ultralytics 8.4.45 declares polars unconditionally (lazy-imported on several
+# utils paths). polars is a meta wheel; polars-runtime-32 is the actual
+# compiled engine (cp310-abi3 manylinux aarch64 wheel).
+polars==1.42.1
+polars-runtime-32==1.42.1
+
+# OSNet / torchreid dependencies. tensorboard is required because importing
+# the torchreid package reaches torch.utils.tensorboard (on JetPack 6 the
+# l4t-ml base provided it); its transitive closure follows (--no-deps).
+tensorboard==2.20.0
+tensorboard-data-server==0.7.2
+absl-py==2.3.1
+grpcio==1.74.0
+markdown==3.8.2
+werkzeug==3.1.3
+h5py==3.13.0
+future==1.0.0
+yacs==0.1.8
+chardet==5.2.0
+easydict==1.13
+six==1.17.0
+coloredlogs==15.0.1
+imageio==2.37.3
+matplotlib==3.10.9
+scikit-learn==1.7.2
+
+# Config / utility
+antlr4-python3-runtime==4.9.3
+hydra-core==1.3.2
+PyYAML==6.0.2
+einops==0.8.2
+tqdm==4.67.1
+typing_extensions==4.15.0
+filelock==3.18.0
+fsspec==2025.3.2
+requests==2.32.3
+packaging==25.0
+psutil==7.2.2
+cloudpickle==3.1.2
+diskcache==5.6.3
+iopath==0.1.10
+portalocker==3.2.0
+tabulate==0.10.0
+termcolor==3.3.0
+
+# Explicit safe transitive dependencies (required because of --no-deps).
+beautifulsoup4==4.14.3
+soupsieve==2.8.3
+certifi==2026.6.17
+charset-normalizer==3.4.9
+idna==3.18
+urllib3==2.7.0
+PySocks==1.7.1
+humanfriendly==10.0
+huggingface-hub==0.29.3
+safetensors==0.8.0
+protobuf==7.35.1
+contourpy==1.3.2
+cycler==0.12.1
+fonttools==4.63.0
+kiwisolver==1.5.0
+pyparsing==3.3.2
+python-dateutil==2.9.0.post0
+joblib==1.5.3
+threadpoolctl==3.6.0
+Shapely==2.1.2
+wget==3.2
+
+# MobileCV (SiamABC backbone blocks). torchreid is installed separately with
+# --no-deps --no-build-isolation; see the header.
+git+https://github.com/facebookresearch/mobile-vision.git@bb8465cfe06327c35b398f3cc0b30e2e668eb0dd

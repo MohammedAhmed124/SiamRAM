@@ -6,7 +6,7 @@ Usage
     from your_model_file import SiamABCNet
     from train import train_model
 
-    model = SiamABCNet(pretrained=True, model_size='S', max_layer=3)
+    model = SiamABCNet(pretrained=True, model_size='tiny', max_layer=3)
     # load your pre-trained weights here if needed:
     # model.load_state_dict(torch.load('siamambc_pretrained.pth'))
 

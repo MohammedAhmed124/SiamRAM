@@ -1,0 +1,156 @@
+# =============================================================================
+# requirements.jetson.txt — Jetson Orin Nano / JetPack 6.x dependencies
+#
+# READ THIS FIRST:
+# This is the on-device requirements file reconstructed from the June 24 Jetson
+# setup sessions on the machine whose prompt was codex@63db505fa9ee. It targets
+# Python 3.10 on a Jetson Orin Nano. Do NOT use the x86 CUDA requirements.txt.
+#
+# Create the environment with uv and access to JetPack's Python packages, then
+# install with uv (python3-venv and an in-environment pip are not required):
+#
+#   uv venv --python /usr/bin/python3 --system-site-packages .venv
+#   source .venv/bin/activate
+#   uv pip install --python .venv/bin/python 'setuptools<60' wheel
+#   uv pip install --python .venv/bin/python \
+#       --no-deps --no-build-isolation -r requirements.jetson.txt
+#   uv pip install --python .venv/bin/python \
+#       --no-deps ultralytics==8.4.45
+#   uv pip install --python .venv/bin/python \
+#       --no-deps --no-build-isolation \
+#       git+https://github.com/KaiyangZhou/deep-person-reid.git@f8cd150fdf77e8d9e1ed143b7f308c2c609ded50
+#
+# Before installing, this must succeed:
+#   python -c "import torch, cv2; print(torch.__version__, torch.cuda.is_available())"
+#
+# TensorRT note from the earlier codex setup:
+# JetPack installs the `tensorrt` Python bindings through apt, not ordinary
+# PyPI. They can look "missing" inside an isolated venv even though TensorRT is
+# installed. That is why this venv MUST use --system-site-packages. Verify with:
+#   python -c "import tensorrt; print(tensorrt.__version__)"
+# `torch_tensorrt` is different. The Jetson AI Lab index observed later had an
+# incompatible pair (torch 2.11 but torch-tensorrt 2.8), producing a hard C++
+# linker failure. Do not install its arbitrary latest package and do not treat
+# the earlier release/2.5 source-build attempt as a portable fix.
+#
+# This repository now automatically selects its ONNX -> raw-TensorRT backend on
+# aarch64, covering SiamABC, its attention/connector stages, and OSNet without
+# torch_tensorrt. YOLO already uses Ultralytics' native TensorRT engine export.
+# Set SIAMRAM_TRT_BACKEND=raw to force the same path elsewhere. torch_tensorrt is
+# intentionally absent from this file.
+#
+# IMPORTANT UV NOTE:
+# This file is a flat, explicitly enumerated Jetson runtime dependency set. It
+# MUST be installed with --no-deps. uv otherwise resolves timm's and
+# ultralytics-thop's declared dependencies from PyPI and installs torch and
+# torchvision into .venv, shadowing NVIDIA's CUDA-enabled system builds. The
+# same resolution can replace JetPack's NumPy and Pillow. Do not remove
+# --no-deps from the command above.
+#
+# Some packages are deliberately MISSING from this list, on purpose:
+#
+#   torch, torchvision  ->  come from the L4T base image. On a Jetson these have
+#                           to be the NVIDIA-built, GPU-enabled wheels; the ones
+#                           on PyPI for ARM64 are CPU-only, so we must never let
+#                           pip install them on top.
+#
+#   opencv-python       ->  also comes from the L4T base image, where it is built
+#                           WITH GStreamer + CUDA so the NVDEC video decode works.
+#                           The PyPI wheel has no GStreamer at all. If pip ever
+#                           installs it (or opencv-python-headless) it overwrites
+#                           the good OpenCV and silently kills hardware decoding,
+#                           which is exactly why albumentations is left out below.
+#
+#   numpy, pillow,      ->  provided by the l4t-ml base image, built to match its
+#   scipy, pandas           torch / OpenCV. We do NOT pin or reinstall these, so
+#                           we never upgrade them out from under torch and break
+#                           the numpy ABI. (scipy isn't imported by the inference
+#                           path at all; pandas is only used by check_submission.py
+#                           and is already in l4t-ml.)
+#
+#   albumentations      ->  only used by src/utils/dataset.py (training/data prep),
+#                           never on the inference path that the grader runs. It
+#                           is dropped here because it drags in
+#                           opencv-python-headless, which would clobber the
+#                           base OpenCV described above.
+#
+# IMPORTANT: keep the uv environment's system-site-packages access. The earlier setup hit a
+# torchreid/numpy.distutils build failure on aarch64; setuptools<60 fixes that
+# specific failure when --no-build-isolation is used.
+# =============================================================================
+
+# Build tooling required by the source dependencies below.
+setuptools<60
+wheel
+
+# Core inference dependencies (minus the ones provided by the base image).
+# ultralytics and torchreid are installed separately with --no-deps because
+# both declare opencv-python, which would replace JetPack's GStreamer OpenCV.
+omegaconf==2.3.0
+gdown==6.0.0
+fire==0.7.1
+got10k==0.1.3
+timm==1.0.26
+onnx==1.17.0
+ultralytics-thop==2.0.19
+
+# OSNet / torchreid dependencies
+h5py==3.13.0
+future==1.0.0
+yacs==0.1.8
+chardet==5.2.0
+Cython==3.0.11
+easydict==1.13
+six==1.17.0
+coloredlogs==15.0.1
+imageio==2.37.3
+matplotlib==3.10.9
+scikit-learn==1.7.2
+
+# Config / utility
+antlr4-python3-runtime==4.9.3
+hydra-core==1.3.2
+PyYAML==6.0.2
+einops==0.8.2
+tqdm==4.67.1
+typing_extensions==4.15.0
+filelock==3.18.0
+fsspec==2025.3.2
+requests==2.32.3
+packaging==25.0
+psutil==7.2.2
+cloudpickle==3.1.2
+diskcache==5.6.3
+iopath==0.1.10
+portalocker==3.2.0
+tabulate==0.10.0
+termcolor==3.3.0
+
+# Explicit safe transitive dependencies. These are listed because uv is invoked
+# with --no-deps to protect the JetPack-managed binary packages.
+beautifulsoup4==4.14.3
+soupsieve==2.8.3
+certifi==2026.6.17
+charset-normalizer==3.4.9
+idna==3.18
+urllib3==2.7.0
+PySocks==1.7.1
+humanfriendly==10.0
+huggingface-hub==0.29.3
+safetensors==0.8.0
+protobuf==7.35.1
+contourpy==1.3.2
+cycler==0.12.1
+fonttools==4.63.0
+kiwisolver==1.5.0
+pyparsing==3.3.2
+python-dateutil==2.9.0.post0
+joblib==1.5.3
+threadpoolctl==3.6.0
+Shapely==2.1.2
+wget==3.2
+
+# MobileCV is required by the SiamABC backbone blocks. torchreid is installed
+# separately with --no-deps and --no-build-isolation using the command at the
+# top of this file; its setup.py imports the system-provided NumPy during build.
+git+https://github.com/facebookresearch/mobile-vision.git@bb8465cfe06327c35b398f3cc0b30e2e668eb0dd

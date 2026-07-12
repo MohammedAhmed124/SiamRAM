@@ -18,8 +18,8 @@ At a high level, the pipeline works as follows:
        box and predict a classification score for the tracked target.
 
 Architecture variants:
-    - 'S' (Small)  — MobileNet-style lightweight encoder (``Encoder``).
-    - 'M' (Medium) — ResNet-based encoder (``EncoderResNet``) for higher accuracy.
+    - 'tiny' (Tiny) — MobileNet-style lightweight encoder (``Encoder``).
+    - 'S' (Small)   — ResNet-based encoder (``EncoderResNet``) for higher accuracy.
 
 Compatibility note:
     Several ``collections`` aliases are patched at import time to restore deprecated
@@ -117,15 +117,15 @@ class SiamABCNet(nn.Module):
             Index controlling how many backbone stages are used for feature
             extraction. Accepted values are ``3`` (extracts up to ``layer2``)
             and ``4`` (extracts up to ``layer1``). Only relevant for model
-            size ``'S'``. Defaults to ``4``.
+            size ``'tiny'``. Defaults to ``4``.
         conv_block (str):
             Convolution block type passed to ``BoxTower``. Use ``"regular"`` for
             standard convolutions or another supported variant for depthwise-
             separable alternatives. Defaults to ``"regular"``.
         model_size (str):
             Selects the backbone family:
-            - ``'S'`` — lightweight MobileNet-style encoder.
-            - ``'M'`` — heavier ResNet-based encoder.
+            - ``'tiny'`` — lightweight MobileNet-style encoder (SiamABC-Tiny).
+            - ``'S'`` — heavier ResNet-based encoder (default / "Small").
             Defaults to ``'S'``.
         build_simsiam_heads (bool):
             Flag indicating whether SimSiam projection/prediction heads should
@@ -163,7 +163,7 @@ class SiamABCNet(nn.Module):
             supported values (``3`` or ``4``).
         Exception:
             Raised during construction if ``model_size`` is not ``'S'`` or
-            ``'M'``.
+            ``'tiny'``.
 
     Example:
         >>> model = SiamABCNet(model_size='S', pretrained=False).cuda()
@@ -203,14 +203,14 @@ class SiamABCNet(nn.Module):
         assert max_layer in max_layer2name
 
         super().__init__()
-        if model_size == "S":
+        if model_size == "tiny":
             self.max_layer = max_layer
             base_encoder = Encoder(pretrained)
             self.encoder = nn.Sequential(*base_encoder.stages[: self.max_layer])
             adjust_in_channels = base_encoder.encoder_channels[
                 max_layer2name[max_layer]
             ]
-        elif model_size == "M":
+        elif model_size == "S":
             base_encoder = EncoderResNet(pretrained=pretrained)
             adjust_in_channels = base_encoder.last_layer_channels
             self.encoder = nn.Sequential(*base_encoder.layers)
@@ -237,6 +237,7 @@ class SiamABCNet(nn.Module):
             conv_block=conv_block,
             inference_mode=inference_mode,
             norm_lambda=norm_lambda,
+            model_size=model_size,
         )
         iou_hidden = max(32, adjust_channels // 2)
         self.iou_head = (

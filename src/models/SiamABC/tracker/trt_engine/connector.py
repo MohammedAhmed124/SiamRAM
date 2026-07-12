@@ -58,12 +58,12 @@ from typing import Dict, Tuple
 import torch
 import torch.nn as nn
 
-from utils.console import quiet_external_logs, silence_noisy_libraries
+from utils.console import silence_noisy_libraries
+
+from .backend import TensorRTBackend, import_torch_trt, select_trt_backend
+from .raw_trt import build_raw_trt_module
 
 silence_noisy_libraries()
-with quiet_external_logs():
-    import torch_tensorrt
-    from torch_tensorrt.dynamo import compile as trt_dynamo_compile
 
 log = logging.getLogger(__name__)
 
@@ -146,7 +146,9 @@ def _build_connect_engines(
     cache_dir: str = "",
     cache_prefix: str = "siamabc",
     rebuild_cache: bool = False,
+    backend: TensorRTBackend | None = None,
 ) -> Dict[str, torch.nn.Module]:
+    backend = backend or select_trt_backend()
     _, C_s, h_s, w_s = s_feat_shape
     _, _, h_t, w_t = t_feat_shape
 
@@ -154,23 +156,24 @@ def _build_connect_engines(
     dummy_search = torch.randn(1, C_s, h_s, w_s, device=device, dtype=torch.float32)
     dummy_kernel = torch.randn(1, C_s, h_t, w_t, device=device, dtype=torch.float32)
 
-    trt_input_set = [
-        torch_tensorrt.Input(shape=(1, C_s, h_s, w_s), dtype=torch.float32),
-        torch_tensorrt.Input(shape=(1, C_s, h_s, w_s), dtype=torch.float32),
-        torch_tensorrt.Input(shape=(1, C_s, h_t, w_t), dtype=torch.float32),
-    ]
-
     engines: Dict[str, torch.nn.Module] = {}
     cache_root = Path(cache_dir) if cache_dir else None
 
     for tag, lam_val in (("zero", 0.0), ("lambda", norm_lambda)):
+        cache_suffix = "engine" if backend == "raw" else "ep"
         cache_path = (
-            cache_root / f"{cache_prefix}_connect_{tag}.ep"
+            cache_root / f"{cache_prefix}_connect_{tag}.{cache_suffix}"
             if cache_root is not None
             else None
         )
-        if cache_path is not None and cache_path.exists() and not rebuild_cache:
+        if (
+            backend == "torch_tensorrt"
+            and cache_path is not None
+            and cache_path.exists()
+            and not rebuild_cache
+        ):
             try:
+                torch_tensorrt = import_torch_trt()
                 log.info("TRTSiamABCNet: loading cached connect_model [%s]", tag)
                 loaded = torch_tensorrt.load(str(cache_path)).module()
                 with torch.no_grad():
@@ -196,25 +199,48 @@ def _build_connect_engines(
             .to(device)
         )
 
-        exported = torch.export.export(
-            module,
-            args=(dummy_search_org, dummy_search, dummy_kernel),
-        )
+        examples = (dummy_search_org, dummy_search, dummy_kernel)
+        if backend == "raw":
+            engine = build_raw_trt_module(
+                module,
+                examples,
+                device=device,
+                input_names=["search_org", "search", "kernel"],
+                output_names=["bbox", "classification"],
+                fp16=False,
+                cache_path=cache_path,
+                rebuild_cache=rebuild_cache,
+            )
+            exported = None
+        else:
+            torch_tensorrt = import_torch_trt()
+            from torch_tensorrt.dynamo import compile as trt_dynamo_compile
 
-        engine = trt_dynamo_compile(
-            exported,
-            inputs=trt_input_set,
-            enabled_precisions={torch.float32},
-            optimization_level=3,
-            use_fast_partitioner=True,
-        )
+            exported = torch.export.export(module, args=examples)
+            engine = trt_dynamo_compile(
+                exported,
+                inputs=[
+                    torch_tensorrt.Input(
+                        shape=(1, C_s, h_s, w_s), dtype=torch.float32
+                    ),
+                    torch_tensorrt.Input(
+                        shape=(1, C_s, h_s, w_s), dtype=torch.float32
+                    ),
+                    torch_tensorrt.Input(
+                        shape=(1, C_s, h_t, w_t), dtype=torch.float32
+                    ),
+                ],
+                enabled_precisions={torch.float32},
+                optimization_level=3,
+                use_fast_partitioner=True,
+            )
 
         with torch.no_grad():
             outputs = engine(dummy_search_org, dummy_search, dummy_kernel)
         _validate_connect_outputs(outputs)
 
         engines[tag] = engine
-        if cache_path is not None:
+        if backend == "torch_tensorrt" and cache_path is not None:
             temporary = cache_path.with_name(f".{cache_path.name}.{os.getpid()}.tmp")
             try:
                 cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -238,8 +264,8 @@ def _build_connect_engines(
                 )
             finally:
                 temporary.unlink(missing_ok=True)
-        del module, exported         
-        torch.cuda.empty_cache()     
+        del module, exported
+        torch.cuda.empty_cache()
 
         log.info("TRTSiamABCNet: connect_model engine [lam=%.4f] ready.", lam_val)
 

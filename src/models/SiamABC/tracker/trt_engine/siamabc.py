@@ -67,19 +67,16 @@ from utils.console import (compile_progress, quiet_external_logs, siamram_log,
 from ...model import constants
 from ...model.adaptive_batch_norm import AdaptiveBatchNorm
 from ..tracker_setup import load_model
+from .backend import (TensorRTBackend, backend_version, import_torch_trt,
+                      select_trt_backend)
 from .cache_utils import siamabc_cache_prefix
 from .connector import _build_connect_engines, _dispatch_connect
+from .raw_trt import build_raw_trt_module
 from .trt_utils import (_AttentionNeck, _cast_module, _EncoderModule,
                         _FeatureExtractorModule, _NeckModule)
 
 log = logging.getLogger(__name__)
 silence_noisy_libraries()
-
-with quiet_external_logs():
-    import tensorrt
-    import torch_tensorrt
-    from torch_tensorrt.dynamo import compile as trt_dynamo_compile
-
 
 def _triton_available() -> bool:
     """
@@ -194,6 +191,7 @@ class TRTSiamABCNet:
         cache_prefix: str = "siamabc",
         connector_cache_prefix: str = "",
         rebuild_cache: bool = False,
+        backend: TensorRTBackend | None = None,
     ) -> None:
 
         self._norm_lambda = norm_lambda
@@ -211,6 +209,7 @@ class TRTSiamABCNet:
         self._cache_prefix = cache_prefix
         self._connector_cache_prefix = connector_cache_prefix or cache_prefix
         self._rebuild_cache = bool(rebuild_cache)
+        self._backend = backend or select_trt_backend()
 
         enabled_precisions: Set[torch.dtype] = (
             {torch.float16} if self._fp16 else {torch.float32}
@@ -247,7 +246,25 @@ class TRTSiamABCNet:
         self._trt_feat: Optional[torch.nn.Module] = None
         self._trt_feat_by_hw: Dict[int, torch.nn.Module] = {}
         self._fp32_neck: Optional[torch.nn.Module] = None
-        if self._backbone_mode in {"dynamic_fp16", "dynamic_fp32"}:
+        if self._backend == "raw":
+            use_encoder_only = self._backbone_mode == "static_fp16_fp32_neck"
+            if use_encoder_only:
+                self._fp32_neck = _NeckModule(model).eval().to(self._device).float()
+                raw_specs = (
+                    ("encoder_template", template_size, t_encoder_shape),
+                    ("encoder_search", instance_size, s_encoder_shape),
+                )
+            else:
+                raw_specs = (
+                    ("features_template", template_size, t_feat_shape),
+                    ("features_search", instance_size, s_feat_shape),
+                )
+            for cache_name, hw, shape in raw_specs:
+                source = _EncoderModule(model) if use_encoder_only else _FeatureExtractorModule(model)
+                self._trt_feat_by_hw[hw] = self._compile_raw_backbone_engine(
+                    source, cache_name, hw, shape
+                )
+        elif self._backbone_mode in {"dynamic_fp16", "dynamic_fp32"}:
             self._trt_feat = self._load_or_compile_backbone_engine(
                 module=_FeatureExtractorModule(model),
                 cache_name="features_dynamic",
@@ -318,6 +335,7 @@ class TRTSiamABCNet:
                 cache_dir=str(self._engine_cache_dir) if self._engine_cache_dir else "",
                 cache_prefix=self._connector_cache_prefix,
                 rebuild_cache=self._rebuild_cache,
+                backend=self._backend,
             )
         compile_progress().complete()
         with quiet_external_logs():
@@ -332,6 +350,48 @@ class TRTSiamABCNet:
             return None
         self._engine_cache_dir.mkdir(parents=True, exist_ok=True)
         return self._engine_cache_dir / f"{self._cache_prefix}_{name}.{suffix}"
+
+    def _compile_raw_backbone_engine(
+        self,
+        module: nn.Module,
+        cache_name: str,
+        hw: int,
+        expected_shape: Tuple[int, ...],
+    ) -> torch.nn.Module:
+        """Compile one static raw-TensorRT backbone/encoder engine."""
+        dummy = torch.randn(
+            int(expected_shape[0]),
+            3,
+            int(hw),
+            int(hw),
+            device=self._device,
+            dtype=torch.float32,
+        )
+        reference = module.eval().to(self._device).float()
+        engine = build_raw_trt_module(
+            reference,
+            (dummy,),
+            device=self._device,
+            input_names=["crop"],
+            output_names=["features"],
+            fp16=self._fp16,
+            cache_path=self._cache_path(cache_name, "engine"),
+            rebuild_cache=self._rebuild_cache,
+        )
+        with torch.no_grad():
+            got = engine(dummy).float()
+            want = reference(dummy).float()
+        if tuple(got.shape) != tuple(expected_shape):
+            raise RuntimeError(
+                f"raw backbone shape {tuple(got.shape)} != {tuple(expected_shape)}"
+            )
+        tolerance = 2e-2 if self._fp16 else 1e-3
+        if not torch.allclose(got, want, rtol=tolerance, atol=tolerance):
+            max_diff = float((got - want).abs().max())
+            raise RuntimeError(
+                f"raw backbone validation failed (max diff {max_diff:.4g})"
+            )
+        return engine
 
     def _load_torchscript_engine(
         self,
@@ -466,6 +526,7 @@ class TRTSiamABCNet:
         with torch.no_grad():
             scripted = torch.jit.trace(module, dummy)
 
+        torch_tensorrt = import_torch_trt()
         return torch_tensorrt.compile(
             scripted,
             inputs=[
@@ -507,7 +568,7 @@ class TRTSiamABCNet:
         (trt_engine.trt_compile_siamabc), so a neck that cannot be compiled or whose
         engine diverges from eager RAISES rather than silently running eager.
         """
-        if _TORCH_COMPILE_OK:
+        if _TORCH_COMPILE_OK and self._backend == "torch_tensorrt":
             return torch.compile(module, dynamic=True, fullgraph=True)
 
         try:
@@ -539,11 +600,25 @@ class TRTSiamABCNet:
         gives the conv a fully concrete input shape and converts cleanly. Input is
         the concatenated feature pair (1, 2*C, hw, hw); the neck runs in FP32.
         """
-        module = module.eval().to(self._device).float()
-
         dummy = torch.randn(
             1, C * 2, int(hw), int(hw), device=self._device, dtype=torch.float32
         )
+        module = module.eval().to(self._device).float()
+        if self._backend == "raw":
+            return build_raw_trt_module(
+                module,
+                (dummy,),
+                device=self._device,
+                input_names=["pair"],
+                output_names=["mixed"],
+                fp16=False,
+                cache_path=self._cache_path(f"neck_{int(hw)}", "engine"),
+                rebuild_cache=self._rebuild_cache,
+            )
+
+        torch_tensorrt = import_torch_trt()
+        from torch_tensorrt.dynamo import compile as trt_dynamo_compile
+
         exported = torch.export.export(module, args=(dummy,))
 
         return trt_dynamo_compile(
@@ -718,6 +793,7 @@ def get_trt_tracker(
     template_size = int(tracking_cfg["template_size"])
     instance_size = int(tracking_cfg["instance_size"])
     resolved_backbone_mode = _resolve_backbone_mode(backbone_mode, fp16)
+    backend = select_trt_backend()
     cache_prefix = _siamabc_cache_prefix(
         config=config,
         weights_path=weights_path,
@@ -728,6 +804,7 @@ def get_trt_tracker(
         cuda_id=cuda_id,
         backbone_mode=resolved_backbone_mode,
         disable_tf32=disable_tf32,
+        backend=backend,
     )
     connector_cache_prefix = _siamabc_cache_prefix(
         config=config,
@@ -738,6 +815,7 @@ def get_trt_tracker(
         fp16=False,
         cuda_id=cuda_id,
         cache_scope="connector",
+        backend=backend,
     )
 
     siamram_log(
@@ -758,6 +836,7 @@ def get_trt_tracker(
         cache_prefix=cache_prefix,
         connector_cache_prefix=connector_cache_prefix,
         rebuild_cache=rebuild_cache,
+        backend=backend,
     )
 
     tracker: SiamABCTracker = instantiate(
@@ -782,6 +861,7 @@ def _siamabc_cache_prefix(
     opt_batch: int = 1,
     max_batch: int = 1,
     cache_scope: str = "backbone",
+    backend: TensorRTBackend | None = None,
 ) -> str:
     if cache_scope not in {"backbone", "connector"}:
         raise ValueError(f"Unsupported SiamABC cache scope: {cache_scope!r}")
@@ -791,6 +871,9 @@ def _siamabc_cache_prefix(
         else "connector_fp32"
     )
     properties = torch.cuda.get_device_properties(cuda_id)
+    selected_backend = backend or select_trt_backend()
+    import tensorrt
+
     gpu_identity = {
         "name": properties.name,
         "compute_capability": f"{properties.major}.{properties.minor}",
@@ -811,7 +894,8 @@ def _siamabc_cache_prefix(
         software_versions={
             "torch": getattr(torch, "__version__", "unknown"),
             "cuda": str(getattr(torch.version, "cuda", "unknown")),
-            "torch_tensorrt": getattr(torch_tensorrt, "__version__", "unknown"),
+            "trt_backend": selected_backend,
+            "backend_version": backend_version(selected_backend),
             "tensorrt": getattr(tensorrt, "__version__", "unknown"),
         },
         gpu_identity=gpu_identity,

@@ -1,0 +1,108 @@
+# =============================================================================
+# SiamABC-TINY fine-tuning config.
+#
+# Goal: fine-tune ONLY the classification head of SiamABC-Tiny on positives and
+# (heavily) negatives, so the head learns to say "target absent" instead of
+# always firing positive. Everything else — backbone, neck, attention, bbox and
+# iou heads — stays frozen (train_mode: cls_head_only).
+#
+# Differences vs training_config.yaml:
+#   - model.model_size: tiny          (MobileNet-style backbone, not "S"/ResNet)
+#   - model.weights_path: S_Tiny ckpt
+#   - training.train_mode: cls_head_only (freezes all but the cls branch)
+#   - output.checkpoint_dir: tiny-specific run dir
+# =============================================================================
+
+data:
+  csv_path: "data/train_dataframe.csv"
+  seed: 42
+
+tracking:
+  template_size: 128
+  instance_size: 256
+  score_size: 16
+  search_context: 2
+  max_frame_gap: 130
+  total_stride: 16
+  template_bbox_offset: 0.2
+  search_image_shift: 0.6
+  search_image_scale: 0.3
+  template_image_shift: 0.01
+  template_image_scale: 0.01
+  occlusion_aug_prob: 0.0
+  occlusion_min_area: 0.04
+  occlusion_max_area: 0.11
+  occlusion_max_patches: 2
+  search_blur_prob: 0.15
+  search_jpeg_prob: 0.15
+  # Negative-mining probabilities — how negatives are constructed. Kept high so
+  # the cls head sees plenty of hard negatives (cross-sequence, same-class,
+  # spatially shifted) while fine-tuning.
+  neg_cross_seq_prob: 0.45
+  neg_same_class_prob: 0.70
+  neg_shifted_prob: 0.40
+
+dataset:
+  train_num_samples: 5000
+  # Half of every batch is negatives — the whole point of this run is teaching
+  # the cls head to reject background / absent-target crops.
+  train_neg_ratio: 0.5
+  val_num_samples: 500
+  val_neg_ratio: 0.5
+  val_split_ratio: 0.1
+
+dataloader:
+  train_batch_size: 32
+  val_batch_size: 32
+  num_workers: 0
+
+model:
+  _target_: models.SiamABC.model.SiamABC.SiamABCNet
+  # SiamABC-Tiny checkpoint (fetched by download.py).
+  weights_path: "checkpoints/model_S_Tiny_v1.pt"
+  backbone: custom_fbnet
+  # false: the FBNet backbone has no available model-zoo pretrained weights in the
+  # image (raises "Invalid arch fbnet_c"); the S_Tiny checkpoint provides the
+  # backbone weights, so pre-checkpoint init is irrelevant for fine-tuning.
+  pretrained: false
+  num_channels: 3
+  align: false
+  img_size: 256
+  stride: 2
+  conv_block: sep_conv
+  towernum: 2
+  # 'tiny' -> lightweight MobileNet-style backbone with the CorrelationConcat head.
+  model_size: tiny
+  max_layer: 4
+  build_simsiam_heads: false
+  build_iou_head: true
+
+training:
+  num_epochs: 40
+  start_epoch: 1
+  # Train ONLY the classification branch; freeze backbone, neck, attention,
+  # bbox head and iou head. cls_head_only also forces bbox_weight/iou_weight to 0.
+  train_mode: cls_head_only
+  stage1_epochs: 0
+  stage1_mode: cls_head_only
+  stage2_mode: cls_head_only
+  stage2_warmup_epochs: 0
+  backbone_lr: 1.0e-5
+  head_lr: 2.0e-4
+  weight_decay: 1.0e-4
+  warmup_epochs: 3
+  eta_min: 1.0e-6
+  batch_level_logs: true
+  log_every: 1
+
+loss:
+  # bbox_weight / iou_weight are ignored under cls_head_only (forced to 0 in
+  # build_criterion); only the focal classification loss drives this run.
+  cls_weight: 1
+  bbox_weight: 1
+  iou_weight: 1
+  focal_alpha: 0.25
+  focal_gamma: 1.5
+
+output:
+  checkpoint_dir: "training/checkpoints/training_run_tiny/"

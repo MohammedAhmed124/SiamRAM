@@ -10,14 +10,17 @@
 # changed — see the "UNRESOLVABLE FROM CONFIG" notes near the relevant sections.
 # =============================================================================
 
-# Path to the trained SiamABC checkpoint loaded at startup.
-# This is relative to the submission root (the folder that holds predictor.py).
-# predictor.py reads this value and turns it into an absolute path at runtime so
-# the submission still works no matter which directory you launch it from. If you
-# ever want to point at a different checkpoint, change it here, not in the code.
-weights_path: "checkpoints/model.pth"
-# To run SiamABC-Tiny instead, use the dedicated inference_config_tiny.yaml
-# (weights_path: checkpoints/model_S_Tiny_v1.pt, model_size: tiny).
+# =============================================================================
+# SiamABC-TINY inference config.
+# Identical to inference_config.yaml except for the model selection below:
+# the lightweight MobileNet-style backbone (model_size: tiny) and the
+# S_Tiny checkpoint. All tracking / TRT / postprocessing values are shared.
+# =============================================================================
+
+# Path to the SiamABC-Tiny checkpoint loaded at startup (fetched by download.py).
+# Relative to the submission root; predictor.py resolves it to an absolute path
+# at runtime so the submission works from any launch directory.
+weights_path: "checkpoints/tiny_checkpoint.pth"
 
 # =============================================================================
 # trt_engine: all TensorRT / FP16 options (GPU-only), grouped in one place.
@@ -80,18 +83,18 @@ runtime:
 model:
   # Python import path of the model class Hydra should instantiate.
   _target_: models.SiamABC.model.SiamABC.SiamABCNet
-  # Start from ImageNet pretrained weights for backbone layers that support it.
-  # NOTE: at inference the checkpoint is loaded right after init (strict=False),
-  # so this only changes the pre-checkpoint init; baseline ran with true.
-  pretrained: true                   # [944f2b8] was true (current default False)
+  # MUST be false for the tiny (FBNet) backbone: fbnet("fbnet_c", pretrained=True)
+  # needs the mobile_cv model-zoo weights, which are not present in the image and
+  # raise "Invalid arch fbnet_c". The S_Tiny checkpoint is loaded right after init
+  # and provides the full backbone anyway, so pre-checkpoint init is irrelevant.
+  pretrained: false
   # Conv block flavour used across stages (sep_conv = depthwise separable).
   conv_block: sep_conv
   # Number of stacked tower blocks in the prediction head.
   towernum: 2
   # Preset model size controlling the backbone family / channel depth.
-  # Use 'S' for the default (ResNet-based "Small") model. For SiamABC-Tiny,
-  # use the dedicated inference_config_tiny.yaml (model_size: tiny) instead.
-  model_size: S
+  # 'tiny' selects the lightweight MobileNet-style backbone (SiamABC-Tiny).
+  model_size: tiny
   # How many backbone stages to keep — caps depth of feature extraction.
   max_layer: 4
   # Build the auxiliary IoU prediction head on top.
@@ -308,7 +311,7 @@ ram_tracker:
     entry:
       # 944f2b8 used a FIXED threshold of 0.5 (not "auto"). A numeric value here
       # makes the conf_threshold_auto_* knobs below dormant.
-      conf_threshold: 0.65           # [944f2b8] fixed 0.5 (current "auto")
+      conf_threshold: 0.5            # [944f2b8] fixed 0.5 (current "auto")
       conf_threshold_auto_in_min: 0.60
       conf_threshold_auto_in_max: 1
       conf_threshold_auto_out_min: 0.4
@@ -376,7 +379,7 @@ ram_tracker:
         drm_margin_auto_delta: 0.05
         drm_margin_auto_ema_alpha: 0.2   # [944f2b8] was 0.2 (current 0.3)
         drm_margin_auto_n_frames: 10
-        drm_margin_auto_warmup: 0.70
+        drm_margin_auto_warmup: 0.6
         drm_margin_auto_min_samples: 5
         drm_skip_threshold: 23
         drm_top_k: 3

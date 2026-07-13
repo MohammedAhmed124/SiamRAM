@@ -1,90 +1,221 @@
-% OSNet contrastive (Siamese) training diagram
-% ---------------------------------------------------------------
-% Two weight-sharing OSNet branches each encode an input image into
-% a 512-D embedding; the objective is the cosine similarity between
-% the two embeddings.
-%
-% Build (standalone PDF):
-%   pdflatex osnet_contrastive_training.tex
-% ---------------------------------------------------------------
-\documentclass[border=12pt]{standalone}
+\documentclass[aspectratio=169]{beamer}
 
+% ---------- fonts & basics ----------
+\usepackage[T1]{fontenc}
+\usepackage{helvet}
+\renewcommand{\familydefault}{\sfdefault}
+\usepackage{graphicx}
+\usepackage{amsmath,amssymb}
+
+% ---------- tikz ----------
 \usepackage{tikz}
-\usepackage{amsmath}
-\usetikzlibrary{arrows.meta, positioning, calc, backgrounds, fit, shapes.geometric}
+\usetikzlibrary{arrows.meta, positioning, calc, shapes.geometric,
+                backgrounds, fit, decorations.pathreplacing, shadows}
+
+% ---------- beamer look ----------
+\setbeamertemplate{navigation symbols}{}
+\setbeamertemplate{footline}{}
+\definecolor{navy}{HTML}{1B2A4A}
+\definecolor{slategray}{HTML}{5B6B84}
+\setbeamercolor{frametitle}{fg=navy,bg=white}
+\setbeamerfont{frametitle}{series=\bfseries,size=\large}
+\setbeamercolor{normal text}{fg=navy}
+
+% ---------- palette ----------
+\definecolor{amber}{HTML}{C8850C}
+\definecolor{amberlight}{HTML}{FBF0DA}
+\definecolor{skyblue}{HTML}{2E75B6}
+\definecolor{skybluelight}{HTML}{E9F2FA}
+\definecolor{coral}{HTML}{D4552A}
+\definecolor{corallight}{HTML}{FBE9E1}
+\definecolor{violet}{HTML}{6449B6}
+\definecolor{violetlight}{HTML}{F0ECFA}
+\definecolor{ghostgray}{HTML}{C9CFD8}
+\definecolor{tealmem}{HTML}{1E7F72}
+\definecolor{tealmemlight}{HTML}{E4F3F0}
+
+% ---------- reusable tikz styles ----------
+\tikzset{
+  >={Latex[length=2.1mm,width=1.5mm]},
+  flow/.style={-{Latex[length=2.1mm,width=1.5mm]}, thick, draw=slategray},
+  dashedflow/.style={-{Latex[length=1.8mm,width=1.3mm]}, thick, dashed, draw=slategray!70},
+  imgcard/.style={draw=slategray!60, thick, rounded corners=1.5pt, fill=white,
+                  minimum width=1.15cm, minimum height=1.15cm, inner sep=0pt},
+  procbox/.style={rounded corners=3pt, draw=coral, line width=0.9pt, fill=corallight,
+                   align=center, text=navy, font=\scriptsize, text width=2.4cm,
+                   minimum height=1.4cm, inner sep=4pt},
+  eqbox/.style={rounded corners=3pt, draw=violet, line width=0.9pt, fill=violetlight,
+                   align=center, text=navy, font=\scriptsize, text width=6.4cm,
+                   minimum height=1.5cm, inner sep=5pt},
+  smallcaption/.style={font=\tiny, text=slategray, align=center},
+  numcellS/.style={draw=slategray!45, thin, minimum width=6.0mm, minimum height=5.4mm,
+                   inner sep=0pt, font=\fontsize{4.6}{4.6}\selectfont, text=navy},
+  imgph/.style={draw=slategray!60, line width=0.55pt, rounded corners=1.5pt, fill=white,
+                   inner sep=0pt, minimum width=0.62cm, minimum height=0.62cm},
+}
+
+% ---- NUMBERED embedding rows (same look as the deck's Figs 2, 5, 6) ----
+\newcommand{\cwS}{0.62}
+% \shrowN{fillcolor}{v0,...,v7}{rightlabel} : one 8-value row (4 | ... | 4) at y=0
+\newcommand{\shrowN}[3]{%
+  \foreach \v [count=\ic from 0] in {#2}{%
+    \ifnum\ic<4\relax
+      \node[numcellS, fill=#1] at (\ic*\cwS,0){\v};%
+    \else
+      \pgfmathsetmacro{\xx}{4*\cwS+0.34+(\ic-4)*\cwS}%
+      \node[numcellS, fill=#1] at (\xx,0){\v};%
+    \fi
+  }%
+  \node[font=\tiny, text=slategray] at (4*\cwS-0.14,0){$\cdots$};%
+  \node[font=\scriptsize, text=navy, anchor=west] at (5.15,0){#3};%
+}
+% \sbracketsC{color}{yTop}{yBot} : matrix/vector brackets sized for a \shrowN row
+\newcommand{\sbracketsC}[3]{%
+  \draw[line width=0.8pt, draw=#1] (-0.36,#2) ++(0.18,0) -- (-0.36,#2) -- (-0.36,#3) -- ++(0.18,0);%
+  \draw[line width=0.8pt, draw=#1] (5.02,#2) ++(-0.18,0) -- (5.02,#2) -- (5.02,#3) -- ++(-0.18,0);%
+}
+% small check / cross glyphs
+\newcommand{\okmark}[2]{\draw[tealmem, line width=1.2pt, line cap=round, line join=round]
+      (#1,#2) ++(-0.09,0.0) -- ++(0.07,-0.10) -- ++(0.16,0.20);}
+\newcommand{\nomark}[2]{\draw[coral, line width=1.2pt, line cap=round]
+      (#1,#2) ++(-0.09,0.09) -- ++(0.18,-0.18)  (#1,#2) ++(0.09,0.09) -- ++(-0.18,-0.18);}
 
 \begin{document}
 
-% ---- Palette ---------------------------------------------------
-\definecolor{imgfill}{RGB}{237,242,247}
-\definecolor{imgline}{RGB}{113,128,150}
-\definecolor{netfill}{RGB}{213,232,255}
-\definecolor{netline}{RGB}{ 43,108,176}
-\definecolor{embfill}{RGB}{255,237,213}
-\definecolor{embline}{RGB}{192,111, 20}
-\definecolor{simfill}{RGB}{226,232,240}
-\definecolor{simline}{RGB}{ 45, 55, 72}
-\definecolor{arrowcol}{RGB}{ 74, 85,104}
+% =====================================================
+% OSNet CONTRASTIVE / SIAMESE TRAINING
+% =====================================================
+\begin{frame}{Figure 0 --- Training OSNet by Contrastive (Siamese) Learning}
 
-\begin{tikzpicture}[
-    font=\sffamily,
-    >={Stealth[length=3.2mm]},
-    node distance=10mm,
-    imgnode/.style={
-        draw=imgline, fill=imgfill, line width=0.9pt,
-        minimum width=26mm, minimum height=26mm, rounded corners=2pt,
-        align=center, font=\sffamily\small},
-    netnode/.style={
-        draw=netline, fill=netfill, line width=1.1pt,
-        minimum width=30mm, minimum height=42mm, rounded corners=6pt,
-        align=center, font=\sffamily\bfseries},
-    embnode/.style={
-        draw=embline, fill=embfill, line width=1.0pt,
-        minimum width=16mm, minimum height=40mm, rounded corners=3pt,
-        align=center, font=\sffamily\small},
-    simnode/.style={
-        draw=simline, fill=simfill, line width=1.1pt,
-        minimum width=26mm, minimum height=26mm, rounded corners=4pt,
-        align=center, font=\sffamily\bfseries},
-    flow/.style={-{Stealth[length=3.2mm]}, line width=1.1pt, color=arrowcol},
-]
+\centering
+\vspace{-0.5mm}
+\resizebox{!}{0.90\textheight}{%
+\begin{tikzpicture}[font=\small, x=1cm, y=1cm]
 
-% ============================ LEFT BRANCH ============================
-\node[imgnode] (imgA) {\textbf{Input image A}\\[2pt]\footnotesize (anchor crop)};
-\node[netnode, right=of imgA] (netA) {OSNet\\[3pt]\footnotesize$\theta$};
-\node[embnode, right=of netA] (embA) {$\mathbf{z}_A$\\[3pt]\footnotesize 512-D\\\footnotesize embedding};
+% ============================ TWIN BRANCHES ============================
+% ---- top branch : anchor ----
+\node[imgcard] (imgA) at (0,1.45)
+      {\includegraphics[width=1.0cm,height=1.0cm]{example-image-a}};
+\node[smallcaption, below=1.2mm of imgA, text width=2.2cm]
+      {\textbf{Input image A}\\\textit{anchor}};
+\node[procbox] (osA) at (2.95,1.45)
+      {\textbf{OSNet}\\[2pt]{\scriptsize encoder $g(\cdot)$}};
 
-% ============================ SIMILARITY NODE ========================
-\node[simnode, right=16mm of embA] (sim) {cosine\\ similarity\\[2pt]
-    $\dfrac{\mathbf{z}_A\!\cdot\!\mathbf{z}_B}{\lVert\mathbf{z}_A\rVert\,\lVert\mathbf{z}_B\rVert}$};
+% ---- bottom branch : positive / negative ----
+\node[imgcard] (imgB) at (0,-1.45)
+      {\includegraphics[width=1.0cm,height=1.0cm]{example-image-b}};
+\node[smallcaption, above=1.2mm of imgB, text width=2.4cm]
+      {\textbf{Input image B}\\\textit{positive or negative}};
+\node[procbox] (osB) at (2.95,-1.45)
+      {\textbf{OSNet}\\[2pt]{\scriptsize encoder $g(\cdot)$}};
 
-% ============================ RIGHT BRANCH ===========================
-% mirrored: embedding, network and image face back toward the centre
-\node[embnode, right=16mm of sim] (embB) {$\mathbf{z}_B$\\[3pt]\footnotesize 512-D\\\footnotesize embedding};
-\node[netnode, right=of embB] (netB) {OSNet\\[3pt]\footnotesize$\theta$};
-\node[imgnode, right=of netB] (imgB) {\textbf{Input image B}\\[2pt]\footnotesize (positive / negative crop)};
+\draw[flow] (imgA.east) -- (osA.west);
+\draw[flow] (imgB.east) -- (osB.west);
 
-% ============================ FORWARD ARROWS =========================
-\draw[flow] (imgA) -- (netA);
-\draw[flow] (netA) -- (embA);
-\draw[flow] (imgB) -- (netB);
-\draw[flow] (netB) -- (embB);
+% ---- shared weights tie ----
+\draw[{Latex[length=1.6mm]}-{Latex[length=1.6mm]}, dashed, line width=0.8pt, draw=coral]
+      (osA.south) -- (osB.north);
+\node[font=\tiny, text=coral, fill=white, inner sep=1pt] at (2.95,0)
+      {shared weights $\theta$};
 
-% ============================ SIMILARITY ARROWS ======================
-\draw[flow] (embA) -- (sim);
-\draw[flow] (embB) -- (sim);
+% ============================ EMBEDDINGS + RED BOX =====================
+% the RED box around the two embeddings (drawn first so cells sit on top)
+\draw[coral, line width=1.2pt, rounded corners=5pt, fill=coral!4]
+      (5.05,-1.95) rectangle (10.85,1.95);
+\node[font=\tiny\bfseries, text=coral, fill=white, inner sep=1.5pt]
+      at (5.05,1.95) {two 512-d embeddings};
 
-% ============================ SHARED WEIGHTS =========================
-\draw[<->, dashed, line width=1.0pt, color=netline]
-    (netA.north) to[bend left=32] node[midway, above, font=\sffamily\small, text=netline]
-    {shared weights $\theta$ (Siamese)} (netB.north);
+% top embedding row z_A
+\begin{scope}[shift={(5.7,1.45)}]
+  \shrowN{skyblue!30}{0.42,-0.15,0.30,0.51,-0.22,0.09,0.36,-0.05}{}
+  \sbracketsC{skyblue}{0.34}{-0.34}
+\end{scope}
+% bottom embedding row z_B
+\begin{scope}[shift={(5.7,-1.45)}]
+  \shrowN{skyblue!42}{0.39,-0.11,0.34,0.47,-0.19,0.12,0.31,-0.02}{}
+  \sbracketsC{skyblue}{0.34}{-0.34}
+\end{scope}
 
-% ============================ LOSS ANNOTATION ========================
-\node[below=9mm of sim, align=center, font=\sffamily\small, text=simline]
-    (loss) {\textbf{Contrastive objective}\\[2pt]
-    pull $\mathbf{z}_A,\mathbf{z}_B$ together for the same identity,\\
-    push them apart for different identities};
-\draw[flow, densely dotted] (sim) -- (loss);
+\draw[flow] (osA.east) -- node[above, font=\tiny]{512-d} (5.34,1.45);
+\draw[flow] (osB.east) -- node[below, font=\tiny]{512-d} (5.34,-1.45);
 
-\end{tikzpicture}
+% vector names (to the right, outside the box)
+\node[font=\scriptsize, text=skyblue!85!black, anchor=west] at (11.05,1.45)
+      {$\mathbf{z}_A=\dfrac{g(A)}{\lVert g(A)\rVert}$};
+\node[font=\scriptsize, text=skyblue!85!black, anchor=west] at (11.05,-1.45)
+      {$\mathbf{z}_B=\dfrac{g(B)}{\lVert g(B)\rVert}$};
+
+% ============================ SIMILARITY ARROW ========================
+\coordinate (boxbot) at (7.95,-1.95);
+\node[eqbox, text width=6.9cm] (cos) at (7.95,-3.9)
+   {\textbf{Cosine similarity}\\[3pt]
+    {\footnotesize$\displaystyle s=\cos(\mathbf{z}_A,\mathbf{z}_B)
+       =\frac{\mathbf{z}_A^{\!\top}\mathbf{z}_B}{\lVert\mathbf{z}_A\rVert\,\lVert\mathbf{z}_B\rVert}\in[-1,1]$}};
+\draw[flow, line width=1.1pt] (boxbot) --
+      node[right, font=\tiny, text=slategray, xshift=0.5mm]{compute similarity} (cos.north);
+
+% ============================ SIMILARITY SCALE ========================
+% geometry of the gradient bar
+\def\barL{2.35} \def\barR{13.55} \def\barT{-6.35} \def\barB{-6.95}
+\pgfmathsetmacro{\barW}{\barR-\barL}
+\pgfmathsetmacro{\barC}{0.5*(\barT+\barB)}
+
+\draw[flow, line width=1.1pt] (cos.south) -- (7.95,-5.55);
+
+% the coral -> teal gradient track
+\shade[left color=corallight, right color=tealmemlight, rounded corners=4pt]
+      (\barL,\barB) rectangle (\barR,\barT);
+\draw[rounded corners=4pt, draw=slategray!55, line width=0.7pt]
+      (\barL,\barB) rectangle (\barR,\barT);
+
+% end captions
+\node[font=\scriptsize\bfseries, text=coral, anchor=north] at (\barL,\barB-0.12)
+      {$s\!\to\!0$};
+\node[smallcaption, text=coral, anchor=north] at (\barL,\barB-0.55) {different};
+\node[font=\scriptsize\bfseries, text=tealmem, anchor=north] at (\barR,\barB-0.12)
+      {$s\!\to\!1$};
+\node[smallcaption, text=tealmem, anchor=north] at (\barR,\barB-0.55) {same};
+
+% marker positions on the bar
+\pgfmathsetmacro{\xNeg}{\barL+0.17*\barW}   % different pair
+\pgfmathsetmacro{\xPos}{\barL+0.86*\barW}   % same pair
+
+% direction labels sitting on the track
+\node[font=\scriptsize\bfseries, text=coral]  at (\barL+0.30*\barW,\barC)
+      {push apart $\;\blacktriangleleft$};
+\node[font=\scriptsize\bfseries, text=tealmem] at (\barL+0.70*\barW,\barC)
+      {$\blacktriangleright\;$ pull together};
+
+% ---- NEGATIVE example (different identities) ----
+\node[imgph] (nA) at (\xNeg-0.42,-5.0) {\includegraphics[width=0.54cm,height=0.54cm]{example-image-a}};
+\node[imgph] (nB) at (\xNeg+0.42,-5.0) {\includegraphics[width=0.54cm,height=0.54cm]{example-image-b}};
+\node[font=\footnotesize, text=coral] at (\xNeg,-5.0) {$\neq$};
+\node[smallcaption, text=coral, above=0.5mm of nA.north east, xshift=-0.42cm]
+      {different identity};
+\nomark{\xNeg}{-5.62}
+\node[font=\tiny\bfseries, text=coral, fill=white, inner sep=1pt] at (\xNeg,-5.98) {$s\approx0.1$};
+\fill[coral] (\xNeg,\barC) circle (2.6pt);
+\draw[coral!70, line width=0.6pt, dashed] (\xNeg,-5.5) -- (\xNeg,\barT);
+
+% ---- POSITIVE example (same identity) ----
+\node[imgph] (pA) at (\xPos-0.42,-5.0) {\includegraphics[width=0.54cm,height=0.54cm]{example-image-a}};
+\node[imgph] (pB) at (\xPos+0.42,-5.0) {\includegraphics[width=0.54cm,height=0.54cm]{example-image-a}};
+\node[font=\footnotesize, text=tealmem] at (\xPos,-5.0) {$=$};
+\node[smallcaption, text=tealmem, above=0.5mm of pA.north east, xshift=-0.42cm]
+      {same identity};
+\okmark{\xPos}{-5.62}
+\node[font=\tiny\bfseries, text=tealmem, fill=white, inner sep=1pt] at (\xPos,-5.98) {$s\approx0.9$};
+\fill[tealmem] (\xPos,\barC) circle (2.6pt);
+\draw[tealmem!70, line width=0.6pt, dashed] (\xPos,-5.5) -- (\xPos,\barT);
+
+\end{tikzpicture}%
+}
+
+\vspace{1mm}
+{\footnotesize The two crops pass through \emph{one} shared OSNet encoder. Training \textbf{pulls}
+same-identity embeddings together ($s\!\to\!1$) and \textbf{pushes} different-identity ones apart
+($s\!\to\!0$) --- the same cosine score later drives DRM matching at inference.}
+
+\end{frame}
+
 \end{document}

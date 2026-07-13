@@ -1,0 +1,16 @@
+# LaTeX build artifacts
+*.aux
+*.log
+*.nav
+*.snm
+*.toc
+*.out
+*.synctex.gz
+
+# rendered previews of the figure .tex sources (regenerate with pdflatex)
+osnet_contrastive_training.pdf
+osnet_contrastive_training.png
+distractor_bank.pdf
+distractor_bank.png
+db*.png
+preview*.png

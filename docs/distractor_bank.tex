@@ -1,0 +1,264 @@
+\documentclass[aspectratio=169]{beamer}
+
+% ---------- fonts & basics ----------
+\usepackage[T1]{fontenc}
+\usepackage{helvet}
+\renewcommand{\familydefault}{\sfdefault}
+\usepackage{graphicx}
+\usepackage{amsmath,amssymb}
+
+% ---------- tikz ----------
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, positioning, calc, shapes.geometric,
+                backgrounds, fit, decorations.pathreplacing, shadows}
+
+% ---------- beamer look ----------
+\setbeamertemplate{navigation symbols}{}
+\setbeamertemplate{footline}{}
+\definecolor{navy}{HTML}{1B2A4A}
+\definecolor{slategray}{HTML}{5B6B84}
+\setbeamercolor{frametitle}{fg=navy,bg=white}
+\setbeamerfont{frametitle}{series=\bfseries,size=\large}
+\setbeamercolor{normal text}{fg=navy}
+
+% ---------- palette ----------
+\definecolor{amber}{HTML}{C8850C}
+\definecolor{amberlight}{HTML}{FBF0DA}
+\definecolor{skyblue}{HTML}{2E75B6}
+\definecolor{skybluelight}{HTML}{E9F2FA}
+\definecolor{coral}{HTML}{D4552A}
+\definecolor{corallight}{HTML}{FBE9E1}
+\definecolor{violet}{HTML}{6449B6}
+\definecolor{violetlight}{HTML}{F0ECFA}
+\definecolor{ghostgray}{HTML}{C9CFD8}
+\definecolor{tealmem}{HTML}{1E7F72}
+\definecolor{tealmemlight}{HTML}{E4F3F0}
+
+% ---------- reusable tikz styles ----------
+\tikzset{
+  >={Latex[length=2.1mm,width=1.5mm]},
+  flow/.style={-{Latex[length=2.1mm,width=1.5mm]}, thick, draw=slategray},
+  dashedflow/.style={-{Latex[length=1.8mm,width=1.3mm]}, thick, dashed, draw=slategray!70},
+  imgcard/.style={draw=slategray!60, thick, rounded corners=1.5pt, fill=white,
+                  minimum width=1.15cm, minimum height=1.15cm, inner sep=0pt},
+  procbox/.style={rounded corners=3pt, draw=coral, line width=0.9pt, fill=corallight,
+                   align=center, text=navy, font=\scriptsize, text width=2.4cm,
+                   minimum height=1.4cm, inner sep=4pt},
+  eqbox/.style={rounded corners=3pt, draw=violet, line width=0.9pt, fill=violetlight,
+                   align=center, text=navy, font=\scriptsize, text width=6.4cm,
+                   minimum height=1.5cm, inner sep=5pt},
+  notebox/.style={rounded corners=3pt, draw=amber!55, line width=0.7pt, fill=amberlight!55,
+                   align=center, text=navy, font=\scriptsize, inner sep=5pt},
+  smallcaption/.style={font=\tiny, text=slategray, align=center},
+  numcellS/.style={draw=slategray!45, thin, minimum width=6.0mm, minimum height=5.4mm,
+                   inner sep=0pt, font=\fontsize{4.6}{4.6}\selectfont, text=navy},
+  framecard/.style={draw=slategray!70, thick, rounded corners=1.5pt, fill=white, inner sep=0pt},
+  cropcard/.style={draw=slategray!60, thick, rounded corners=1.5pt, fill=white,
+                   minimum width=0.95cm, minimum height=0.95cm, inner sep=0pt},
+  candbox/.style={draw=coral, line width=1.0pt},
+  gtbox/.style={draw=tealmem, line width=1.2pt},
+  imgph/.style={draw=slategray!60, line width=0.55pt, rounded corners=1.5pt, fill=white,
+                   inner sep=0pt, minimum width=0.62cm, minimum height=0.62cm},
+}
+
+% ---- NUMBERED embedding rows (same look as the deck's Figs 2, 5, 6) ----
+\newcommand{\cwS}{0.62}
+\newcommand{\shrowN}[3]{%
+  \foreach \v [count=\ic from 0] in {#2}{%
+    \ifnum\ic<4\relax
+      \node[numcellS, fill=#1] at (\ic*\cwS,0){\v};%
+    \else
+      \pgfmathsetmacro{\xx}{4*\cwS+0.34+(\ic-4)*\cwS}%
+      \node[numcellS, fill=#1] at (\xx,0){\v};%
+    \fi
+  }%
+  \node[font=\tiny, text=slategray] at (4*\cwS-0.14,0){$\cdots$};%
+  \node[font=\scriptsize, text=navy, anchor=west] at (5.15,0){#3};%
+}
+\newcommand{\sbracketsC}[3]{%
+  \draw[line width=0.8pt, draw=#1] (-0.36,#2) ++(0.18,0) -- (-0.36,#2) -- (-0.36,#3) -- ++(0.18,0);%
+  \draw[line width=0.8pt, draw=#1] (5.02,#2) ++(-0.18,0) -- (5.02,#2) -- (5.02,#3) -- ++(-0.18,0);%
+}
+\newcommand{\okmark}[2]{\draw[tealmem, line width=1.2pt, line cap=round, line join=round]
+      (#1,#2) ++(-0.09,0.0) -- ++(0.07,-0.10) -- ++(0.16,0.20);}
+\newcommand{\nomark}[2]{\draw[coral, line width=1.2pt, line cap=round]
+      (#1,#2) ++(-0.09,0.09) -- ++(0.18,-0.18)  (#1,#2) ++(0.09,0.09) -- ++(-0.18,-0.18);}
+
+\begin{document}
+
+% =====================================================
+% FIGURE 7 : DISTRACTOR-BANK CONSTRUCTION
+% =====================================================
+\begin{frame}{Figure 7 --- Building the Distractor Bank (YOLO Across Strided Frames)}
+
+\centering
+\vspace{-0.5mm}
+\resizebox{0.99\textwidth}{!}{%
+\begin{tikzpicture}[font=\small, x=1cm, y=1cm]
+
+% ---- (a) strided video frames ----
+\node[framecard, minimum width=1.35cm, minimum height=1.0cm] (fa3) at (0.30,0.28)
+      {\includegraphics[width=1.3cm,height=0.95cm]{example-image-a}};
+\node[framecard, minimum width=1.35cm, minimum height=1.0cm] (fa2) at (0.15,0.13)
+      {\includegraphics[width=1.3cm,height=0.95cm]{example-image-a}};
+\node[framecard, minimum width=1.35cm, minimum height=1.0cm] (fa1) at (0.0,-0.02)
+      {\includegraphics[width=1.3cm,height=0.95cm]{example-image-a}};
+\node[smallcaption, below=5mm of fa1, text width=2.6cm]
+      {video frames sampled\\ \textbf{every stride $s$}};
+
+% ---- (b) YOLO ----
+\node[procbox, text width=2.2cm] (yolo) at (3.0,0)
+      {\textbf{YOLOv11n}\\[2pt]{\scriptsize on search ROI}};
+\draw[flow] (fa1.east) ++(0.15,0) -- (yolo.west);
+
+% ---- (c) annotated ROI frame : the PLACEHOLDER ----
+\begin{scope}[shift={(6.6,0)}]
+  \node[framecard, minimum width=3.4cm, minimum height=2.7cm] (roi) at (0,0)
+        {\includegraphics[width=3.4cm,height=2.7cm]{example-image-a}};
+  \node[smallcaption, above=0.8mm of roi] {annotated search-ROI frame \textit{(placeholder)}};
+  % distractor detections (red)
+  \node[candbox, minimum width=0.55cm, minimum height=0.75cm] at (-0.95,0.45) {};
+  \node[candbox, minimum width=0.50cm, minimum height=0.65cm] at (0.85,-0.25) {};
+  \node[candbox, minimum width=0.42cm, minimum height=0.55cm] at (0.55,0.70) {};
+  % tracked target (teal)
+  \node[gtbox, minimum width=0.62cm, minimum height=0.82cm] (tgt) at (-0.15,-0.45) {};
+\end{scope}
+% legend under the frame
+\node[candbox, minimum width=0.32cm, minimum height=0.32cm] (lgc) at (5.55,-1.95) {};
+\node[font=\tiny, text=navy, anchor=west] at (5.75,-1.95) {YOLO \textbf{distractors}};
+\node[gtbox, minimum width=0.32cm, minimum height=0.32cm] (lgt) at (7.65,-1.95) {};
+\node[font=\tiny, text=navy, anchor=west] at (7.85,-1.95) {tracked \textbf{target}};
+
+\draw[flow] (yolo.east) -- (roi.west);
+
+% ---- (d) keep the non-target crops -> OSNet ----
+\node[procbox, text width=2.2cm] (osnet) at (11.2,0)
+      {\textbf{OSNet}\\[2pt]{\scriptsize encoder $g(\cdot)$}};
+\draw[flow, draw=coral] (roi.east) --
+      node[above, font=\tiny, text=coral, align=center]{red (non-target)\\ crops}
+      node[below, font=\tiny, text=slategray]{drop the target} (osnet.west);
+
+% ---- (e) distractor bank matrix ----
+\begin{scope}[shift={(13.7,0)}]
+  \node[navy, font=\bfseries\small] at (2.3,1.75) {Distractor bank $\Phi^{-}$};
+  \begin{scope}[shift={(0,1.05)}]
+    \node[imgph] at (-1.15,0){\includegraphics[width=0.5cm,height=0.5cm]{example-image-a}};
+    \shrowN{coral!30}{0.31,-0.24,0.05,0.41,0.12,-0.44,0.19,-0.07}{$\phi_1^{-\top}$}
+  \end{scope}
+  \begin{scope}[shift={(0,0.05)}]
+    \node[imgph] at (-1.15,0){\includegraphics[width=0.5cm,height=0.5cm]{example-image-a}};
+    \shrowN{coral!45}{-0.22,0.31,0.05,-0.47,0.19,-0.08,0.53,0.02}{$\phi_2^{-\top}$}
+  \end{scope}
+  \node[font=\normalsize, text=coral!70] at (4*\cwS-0.14,-0.9){$\vdots$};
+  \node[font=\scriptsize, text=navy, anchor=west] at (5.15,-0.9){$\vdots$};
+  \begin{scope}[shift={(0,-1.75)}]
+    \node[imgph] at (-1.15,0){\includegraphics[width=0.5cm,height=0.5cm]{example-image-a}};
+    \shrowN{coral!38}{0.14,-0.39,0.27,0.08,-0.16,0.45,-0.03,0.31}{$\phi_M^{-\top}$}
+  \end{scope}
+  % big brackets
+  \draw[line width=0.9pt, draw=coral] (-0.42,1.45) -- (-0.55,1.45) -- (-0.55,-2.15) -- (-0.42,-2.15);
+  \draw[line width=0.9pt, draw=coral] (5.02,1.45) -- (5.15,1.45) -- (5.15,-2.15) -- (5.02,-2.15);
+  \node[smallcaption, text width=6.2cm] at (2.2,-2.75)
+        {$\Phi^{-}\in\mathbb{R}^{M\times512}$ \ ---\ bounded deque, capacity $50$ (oldest evicted)};
+\end{scope}
+\draw[flow] (osnet.east) -- (13.7-0.6,0);
+
+\end{tikzpicture}%
+}
+
+\vspace{2mm}
+\begin{center}\begin{minipage}{0.92\textwidth}\centering
+\begin{tikzpicture}\node[notebox, text width=0.97\textwidth]{%
+Across the strided collection window, every YOLO detection that competes with the target (but
+\emph{is} not it) is L2-normalised and \textbf{banked as a negative}. $\Phi^{-}$ is the running memory of
+``things that look tracker-worthy but are the wrong identity.''};\end{tikzpicture}
+\end{minipage}\end{center}
+
+\end{frame}
+
+% =====================================================
+% FIGURE 8 : DISTRACTOR-AWARE DRM SCORING (the subtraction hint)
+% =====================================================
+\begin{frame}{Figure 8 --- Distractor-Aware Scoring: Subtract the Distractor Match}
+
+\centering
+\vspace{1mm}
+\resizebox{0.99\textwidth}{!}{%
+\begin{tikzpicture}[font=\small, x=1cm, y=1cm]
+
+% ---- candidate embedding (center-left) ----
+\node[cropcard] (cc) at (0,0) {\includegraphics[width=0.8cm,height=0.8cm]{example-image-a}};
+\node[smallcaption, below=1mm of cc, text width=2.0cm]{candidate $c$};
+\begin{scope}[shift={(2.0,0)}]
+  \shrowN{skyblue!35}{0.40,-0.12,0.33,0.49,-0.20,0.11,0.34,-0.03}{}
+  \sbracketsC{skyblue}{0.34}{-0.34}
+\end{scope}
+\node[font=\scriptsize, text=skyblue!85!black] at (4.2,0.62) {$\phi_c$};
+\draw[flow] (cc.east) -- (1.64,0);
+
+% ================= TOP branch : DRM target bank (reward) =================
+\begin{scope}[shift={(6.3,2.55)}]
+  \node[violet!80, font=\bfseries\scriptsize] at (2.3,0.95) {DRM bank $\Psi$ \ (target identity)};
+  \begin{scope}[shift={(0,0.30)}]
+    \node[imgph] at (-1.1,0){\includegraphics[width=0.48cm,height=0.48cm]{example-image-a}};
+    \shrowN{violet!35}{0.51,0.09,-0.33,0.44,-0.06,0.28,0.12,-0.02}{}
+  \end{scope}
+  \node[font=\scriptsize, text=violet!70] at (4*\cwS-0.14,-0.30){$\vdots$};
+  \begin{scope}[shift={(0,-0.90)}]
+    \node[imgph] at (-1.1,0){\includegraphics[width=0.48cm,height=0.48cm]{example-image-a}};
+    \shrowN{violet!52}{0.47,0.02,-0.29,0.41,-0.11,0.24,0.16,0.05}{}
+  \end{scope}
+  \draw[line width=0.8pt, draw=violet] (-0.42,0.66) -- (-0.55,0.66) -- (-0.55,-1.28) -- (-0.42,-1.28);
+  \draw[line width=0.8pt, draw=violet] (5.02,0.66) -- (5.15,0.66) -- (5.15,-1.28) -- (5.02,-1.28);
+\end{scope}
+\node[eqbox, draw=violet, fill=violetlight, text width=3.0cm, minimum height=0.95cm] (splus)
+      at (12.4,2.35)
+      {\footnotesize$s^{+}=\displaystyle\max_{k}\cos(\phi_c,\psi_k)$};
+\draw[flow, draw=violet] (4.6,0.25) to[out=60,in=180] (6.3-0.6,2.55);
+\draw[flow, draw=violet] (6.3+5.15,2.35) -- (splus.west);
+
+% ================= BOTTOM branch : distractor bank (penalty) =================
+\begin{scope}[shift={(6.3,-2.55)}]
+  \node[coral!85, font=\bfseries\scriptsize] at (2.3,0.95) {Distractor bank $\Phi^{-}$ \ (known impostors)};
+  \begin{scope}[shift={(0,0.30)}]
+    \node[imgph] at (-1.1,0){\includegraphics[width=0.48cm,height=0.48cm]{example-image-a}};
+    \shrowN{coral!30}{0.31,-0.24,0.05,0.41,0.12,-0.44,0.19,-0.07}{}
+  \end{scope}
+  \node[font=\scriptsize, text=coral!70] at (4*\cwS-0.14,-0.30){$\vdots$};
+  \begin{scope}[shift={(0,-0.90)}]
+    \node[imgph] at (-1.1,0){\includegraphics[width=0.48cm,height=0.48cm]{example-image-a}};
+    \shrowN{coral!45}{0.14,-0.39,0.27,0.08,-0.16,0.45,-0.03,0.31}{}
+  \end{scope}
+  \draw[line width=0.8pt, draw=coral] (-0.42,0.66) -- (-0.55,0.66) -- (-0.55,-1.28) -- (-0.42,-1.28);
+  \draw[line width=0.8pt, draw=coral] (5.02,0.66) -- (5.15,0.66) -- (5.15,-1.28) -- (5.02,-1.28);
+\end{scope}
+\node[eqbox, draw=coral, fill=corallight, text width=3.0cm, minimum height=0.95cm] (sminus)
+      at (12.4,-2.35)
+      {\footnotesize$s^{-}=\displaystyle\max_{j}\cos(\phi_c,\phi^{-}_{j})$};
+\draw[flow, draw=coral] (4.6,-0.25) to[out=-60,in=180] (6.3-0.6,-2.55);
+\draw[flow, draw=coral] (6.3+5.15,-2.35) -- (sminus.west);
+
+% ================= COMBINE : score = s+ - gamma s- =================
+\node[eqbox, text width=4.9cm, minimum height=1.55cm, draw=navy, fill=white] (score) at (14.2,0)
+      {\textbf{Distractor-aware score}\\[4pt]
+       {\normalsize$\;\text{score}=s^{+}\;-\;\gamma\, s^{-}$}\\[3pt]
+       {\scriptsize reward target match, \textbf{subtract} distractor match}};
+\draw[flow, draw=violet, line width=1pt] (splus.south) to[out=-90,in=90] ($(score.north)+(-0.2,0)$)
+      node[midway, right=1mm, font=\tiny, text=violet]{$+$};
+\draw[flow, draw=coral, line width=1pt] (sminus.north) to[out=90,in=-90] ($(score.south)+(-0.2,0)$)
+      node[midway, right=1mm, font=\tiny, text=coral]{$-\,\gamma$};
+
+\end{tikzpicture}%
+}
+
+\vspace{2mm}
+\begin{center}\begin{minipage}{0.92\textwidth}\centering
+\begin{tikzpicture}\node[notebox, text width=0.97\textwidth]{%
+A look-alike in the right place still scores high on the target bank $s^{+}$ --- but if it also matches a
+\textbf{banked distractor} it earns a large $s^{-}$, and $-\gamma s^{-}$ \textbf{pulls its score back down}.
+Only a candidate that matches the target \emph{and} none of the known impostors survives.};\end{tikzpicture}
+\end{minipage}\end{center}
+
+\end{frame}
+
+\end{document}

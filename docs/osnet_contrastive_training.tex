@@ -1,0 +1,90 @@
+% OSNet contrastive (Siamese) training diagram
+% ---------------------------------------------------------------
+% Two weight-sharing OSNet branches each encode an input image into
+% a 512-D embedding; the objective is the cosine similarity between
+% the two embeddings.
+%
+% Build (standalone PDF):
+%   pdflatex osnet_contrastive_training.tex
+% ---------------------------------------------------------------
+\documentclass[border=12pt]{standalone}
+
+\usepackage{tikz}
+\usepackage{amsmath}
+\usetikzlibrary{arrows.meta, positioning, calc, backgrounds, fit, shapes.geometric}
+
+\begin{document}
+
+% ---- Palette ---------------------------------------------------
+\definecolor{imgfill}{RGB}{237,242,247}
+\definecolor{imgline}{RGB}{113,128,150}
+\definecolor{netfill}{RGB}{213,232,255}
+\definecolor{netline}{RGB}{ 43,108,176}
+\definecolor{embfill}{RGB}{255,237,213}
+\definecolor{embline}{RGB}{192,111, 20}
+\definecolor{simfill}{RGB}{226,232,240}
+\definecolor{simline}{RGB}{ 45, 55, 72}
+\definecolor{arrowcol}{RGB}{ 74, 85,104}
+
+\begin{tikzpicture}[
+    font=\sffamily,
+    >={Stealth[length=3.2mm]},
+    node distance=10mm,
+    imgnode/.style={
+        draw=imgline, fill=imgfill, line width=0.9pt,
+        minimum width=26mm, minimum height=26mm, rounded corners=2pt,
+        align=center, font=\sffamily\small},
+    netnode/.style={
+        draw=netline, fill=netfill, line width=1.1pt,
+        minimum width=30mm, minimum height=42mm, rounded corners=6pt,
+        align=center, font=\sffamily\bfseries},
+    embnode/.style={
+        draw=embline, fill=embfill, line width=1.0pt,
+        minimum width=16mm, minimum height=40mm, rounded corners=3pt,
+        align=center, font=\sffamily\small},
+    simnode/.style={
+        draw=simline, fill=simfill, line width=1.1pt,
+        minimum width=26mm, minimum height=26mm, rounded corners=4pt,
+        align=center, font=\sffamily\bfseries},
+    flow/.style={-{Stealth[length=3.2mm]}, line width=1.1pt, color=arrowcol},
+]
+
+% ============================ LEFT BRANCH ============================
+\node[imgnode] (imgA) {\textbf{Input image A}\\[2pt]\footnotesize (anchor crop)};
+\node[netnode, right=of imgA] (netA) {OSNet\\[3pt]\footnotesize$\theta$};
+\node[embnode, right=of netA] (embA) {$\mathbf{z}_A$\\[3pt]\footnotesize 512-D\\\footnotesize embedding};
+
+% ============================ SIMILARITY NODE ========================
+\node[simnode, right=16mm of embA] (sim) {cosine\\ similarity\\[2pt]
+    $\dfrac{\mathbf{z}_A\!\cdot\!\mathbf{z}_B}{\lVert\mathbf{z}_A\rVert\,\lVert\mathbf{z}_B\rVert}$};
+
+% ============================ RIGHT BRANCH ===========================
+% mirrored: embedding, network and image face back toward the centre
+\node[embnode, right=16mm of sim] (embB) {$\mathbf{z}_B$\\[3pt]\footnotesize 512-D\\\footnotesize embedding};
+\node[netnode, right=of embB] (netB) {OSNet\\[3pt]\footnotesize$\theta$};
+\node[imgnode, right=of netB] (imgB) {\textbf{Input image B}\\[2pt]\footnotesize (positive / negative crop)};
+
+% ============================ FORWARD ARROWS =========================
+\draw[flow] (imgA) -- (netA);
+\draw[flow] (netA) -- (embA);
+\draw[flow] (imgB) -- (netB);
+\draw[flow] (netB) -- (embB);
+
+% ============================ SIMILARITY ARROWS ======================
+\draw[flow] (embA) -- (sim);
+\draw[flow] (embB) -- (sim);
+
+% ============================ SHARED WEIGHTS =========================
+\draw[<->, dashed, line width=1.0pt, color=netline]
+    (netA.north) to[bend left=32] node[midway, above, font=\sffamily\small, text=netline]
+    {shared weights $\theta$ (Siamese)} (netB.north);
+
+% ============================ LOSS ANNOTATION ========================
+\node[below=9mm of sim, align=center, font=\sffamily\small, text=simline]
+    (loss) {\textbf{Contrastive objective}\\[2pt]
+    pull $\mathbf{z}_A,\mathbf{z}_B$ together for the same identity,\\
+    push them apart for different identities};
+\draw[flow, densely dotted] (sim) -- (loss);
+
+\end{tikzpicture}
+\end{document}

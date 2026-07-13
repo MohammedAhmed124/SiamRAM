@@ -5,9 +5,9 @@ Run SiamRAM on a manifest split and write presentation-friendly debug videos.
 Reads the manifest (default ``data/metadata/contestant_manifest.json``), takes
 the ``public_lb`` split, and for each sequence calls the presentation visualiser
 (``vis.test_model_presentation.run_inference``) which renders the full annotated output — main
-frame with GT/predicted boxes, side template / search / recovery panels,
-classification-response heatmaps, template-admission stats and the
-auto-threshold HUD.
+frame with tracking overlays, an initialization-template inset, and the exact
+tracker search region. The appended side column and bottom statistics strip are
+omitted so the output keeps the source dimensions.
 
 Manifest entries look like:
 
@@ -104,7 +104,7 @@ def _dataset_video_names(entry: dict):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Render presentation-friendly SiamRAM debug videos for a manifest split."
+        description="Render source-sized SiamRAM presentation videos for a manifest split."
     )
     parser.add_argument("--config", default=None,
                         help="Inference config: a bare filename resolved under src/config "
@@ -216,6 +216,7 @@ def main():
                 tracker=model,
                 output_path=output_path,
                 output_video=output_video,
+                main_frame_only=True,
             )
             ran += 1
         except (FileNotFoundError, RuntimeError, ValueError) as exc:

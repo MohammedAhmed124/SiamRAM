@@ -52,6 +52,7 @@ C_FRAME = (180, 180, 180)
 C_YOLO_CANDIDATE = (0, 255, 255)
 C_OBJECT_MOTION = (255, 80, 255)
 C_CAMERA_MOTION = (255, 255, 0)
+C_TRACKER_SEARCH = (255, 190, 0)
 C_TEXT_SHADOW = (0, 0, 0)
 
 PRESENTATION_PRED_THICKNESS = 4
@@ -417,73 +418,60 @@ def _draw_legend(
         )
 
 
-# Same colormap + scale for both cls panels so the raw-vs-penalised response
-# maps are directly comparable (the penalty's spatial reweighting shows as a
-# change within one colour space, not a difference in palette).
-_CMAP_CLS = cv2.COLORMAP_JET
-
-
-def _draw_heatmap_panel(
+def _draw_image_panel(
     canvas: np.ndarray,
     x: int,
     y: int,
     size: int,
-    data,
+    image: np.ndarray | None,
     label: str,
-    colormap: int,
-    normalize: bool,
-    peak_text: str | None = None,
 ) -> None:
-    """
-    Draw a small labelled heatmap inset onto the composite canvas in place.
-
-    Inputs:
-        canvas    - np.ndarray (H x W x 3) full composite frame, drawn into in place
-        x, y      - int top-left corner of the panel (header included)
-        size      - int side length (px) of the square heatmap below the header
-        data      - 2D array-like map (e.g. classification response) or None
-        label     - str header text stamped on the dark title bar
-        colormap  - cv2 colormap id applied to the normalised map
-        normalize - bool min-max stretch the map for contrast; when False the
-                    data is assumed to already be in [0, 1] (the sigmoid map)
-        peak_text - optional str drawn at the panel's bottom-right (e.g. peak conf)
-
-    Renders a 16px dark header with the label, then the map as a colour heatmap
-    resized to size x size with INTER_NEAREST (so the true low-res response grid
-    stays visible). Missing/degenerate maps show a flat "n/a" panel rather than
-    crashing.
-    """
-    header_h = 16
+    """Draw a large, high-contrast labelled image crop."""
+    header_h = 24
     x2 = x + size
     y2 = y + header_h + size
     cv2.rectangle(canvas, (x, y), (x2, y + header_h), (30, 30, 30), -1)
     cv2.putText(
-        canvas, label, (x + 4, y + 12), FONT, 0.36, (235, 235, 235), 1, cv2.LINE_AA
+        canvas, label, (x + 7, y + 17), FONT, 0.46,
+        (255, 255, 255), 1, cv2.LINE_AA,
     )
-
-    arr = np.asarray(data, dtype=np.float32) if data is not None else None
-    if arr is None or arr.ndim != 2 or arr.size == 0:
+    if image is None or getattr(image, "size", 0) == 0:
         cv2.rectangle(canvas, (x, y + header_h), (x2, y2), (45, 45, 45), -1)
         cv2.putText(
             canvas, "n/a", (x + size // 2 - 14, y + header_h + size // 2),
-            FONT, 0.45, (160, 160, 160), 1, cv2.LINE_AA,
+            FONT, 0.38, (180, 180, 180), 1, cv2.LINE_AA,
         )
     else:
-        if normalize:
-            lo = float(arr.min())
-            hi = float(arr.max())
-            arr = (arr - lo) / (hi - lo) if hi - lo > 1e-8 else np.zeros_like(arr)
-        u8 = np.clip(arr * 255.0, 0, 255).astype(np.uint8)
-        u8 = cv2.resize(u8, (size, size), interpolation=cv2.INTER_NEAREST)
-        heat = cv2.applyColorMap(u8, colormap)
-        canvas[y + header_h: y2, x:x2] = heat
-        if peak_text:
-            (tw, _), _ = cv2.getTextSize(peak_text, FONT, 0.36, 1)
-            cv2.putText(
-                canvas, peak_text, (x2 - tw - 3, y2 - 5),
-                FONT, 0.36, (255, 255, 255), 1, cv2.LINE_AA,
-            )
-    cv2.rectangle(canvas, (x, y), (x2, y2), (90, 90, 90), 1)
+        canvas[y + header_h:y2, x:x2] = cv2.resize(image, (size, size))
+    cv2.rectangle(canvas, (x, y), (x2, y2), (230, 230, 230), 2)
+
+
+def _search_region_rect(
+    tracker,
+    image: np.ndarray,
+    bbox,
+    use_last_mapping: bool = True,
+) -> np.ndarray | None:
+    """Return the live search rectangle, preferring the exact inference mapping."""
+    from utils.utils import extend_bbox
+
+    if image is None or getattr(image, "size", 0) == 0:
+        return None
+    cfg = getattr(tracker, "tracking_config", None)
+    if cfg is None:
+        return None
+    context = None
+    state = getattr(tracker, "tracking_state", None)
+    if use_last_mapping and state is not None:
+        context = getattr(state, "mapping", None)
+    if context is None:
+        context = extend_bbox(
+            bbox,
+            image_width=image.shape[1],
+            image_height=image.shape[0],
+            offset=cfg["search_context"],
+        )
+    return np.asarray(context, dtype=float).copy()
 
 
 def _refresh_panels(
@@ -593,6 +581,7 @@ def run_inference(
     tracker,
     output_path: str = "outputs/tracked_video.mp4",
     output_video: bool = False,
+    main_frame_only: bool = False,
 ):
     is_dam = hasattr(tracker, "tracker")
     inner_tracker = tracker.tracker if is_dam else tracker
@@ -780,12 +769,12 @@ def run_inference(
         C_STATUS_TEXT = (255, 255, 255)
         inner_tracker._viz_capture = True
 
-        top_h = max(h, PANEL_W * 3 + GAP * 2)
+        top_h = h if main_frame_only else max(h, PANEL_W * 3 + GAP * 2)
         stats_strip_h = 236
-        stats_strip_gap = 8
+        stats_strip_gap = 0 if main_frame_only else 8
         stats_y0 = top_h + stats_strip_gap
-        canvas_h = top_h + stats_strip_gap + stats_strip_h
-        total_w = w + PANEL_W
+        canvas_h = h if main_frame_only else top_h + stats_strip_gap + stats_strip_h
+        total_w = w if main_frame_only else w + PANEL_W
         y_off = (top_h - h) // 2
 
         canvas = np.zeros((canvas_h, total_w, 3), dtype=np.uint8)
@@ -1094,39 +1083,30 @@ def run_inference(
                 writer_csv.writeheader()
                 writer_csv.writerows(aux_index_rows)
 
-        # Bottom-left heatmap insets: SiamABC classification response map, raw vs
-        # after the scale/Hanning penalty. Sized from the frame width so two
-        # squares fit side by side; skipped on frames too narrow to hold them.
-        viz_pad = 8
-        viz_label_h = 16
-        viz_sz = int(min(112, max(56, (w - 3 * viz_pad) // 2)))
-        viz_y = y_off + h - viz_sz - viz_label_h - viz_pad
-        viz_x_raw = viz_pad
-        viz_x_pen = viz_pad + viz_sz + viz_pad
-        viz_enabled = (w >= 2 * 56 + 3 * viz_pad) and (viz_y >= y_off)
+        # Projector-friendly initialization-template inset in the upper-right,
+        # positioned just below the camera-status pill.
+        viz_pad = 12
+        viz_label_h = 24
+        preferred_viz_sz = int(round(min(w, h) * 0.18))
+        max_fitting_viz_sz = max(80, w - 2 * viz_pad)
+        viz_sz = int(np.clip(min(preferred_viz_sz, max_fitting_viz_sz), 120, 220))
+        viz_y = y_off + 44
+        viz_x_template = w - viz_pad - viz_sz
+        viz_enabled = (
+            viz_x_template >= 0
+            and viz_y + viz_label_h + viz_sz <= y_off + h
+        )
 
-        def _viz_peak(m) -> "str | None":
-            try:
-                return f"max {float(np.max(m)):.2f}" if m is not None else None
-            except (ValueError, TypeError):
-                return None
+        init_template_crop: np.ndarray | None = None
+        current_search_rect: np.ndarray | None = None
 
         def _draw_viz_panels() -> None:
-            """Draw the classification-head response maps (raw vs after the
-            scale/Hanning penalty) bottom-left, from the maps the SiamABC tracker
-            stashed during its last primary forward. Same colormap + scale so the
-            penalty's spatial reweighting is directly comparable."""
+            """Draw the fixed initialization template."""
             if not viz_enabled:
                 return
-            raw_map = getattr(inner_tracker, "viz_cls_map", None)
-            pen_map = getattr(inner_tracker, "viz_cls_pen_map", None)
-            _draw_heatmap_panel(
-                canvas, viz_x_raw, viz_y, viz_sz, raw_map,
-                "CLS RAW", _CMAP_CLS, normalize=False, peak_text=_viz_peak(raw_map),
-            )
-            _draw_heatmap_panel(
-                canvas, viz_x_pen, viz_y, viz_sz, pen_map,
-                "CLS PENALTY", _CMAP_CLS, normalize=False, peak_text=_viz_peak(pen_map),
+            _draw_image_panel(
+                canvas, viz_x_template, viz_y, viz_sz,
+                init_template_crop, "INIT TEMPLATE",
             )
 
         def _overlay_bbox(
@@ -1141,6 +1121,36 @@ def run_inference(
             bw = int(round(float(arr[2]) * scale))
             bh = int(round(float(arr[3]) * scale))
             return x, y, bw, bh
+
+        def _draw_tracker_search_box(rect, scale: float) -> None:
+            """Draw the exact model-search mapping in source-frame coordinates."""
+            if rect is None:
+                return
+            arr = np.asarray(rect, dtype=float).reshape(-1)
+            if arr.size < 4 or not np.all(np.isfinite(arr[:4])):
+                return
+            sx, sy, sw, sh = _overlay_bbox(arr, scale)
+            if sw <= 0 or sh <= 0:
+                return
+            _draw_box_with_outline(
+                canvas,
+                (sx, sy + y_off),
+                (sx + sw, sy + sh + y_off),
+                C_TRACKER_SEARCH,
+                PRESENTATION_ROI_THICKNESS,
+            )
+            visible_w = max(0, min(w, sx + sw) - max(0, sx))
+            visible_h = max(0, min(h, sy + sh) - max(0, sy))
+            padded = visible_w != sw or visible_h != sh
+            size_text = f"{sw}x{sh}" + (" PAD" if padded else "")
+            _draw_label(
+                canvas,
+                f"TRACKER SEARCH  {size_text}",
+                sx + 3,
+                max(y_off + 42, sy + y_off + 3),
+                C_TRACKER_SEARCH,
+                scale=0.50,
+            )
 
         def _scaled_vector(vec, scale: float):
             if vec is None:
@@ -1342,6 +1352,18 @@ def run_inference(
             )
 
         tracker.initialize(first_bgr, initial_bbox)
+        viz_init_frame = (
+            getattr(tracker, "init_frame", None) if is_dam else first_bgr
+        )
+        if viz_init_frame is None:
+            viz_init_frame = first_bgr
+        viz_init_bbox = getattr(inner_tracker, "running_dynamic_bbox", initial_bbox)
+        init_template_crop = _extract_dynamic_template_crop(
+            inner_tracker, viz_init_frame
+        )
+        current_search_rect = _search_region_rect(
+            inner_tracker, viz_init_frame, viz_init_bbox, use_last_mapping=False
+        )
         _refresh_panels(
             inner_tracker,
             first_bgr,
@@ -1358,10 +1380,18 @@ def run_inference(
 
         canvas.fill(0)
         canvas[y_off: y_off + h, :w] = first_bgr
-        canvas[row_tmpl] = panel_template
-        canvas[row_search] = panel_search
-        _refresh_recovery_panel(tracker, panel_recovery)
-        canvas[row_recovery] = panel_recovery
+        if not main_frame_only:
+            canvas[row_tmpl] = panel_template
+            canvas[row_search] = panel_search
+            _refresh_recovery_panel(tracker, panel_recovery)
+            canvas[row_recovery] = panel_recovery
+        init_frame_scale = float(getattr(tracker, "_frame_scale", 1.0))
+        init_overlay_scale = (
+            1.0
+            if not np.isfinite(init_frame_scale) or init_frame_scale <= 1e-8
+            else 1.0 / init_frame_scale
+        )
+        _draw_tracker_search_box(current_search_rect, init_overlay_scale)
         bx, by, bw, bh = map(int, initial_bbox)
         _draw_box_with_outline(
             canvas,
@@ -1430,6 +1460,20 @@ def run_inference(
             progress.update(visual_mode)
 
             if output_video:
+                viz_search_frame = (
+                    tracker._prescale_frame(frame)
+                    if is_dam and hasattr(tracker, "_prescale_frame")
+                    else frame
+                )
+                viz_search_bbox = getattr(
+                    getattr(inner_tracker, "tracking_state", None), "bbox", bbox
+                )
+                current_search_rect = _search_region_rect(
+                    inner_tracker,
+                    viz_search_frame,
+                    viz_search_bbox,
+                    use_last_mapping=True,
+                )
                 recovered_frame = _is_recovered_frame(frame_idx)
                 cur_dyn_bbox = inner_tracker.running_dynamic_bbox
                 cur_dyn_obj = inner_tracker.running_dynamic_image
@@ -1456,16 +1500,23 @@ def run_inference(
 
                 canvas.fill(0)
                 canvas[y_off: y_off + h, :w] = frame
-                canvas[row_tmpl] = panel_template
-                canvas[row_search] = panel_search
-                _refresh_recovery_panel(tracker, panel_recovery)
-                canvas[row_recovery] = panel_recovery
+                if not main_frame_only:
+                    canvas[row_tmpl] = panel_template
+                    canvas[row_search] = panel_search
+                    _refresh_recovery_panel(tracker, panel_recovery)
+                    canvas[row_recovery] = panel_recovery
 
                 frame_scale = float(getattr(tracker, "_frame_scale", 1.0))
                 if not np.isfinite(frame_scale) or frame_scale <= 1e-8:
                     overlay_scale = 1.0
                 else:
                     overlay_scale = 1.0 / frame_scale
+
+                # During recovery the inner mapping may belong to a candidate
+                # probe rather than this frame's normal tracker search. The
+                # dedicated recovery ROI is drawn later, so suppress this box.
+                if not in_occlusion:
+                    _draw_tracker_search_box(current_search_rect, overlay_scale)
 
                 if visual_mode != "occluded":
                     _save_tracked_bbox_snapshot(frame_idx, frame, bbox)
@@ -1496,11 +1547,11 @@ def run_inference(
                 elif recovered_frame:
                     _mark_last_yolo_event_recovered(frame_idx)
 
-                if in_occlusion:
+                if in_occlusion and not main_frame_only:
                     cv2.rectangle(
                         canvas, (w, 0), (total_w - 1, canvas_h - 1), C_OCCLUDED, 3
                     )
-                elif template_updated:
+                elif template_updated and not main_frame_only:
                     cv2.rectangle(
                         canvas, (w, 0), (total_w - 1, canvas_h - 1), C_UPDATE, 2
                     )
@@ -1604,6 +1655,8 @@ def run_inference(
                 stack_y = canvas_h - 6
 
                 def _stack_box(y_bottom, line1, line2, fg):
+                    if main_frame_only:
+                        return y_bottom
                     y_top = y_bottom - 40
                     cv2.rectangle(
                         canvas, (stack_x0, y_top), (stack_x1, y_bottom), (20, 20, 20), -1

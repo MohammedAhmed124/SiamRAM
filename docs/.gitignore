@@ -17,3 +17,8 @@ siamram_reference_figures.png
 db*.png
 chk*.png
 preview*.png
+
+# Overleaf packaging (not committed)
+overleaf/
+*.zip
+siamram_overleaf_preview.pdf

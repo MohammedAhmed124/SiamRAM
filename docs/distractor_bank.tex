@@ -50,9 +50,12 @@
   notebox/.style={rounded corners=3pt, draw=amber!55, line width=0.7pt, fill=amberlight!55,
                    align=center, text=navy, font=\scriptsize, inner sep=5pt},
   smallcaption/.style={font=\tiny, text=slategray, align=center},
+  % large matrix cell (identical to the deck's Figure 2)
+  numcell/.style={draw=slategray!45, thin, minimum width=6.6mm, minimum height=6.2mm,
+                   inner sep=0pt, font=\fontsize{5}{5}\selectfont, text=navy},
+  % compact numbered cell (for the scoring figure)
   numcellS/.style={draw=slategray!45, thin, minimum width=6.0mm, minimum height=5.4mm,
                    inner sep=0pt, font=\fontsize{4.6}{4.6}\selectfont, text=navy},
-  framecard/.style={draw=slategray!70, thick, rounded corners=1.5pt, fill=white, inner sep=0pt},
   cropcard/.style={draw=slategray!60, thick, rounded corners=1.5pt, fill=white,
                    minimum width=0.95cm, minimum height=0.95cm, inner sep=0pt},
   candbox/.style={draw=coral, line width=1.0pt},
@@ -61,7 +64,7 @@
                    inner sep=0pt, minimum width=0.62cm, minimum height=0.62cm},
 }
 
-% ---- NUMBERED embedding rows (same look as the deck's Figs 2, 5, 6) ----
+% ---- compact numbered rows (same look as the deck's Figs 5, 6) ----
 \newcommand{\cwS}{0.62}
 \newcommand{\shrowN}[3]{%
   \foreach \v [count=\ic from 0] in {#2}{%
@@ -79,100 +82,100 @@
   \draw[line width=0.8pt, draw=#1] (-0.36,#2) ++(0.18,0) -- (-0.36,#2) -- (-0.36,#3) -- ++(0.18,0);%
   \draw[line width=0.8pt, draw=#1] (5.02,#2) ++(-0.18,0) -- (5.02,#2) -- (5.02,#3) -- ++(-0.18,0);%
 }
-\newcommand{\okmark}[2]{\draw[tealmem, line width=1.2pt, line cap=round, line join=round]
-      (#1,#2) ++(-0.09,0.0) -- ++(0.07,-0.10) -- ++(0.16,0.20);}
-\newcommand{\nomark}[2]{\draw[coral, line width=1.2pt, line cap=round]
-      (#1,#2) ++(-0.09,0.09) -- ++(0.18,-0.18)  (#1,#2) ++(0.09,0.09) -- ++(-0.18,-0.18);}
 
 \begin{document}
 
 % =====================================================
-% FIGURE 7 : DISTRACTOR-BANK CONSTRUCTION
+% FIGURE 2b : DISTRACTOR-BANK CONSTRUCTION  (sibling of Figure 2)
 % =====================================================
-\begin{frame}{Figure 7 --- Building the Distractor Bank (YOLO Across Strided Frames)}
+\begin{frame}{Figure 2b --- Distractor Bank: Red Detections $\to$ OSNet $\to$ Negative Matrix}
 
 \centering
-\vspace{-0.5mm}
-\resizebox{0.99\textwidth}{!}{%
+\resizebox{!}{0.86\textheight}{%
 \begin{tikzpicture}[font=\small, x=1cm, y=1cm]
 
-% ---- (a) strided video frames ----
-\node[framecard, minimum width=1.35cm, minimum height=1.0cm] (fa3) at (0.30,0.28)
-      {\includegraphics[width=1.3cm,height=0.95cm]{example-image-a}};
-\node[framecard, minimum width=1.35cm, minimum height=1.0cm] (fa2) at (0.15,0.13)
-      {\includegraphics[width=1.3cm,height=0.95cm]{example-image-a}};
-\node[framecard, minimum width=1.35cm, minimum height=1.0cm] (fa1) at (0.0,-0.02)
-      {\includegraphics[width=1.3cm,height=0.95cm]{example-image-a}};
-\node[smallcaption, below=5mm of fa1, text width=2.6cm]
-      {video frames sampled\\ \textbf{every stride $s$}};
+\def\rowspacing{0.95}
+\def\cw{0.66}
 
-% ---- (b) YOLO ----
-\node[procbox, text width=2.2cm] (yolo) at (3.0,0)
-      {\textbf{YOLOv11n}\\[2pt]{\scriptsize on search ROI}};
-\draw[flow] (fa1.east) ++(0.15,0) -- (yolo.west);
+% =========== STAGE 1 : annotated frame -> OSNet ===========
+\node[imgcard, minimum width=2.4cm, minimum height=2.4cm] (frame) at (0,0)
+      {\includegraphics[width=2.35cm,height=2.35cm]{example-image-a}};
+\node[smallcaption, above=1.2mm of frame] {search frame $t$ --- YOLO detections};
+% distractor detections (red)
+\node[candbox, minimum width=0.60cm, minimum height=0.80cm] at (-0.62,0.42) {};
+\node[candbox, minimum width=0.50cm, minimum height=0.64cm] at (0.60,-0.22) {};
+\node[candbox, minimum width=0.42cm, minimum height=0.54cm] at (0.48,0.60) {};
+% tracked target (teal)
+\node[gtbox, minimum width=0.58cm, minimum height=0.78cm] at (-0.10,-0.42) {};
+% legend
+\node[candbox, minimum width=0.28cm, minimum height=0.28cm] at (-0.95,-1.72) {};
+\node[font=\tiny, text=navy, anchor=west] at (-0.78,-1.72) {distractors \textbf{(red)}};
+\node[gtbox, minimum width=0.28cm, minimum height=0.28cm] at (-0.95,-2.12) {};
+\node[font=\tiny, text=navy, anchor=west] at (-0.78,-2.12) {tracked target};
 
-% ---- (c) annotated ROI frame : the PLACEHOLDER ----
-\begin{scope}[shift={(6.6,0)}]
-  \node[framecard, minimum width=3.4cm, minimum height=2.7cm] (roi) at (0,0)
-        {\includegraphics[width=3.4cm,height=2.7cm]{example-image-a}};
-  \node[smallcaption, above=0.8mm of roi] {annotated search-ROI frame \textit{(placeholder)}};
-  % distractor detections (red)
-  \node[candbox, minimum width=0.55cm, minimum height=0.75cm] at (-0.95,0.45) {};
-  \node[candbox, minimum width=0.50cm, minimum height=0.65cm] at (0.85,-0.25) {};
-  \node[candbox, minimum width=0.42cm, minimum height=0.55cm] at (0.55,0.70) {};
-  % tracked target (teal)
-  \node[gtbox, minimum width=0.62cm, minimum height=0.82cm] (tgt) at (-0.15,-0.45) {};
+\node[procbox] (osnet) at (3.9,0) {\textbf{OSNet-x0.25}\\[2pt]{\scriptsize $g(\cdot)$, one batch}\\{\scriptsize $\approx0.16$ GFLOPs / crop}};
+\draw[flow, draw=coral] (frame.east) --
+      node[above, font=\tiny, text=coral, align=center]{red crops\\ (non-target)} (osnet.west);
+
+% =========== STAGE 2 : route into the bank ===========
+\coordinate (matOrigin) at (1.95,-3.55);
+\node[navy, font=\bfseries\small] (banktitle) at (4.55,-2.35)
+      {Distractor bank $\Phi^{-}$ --- Negative Appearance Memory};
+\draw[flow, draw=coral] (osnet.south) -- node[right, font=\tiny, text=coral, xshift=0.5mm, align=left]
+      {append each\\ detection as\\ a negative row} (banktitle.north);
+
+% =========== STAGE 3 : the stacked negative matrix ===========
+% -- row 1 --
+\begin{scope}[shift={(matOrigin)}]
+  \node[imgcard, draw=coral, minimum width=7mm, minimum height=7mm] at (-1.6,0)
+        {\includegraphics[width=5mm,height=5mm]{example-image-a}};
+  \foreach \i/\v/\c in {0/{0.31}/coral!30,1/{-0.24}/coral!45,2/{0.05}/coral!35,3/{0.41}/coral!55}{
+    \node[numcell, fill=\c] at (\i*\cw,0) {\v};}
+  \node[font=\tiny, text=slategray] at (4*\cw+0.3,0) {$\cdots$};
+  \foreach \i/\v/\c in {0/{0.12}/coral!40,1/{-0.44}/coral!55,2/{0.19}/coral!35,3/{-0.07}/coral!50}{
+    \node[numcell, fill=\c] at (4*\cw+0.6+\i*\cw,0) {\v};}
+  \node[font=\scriptsize, text=navy, anchor=west] at (8*\cw+0.75,0) {$b_1,\ \phi_1^{-\top}$};
 \end{scope}
-% legend under the frame
-\node[candbox, minimum width=0.32cm, minimum height=0.32cm] (lgc) at (5.55,-1.95) {};
-\node[font=\tiny, text=navy, anchor=west] at (5.75,-1.95) {YOLO \textbf{distractors}};
-\node[gtbox, minimum width=0.32cm, minimum height=0.32cm] (lgt) at (7.65,-1.95) {};
-\node[font=\tiny, text=navy, anchor=west] at (7.85,-1.95) {tracked \textbf{target}};
-
-\draw[flow] (yolo.east) -- (roi.west);
-
-% ---- (d) keep the non-target crops -> OSNet ----
-\node[procbox, text width=2.2cm] (osnet) at (11.2,0)
-      {\textbf{OSNet}\\[2pt]{\scriptsize encoder $g(\cdot)$}};
-\draw[flow, draw=coral] (roi.east) --
-      node[above, font=\tiny, text=coral, align=center]{red (non-target)\\ crops}
-      node[below, font=\tiny, text=slategray]{drop the target} (osnet.west);
-
-% ---- (e) distractor bank matrix ----
-\begin{scope}[shift={(13.7,0)}]
-  \node[navy, font=\bfseries\small] at (2.3,1.75) {Distractor bank $\Phi^{-}$};
-  \begin{scope}[shift={(0,1.05)}]
-    \node[imgph] at (-1.15,0){\includegraphics[width=0.5cm,height=0.5cm]{example-image-a}};
-    \shrowN{coral!30}{0.31,-0.24,0.05,0.41,0.12,-0.44,0.19,-0.07}{$\phi_1^{-\top}$}
-  \end{scope}
-  \begin{scope}[shift={(0,0.05)}]
-    \node[imgph] at (-1.15,0){\includegraphics[width=0.5cm,height=0.5cm]{example-image-a}};
-    \shrowN{coral!45}{-0.22,0.31,0.05,-0.47,0.19,-0.08,0.53,0.02}{$\phi_2^{-\top}$}
-  \end{scope}
-  \node[font=\normalsize, text=coral!70] at (4*\cwS-0.14,-0.9){$\vdots$};
-  \node[font=\scriptsize, text=navy, anchor=west] at (5.15,-0.9){$\vdots$};
-  \begin{scope}[shift={(0,-1.75)}]
-    \node[imgph] at (-1.15,0){\includegraphics[width=0.5cm,height=0.5cm]{example-image-a}};
-    \shrowN{coral!38}{0.14,-0.39,0.27,0.08,-0.16,0.45,-0.03,0.31}{$\phi_M^{-\top}$}
-  \end{scope}
-  % big brackets
-  \draw[line width=0.9pt, draw=coral] (-0.42,1.45) -- (-0.55,1.45) -- (-0.55,-2.15) -- (-0.42,-2.15);
-  \draw[line width=0.9pt, draw=coral] (5.02,1.45) -- (5.15,1.45) -- (5.15,-2.15) -- (5.02,-2.15);
-  \node[smallcaption, text width=6.2cm] at (2.2,-2.75)
-        {$\Phi^{-}\in\mathbb{R}^{M\times512}$ \ ---\ bounded deque, capacity $50$ (oldest evicted)};
+% -- row 2 --
+\begin{scope}[shift={($(matOrigin)+(0,-\rowspacing)$)}]
+  \node[imgcard, draw=coral, minimum width=7mm, minimum height=7mm] at (-1.6,0)
+        {\includegraphics[width=5mm,height=5mm]{example-image-a}};
+  \foreach \i/\v/\c in {0/{-0.22}/coral!45,1/{0.31}/coral!30,2/{0.05}/coral!50,3/{-0.47}/coral!40}{
+    \node[numcell, fill=\c] at (\i*\cw,0) {\v};}
+  \node[font=\tiny, text=slategray] at (4*\cw+0.3,0) {$\cdots$};
+  \foreach \i/\v/\c in {0/{0.19}/coral!35,1/{-0.08}/coral!55,2/{0.53}/coral!45,3/{0.02}/coral!30}{
+    \node[numcell, fill=\c] at (4*\cw+0.6+\i*\cw,0) {\v};}
+  \node[font=\scriptsize, text=navy, anchor=west] at (8*\cw+0.75,0) {$b_2,\ \phi_2^{-\top}$};
 \end{scope}
-\draw[flow] (osnet.east) -- (13.7-0.6,0);
+% -- ellipsis row --
+\node[font=\Large, text=coral!70] at ($(matOrigin)+(3.5*\cw+0.3,-2*\rowspacing)$) {$\vdots$};
+\node[font=\scriptsize, text=navy, anchor=west] at ($(matOrigin)+(8*\cw+0.75,-2*\rowspacing)$) {$\vdots$};
+% -- row M --
+\begin{scope}[shift={($(matOrigin)+(0,-3*\rowspacing)$)}]
+  \node[imgcard, draw=coral, minimum width=7mm, minimum height=7mm] at (-1.6,0)
+        {\includegraphics[width=5mm,height=5mm]{example-image-a}};
+  \foreach \i/\v/\c in {0/{0.14}/coral!40,1/{-0.39}/coral!55,2/{0.27}/coral!35,3/{0.08}/coral!45}{
+    \node[numcell, fill=\c] at (\i*\cw,0) {\v};}
+  \node[font=\tiny, text=slategray] at (4*\cw+0.3,0) {$\cdots$};
+  \foreach \i/\v/\c in {0/{-0.16}/coral!50,1/{0.45}/coral!35,2/{-0.03}/coral!45,3/{0.31}/coral!55}{
+    \node[numcell, fill=\c] at (4*\cw+0.6+\i*\cw,0) {\v};}
+  \node[font=\scriptsize, text=navy, anchor=west] at (8*\cw+0.75,0) {$b_M,\ \phi_M^{-\top}$};
+\end{scope}
+
+% ---- big matrix brackets spanning all rows ----
+\coordinate (bTL) at ($(matOrigin)+(-0.42, 0.40)$);
+\coordinate (bBL) at ($(matOrigin)+(-0.42,-3*\rowspacing-0.40)$);
+\coordinate (bTR) at ($(matOrigin)+(8*\cw+0.42, 0.40)$);
+\coordinate (bBR) at ($(matOrigin)+(8*\cw+0.42,-3*\rowspacing-0.40)$);
+\draw[line width=0.9pt, draw=coral] ($(bTL)+(0.2,0)$) -- (bTL) -- (bBL) -- ++(0.2,0);
+\draw[line width=0.9pt, draw=coral] ($(bTR)+(-0.2,0)$) -- (bTR) -- (bBR) -- ++(-0.2,0);
+
+\node[smallcaption, text width=8.4cm] at ($(matOrigin)+(2.64,-3*\rowspacing-1.15)$)
+      {$\Phi^{-}=\big[\,\phi_1^{-\top};\,\phi_2^{-\top};\,\ldots;\,\phi_M^{-\top}\,\big]\in\mathbb{R}^{M\times512}$,\quad
+       bounded deque, capacity $50$ (oldest evicted)};
 
 \end{tikzpicture}%
 }
-
-\vspace{2mm}
-\begin{center}\begin{minipage}{0.92\textwidth}\centering
-\begin{tikzpicture}\node[notebox, text width=0.97\textwidth]{%
-Across the strided collection window, every YOLO detection that competes with the target (but
-\emph{is} not it) is L2-normalised and \textbf{banked as a negative}. $\Phi^{-}$ is the running memory of
-``things that look tracker-worthy but are the wrong identity.''};\end{tikzpicture}
-\end{minipage}\end{center}
 
 \end{frame}
 

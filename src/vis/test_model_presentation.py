@@ -9,7 +9,9 @@ crops, and generating detailed latency reports.
 import gc
 import csv
 import os
+import time
 from collections import deque
+from pathlib import Path
 from typing import List
 
 import cv2
@@ -586,7 +588,9 @@ def run_inference(
     is_dam = hasattr(tracker, "tracker")
     inner_tracker = tracker.tracker if is_dam else tracker
 
-    initial_bbox = np.array(initial_bbox).astype(int)
+    # Keep the tracker input identical to predictor.run_tracker: annotations
+    # remain floating point until the tracker applies its own scaling/rounding.
+    initial_bbox = np.asarray(initial_bbox, dtype=float)
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     head, tail = os.path.split(output_path)
@@ -597,43 +601,71 @@ def run_inference(
         os.path.normpath(video_path)
     )
 
+    def _display_bgr(frame: np.ndarray) -> np.ndarray:
+        """Return a 3-channel view/copy for OpenCV drawing and encoding only."""
+        if frame.ndim == 3 and frame.shape[2] == 4:
+            return cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+        return frame
+
     cap = None
+    sequence_start = time.perf_counter()
+    decode_time = 0.0
+    decode_frames = 0
     frame_paths: list[str] = []
     frame_ptr = 0
     if os.path.isdir(video_path):
         frame_paths = _load_sequence_frame_paths(video_path)
         if not frame_paths:
             raise RuntimeError(f"No image frames found in directory: {video_path}")
-        first_bgr = cv2.imread(frame_paths[0])
-        if first_bgr is None:
+        decode_start = time.perf_counter()
+        first_model_frame = cv2.imread(frame_paths[0])
+        decode_time += time.perf_counter() - decode_start
+        if first_model_frame is None:
             raise RuntimeError(f"Cannot read first frame: {frame_paths[0]}")
+        decode_frames += 1
         frame_ptr = 1
         fps = FPS_DEFAULT
         total_frames = len(frame_paths)
     else:
-        cap = cv2.VideoCapture(video_path)
+        # Use the same config-driven NVDEC/GStreamer/OpenCV selection as
+        # inference.py -> predictor.run_tracker.
+        from predictor import _open_video
+
+        cap = _open_video(video_path)
         if not cap.isOpened():
             raise RuntimeError(f"Cannot open video: {video_path}")
 
         fps = cap.get(cv2.CAP_PROP_FPS) or FPS_DEFAULT
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-        ret, first_bgr = cap.read()
-        if not ret or first_bgr is None:
+        decode_start = time.perf_counter()
+        ret, first_model_frame = cap.read()
+        decode_time += time.perf_counter() - decode_start
+        if not ret or first_model_frame is None:
             cap.release()
             raise RuntimeError(f"Cannot read first frame: {video_path}")
+        decode_frames += 1
+
+    first_bgr = _display_bgr(first_model_frame)
+    if hasattr(tracker, "begin_sequence"):
+        tracker.begin_sequence(Path(video_path).stem, total_frames)
 
     def _read_next_frame():
-        nonlocal frame_ptr
+        nonlocal frame_ptr, decode_time, decode_frames
+        decode_start = time.perf_counter()
         if cap is not None:
-            return cap.read()
-        if frame_ptr >= len(frame_paths):
-            return False, None
-        frame = cv2.imread(frame_paths[frame_ptr])
-        frame_ptr += 1
-        if frame is None:
-            return False, None
-        return True, frame
+            ret, frame = cap.read()
+        elif frame_ptr >= len(frame_paths):
+            ret, frame = False, None
+        else:
+            frame = cv2.imread(frame_paths[frame_ptr])
+            frame_ptr += 1
+            ret = frame is not None
+        decode_time += time.perf_counter() - decode_start
+        if ret and frame is not None:
+            decode_frames += 1
+            return True, frame
+        return False, None
 
     def _release_source():
         if cap is not None:
@@ -642,12 +674,11 @@ def run_inference(
     h, w = first_bgr.shape[:2]
 
     if not output_video:
-        import time
         import threading
         import queue
 
         progress = SiamRAMProgressLine(progress_name, total_frames=total_frames)
-        tracker.initialize(first_bgr, initial_bbox)
+        tracker.initialize(first_model_frame, initial_bbox)
         progress.update("tracking")
 
         if total_frames > 0:
@@ -758,6 +789,13 @@ def run_inference(
             [("all", _latency_stats(frame_times))],
             header="latency report · fast inference",
         )
+
+        if hasattr(tracker, "end_sequence"):
+            tracker.end_sequence(
+                elapsed_s=time.perf_counter() - sequence_start,
+                decode_time_s=decode_time,
+                decode_frames=decode_frames,
+            )
 
         gc.collect()
         return
@@ -1351,7 +1389,7 @@ def run_inference(
                 cv2.LINE_AA,
             )
 
-        tracker.initialize(first_bgr, initial_bbox)
+        tracker.initialize(first_model_frame, initial_bbox)
         viz_init_frame = (
             getattr(tracker, "init_frame", None) if is_dam else first_bgr
         )
@@ -1414,11 +1452,9 @@ def run_inference(
         last_roi_proc = None
 
     else:
-        tracker.initialize(first_bgr, initial_bbox)
+        tracker.initialize(first_model_frame, initial_bbox)
 
     tracked_bboxes = [initial_bbox]
-
-    import time
 
     times_normal = []
     times_occlusion = []
@@ -1433,7 +1469,9 @@ def run_inference(
                 break
 
             t0 = time.perf_counter()
-            result = tracker.update(frame)
+            model_frame = frame
+            result = tracker.update(model_frame)
+            frame = _display_bgr(model_frame)
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
             frame_times.append(elapsed_ms)
 
@@ -1461,7 +1499,7 @@ def run_inference(
 
             if output_video:
                 viz_search_frame = (
-                    tracker._prescale_frame(frame)
+                    tracker._prescale_frame(model_frame)
                     if is_dam and hasattr(tracker, "_prescale_frame")
                     else frame
                 )
@@ -1807,5 +1845,12 @@ def run_inference(
         ],
         occlusion_pct=occ_pct,
     )
+
+    if hasattr(tracker, "end_sequence"):
+        tracker.end_sequence(
+            elapsed_s=time.perf_counter() - sequence_start,
+            decode_time_s=decode_time,
+            decode_frames=decode_frames,
+        )
 
     gc.collect()

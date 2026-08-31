@@ -3,6 +3,9 @@
 Confidence-gated Siamese tracking with distractor-aware memory and multi-phase
 reacquisition. This branch is our **MTC-AIC4 Phase 2** submission.
 
+The SiamRAM submission placed **7th overall** in the Military Technical College
+Artificial Intelligence Competition 4.
+
 ![Python](https://img.shields.io/badge/Python-3.10-blue.svg)
 ![PyTorch](https://img.shields.io/badge/PyTorch-2.11.0-orange.svg)
 ![CUDA](https://img.shields.io/badge/CUDA-12.8-green.svg)

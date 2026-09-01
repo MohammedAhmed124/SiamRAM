@@ -45,6 +45,8 @@ image = (
     .add_local_dir(_here / "src", f"{REPO}/src")
     .add_local_dir(_here / "bench", f"{REPO}/bench")
     .add_local_dir(_here / "checkpoints", f"{REPO}/checkpoints")
+    # data/ is not shipped, so bench/eval.py reads the committed manifest for its leakage check.
+    .add_local_dir(_here / "splits", f"{REPO}/splits")
     .add_local_file(_here / "predictor.py", f"{REPO}/predictor.py")
 )
 

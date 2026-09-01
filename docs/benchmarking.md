@@ -20,7 +20,7 @@ Read in this order. About 20 minutes.
 Then, before touching anything:
 
 ```bash
-python bench/test_eval.py     # 12 checks, ~1 second. If this fails, stop and say so.
+python bench/test_eval.py     # 13 checks, ~1 second. If this fails, stop and say so.
 ```
 
 ### Two shared gates — these happen once, for everybody
@@ -99,7 +99,8 @@ bench/
   run_tracker.py       one-pass OPE runner -> per-sequence prediction .txt
   eval.py              Success AUC, Precision@20px, Norm. Precision, --protocol-check
   pack_trackingnet.py  builds the TrackingNet eval-server submission zip
-  test_eval.py         12 analytic self-checks on the metric implementations
+  splits.py            train/test overlap check against splits/manifest.json
+  test_eval.py         13 analytic self-checks on the metrics and the leakage check
   DATASETS.md          verified download routes and on-disk layouts
 modal_app.py           Modal app: image, volumes, download/run/evaluate fan-out
 MODAL.md               operator guide
@@ -170,7 +171,7 @@ Frames where the ground truth is absent (NaN, or a zero/negative-sized box) are 
 > Using `>=` instead inflates every AUC by ~4.8 points — ten times the tolerance of our
 > reproduction gate, and it would look like a real improvement. `bench/test_eval.py` pins this.
 
-Run `python bench/test_eval.py` after touching anything in `eval.py`. 12 checks, all analytic.
+Run `python bench/test_eval.py` after touching anything in `eval.py`. 13 checks, all analytic.
 
 ---
 
@@ -210,12 +211,32 @@ The claim is **"official train/test splits throughout, no sequence overlap"** �
 training data from evaluated datasets", since SiamABC trains on LaSOT-train and
 TrackingNet-train.
 
+`splits/manifest.json` records which evaluated sequences the *current* checkpoint was trained
+on, read off `data/train_dataframe.csv`:
+
+| Dataset | Test sequences in the training index |
+|---|---:|
+| DTB70 | 53 of 70 |
+| UAV123 | 94 of 123 |
+| UAV123@10fps | 94 of 123 |
+| VisDrone, LaSOT, TrackingNet | 0 |
+
+`bench/eval.py --protocol-check` prints a `!! LEAKAGE` line naming those sequences, so a
+contaminated run cannot be mistaken for held-out evidence. **Until the head is retrained on the
+recipe above, DTB70 and UAV123 numbers are diagnostic only.** Regenerate the manifest with
+`python bench/splits.py --write` whenever the training index changes, or check one dataset
+directly:
+
+```bash
+python bench/splits.py --dataset dtb70 --data-root /data/dtb70   # exits 1 if anything overlaps
+```
+
 ---
 
 ## 7. Order of work
 
 1. Acquire the four UAV datasets (DTB70 needs the manual Baidu step).
-2. Write `splits/manifest.json` and the train/test overlap assertion. **Does not exist yet.**
+2. Regenerate `splits/manifest.json` if the training index changes: `python bench/splits.py --write`. `bench/eval.py --protocol-check` reads it and reports any test sequence that was trained on.
 3. **Validation gate — do this before anything else runs.** Reproduce SiamABC's *published
    LaSOT* AUC to ±0.5 with our toolkit. LaSOT is the sensitive check: 280 long sequences will
    expose a frame-ordering, absence-handling or protocol bug that short UAV clips hide. If this
@@ -234,7 +255,4 @@ TrackingNet-train.
   Modal run is its first real test.
 - The UAV123 `<folder>_<k>` subsequence partitioning is an assumption (it warns on frame-count
   mismatch).
-- LaSOT `testing_set.txt` should list 280 names (70 categories × 4). One HTTP read of it
-  reported 400. The loader reads whatever the file lists rather than hardcoding, but confirm
-  the count after the first download.
 - `modal_app.py` has never been executed — no Modal token was available when it was written.

@@ -133,22 +133,6 @@ def _dtb70(root: Path) -> list[Sequence]:
     return out
 
 
-def _uavdt(root: Path) -> list[Sequence]:
-    """UAV-benchmark-S/<S0101>/img000001.jpg + anno/<S0101>_gt.txt, comma-delimited, no absence."""
-    root = _dig(root, "UAVDT", "UAV-benchmark-SOT_v1.0")
-    seq_root = _pick_dir(root, "UAV-benchmark-S", "data_seq", "sequences", ".")
-    anno_dir = root / "anno" if (root / "anno").is_dir() else root
-    out = []
-    for d in _subdirs(seq_root):
-        gt_path = _pick_file(
-            anno_dir / f"{d.name}_gt.txt", anno_dir / f"{d.name}.txt",
-            d / "groundtruth_rect.txt", d / "groundtruth.txt",
-        )
-        frame_dir = d / "img" if (d / "img").is_dir() else d
-        out.append(_sequence(d.name, _frames(frame_dir), read_boxes(gt_path)))
-    return out
-
-
 def _visdrone2018(root: Path) -> list[Sequence]:
     """sequences/<seq>/img0000001.jpg + annotations/<seq>.txt, comma-delimited.
 
@@ -212,59 +196,6 @@ def _uav123_family(root: Path, anno_sub: str, seq_sub: str, stride: int = 1) -> 
     return out
 
 
-def _uavtrack112(root: Path, long_only: bool) -> list[Sequence]:
-    """data_seq/<seq>/*.jpg + anno/<seq>.txt, comma-delimited, no absence.
-
-    TODO(layout): the _L subset membership is not derivable from the tree, so it must come
-    from anno/UAVTrack112_L/ or a UAVTrack112_L.txt name list.
-    """
-    root = _dig(root, "UAVTrack112")
-    seq_root = _pick_dir(root, "data_seq", "sequences")
-    anno_root = _pick_dir(root, "anno", "annotations")
-
-    names = [d.name for d in _subdirs(seq_root)]
-    if long_only:
-        if (anno_root / "UAVTrack112_L").is_dir():
-            anno_root = anno_root / "UAVTrack112_L"
-            names = [p.stem for p in sorted(anno_root.glob("*.txt"))]
-        elif (root / "UAVTrack112_L.txt").is_file():
-            names = [n for n in (root / "UAVTrack112_L.txt").read_text().split() if n]
-        else:
-            raise FileNotFoundError(
-                f"UAVTrack112_L subset list not found. Provide {root / 'UAVTrack112_L.txt'} "
-                f"(one sequence name per line) or an anno/UAVTrack112_L directory."
-            )
-
-    out = []
-    for name in names:
-        gt = read_boxes(_pick_file(anno_root / f"{name}.txt", anno_root / f"{name}_gt.txt"))
-        frame_dir = seq_root / name
-        if (frame_dir / "img").is_dir():
-            frame_dir = frame_dir / "img"
-        out.append(_sequence(name, _frames(frame_dir), gt))
-    return out
-
-
-def _avist(root: Path) -> list[Sequence]:
-    """sequences/<seq>/00000001.jpg + anno/<seq>.txt, with absence in the separate
-    full_occlusion/<seq>_full_occlusion.txt and out_of_view/<seq>_out_of_view.txt flag files."""
-    root = _dig(root, "AVisT", "avist")
-    seq_root = _pick_dir(root, "sequences", "data_seq")
-    anno_root = _pick_dir(root, "anno", "annotations")
-    out = []
-    for d in _subdirs(seq_root):
-        gt = _blank_absent(read_boxes(_pick_file(anno_root / f"{d.name}.txt")))
-        for sub, suffix in (("full_occlusion", "_full_occlusion"), ("out_of_view", "_out_of_view")):
-            flag_path = root / sub / f"{d.name}{suffix}.txt"
-            if not flag_path.is_file():
-                flag_path = root / sub / f"{d.name}.txt"
-            if flag_path.is_file():
-                flags = _read_flags(flag_path)
-                gt[: len(flags)][flags[: len(gt)] == 1] = np.nan
-        out.append(_sequence(d.name, _frames(d), gt))
-    return out
-
-
 def _lasot(root: Path) -> list[Sequence]:
     """<class>/<class>-<n>/img/00000001.jpg + groundtruth.txt, absence in the sibling
     full_occlusion.txt and out_of_view.txt; restricted to the 280 names in testing_set.txt."""
@@ -304,33 +235,12 @@ def _trackingnet(root: Path) -> list[Sequence]:
     return out
 
 
-def _vot_lt2021(root: Path) -> list[Sequence]:
-    """<seq>/color/00000001.jpg + <seq>/groundtruth.txt, comma-delimited, `nan,nan,nan,nan` absence."""
-    root = _dig(root, "VOT-LT2021", "vot_lt2021", "sequences")
-    out = []
-    for d in _subdirs(root):
-        gt_path = d / "groundtruth.txt"
-        if not gt_path.is_file():
-            continue
-        frame_dir = d / "color" if (d / "color").is_dir() else d
-        out.append(_sequence(d.name, _frames(frame_dir), read_boxes(gt_path)))
-    if not out:
-        raise FileNotFoundError(f"no <seq>/groundtruth.txt found under {root}")
-    return out
-
-
 LOADERS = {
     "dtb70": _dtb70,
-    "uavdt": _uavdt,
     "visdrone2018": _visdrone2018,
     "visdrone_sot": _visdrone2018,  # bench/download.py's name for the same set
-    "vot_lt2021": _vot_lt2021,
     "uav123": lambda r: _uav123_family(r, "UAV123", "UAV123"),
     "uav123_10fps": lambda r: _uav123_family(r, "UAV123_10fps", "UAV123_10fps", stride=3),
-    "uav20l": lambda r: _uav123_family(r, "UAV20L", "UAV123"),
-    "uavtrack112": lambda r: _uavtrack112(r, long_only=False),
-    "uavtrack112_l": lambda r: _uavtrack112(r, long_only=True),
-    "avist": _avist,
     "lasot": _lasot,
     "trackingnet": _trackingnet,
 }

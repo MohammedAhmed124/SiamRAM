@@ -89,8 +89,9 @@ LaSOT is 62% of that, so **run the four UAV sets first** and Table 1 lands early
   are computed over its absence episodes. This is our own metric definition, not a standardised
   one — state that plainly in the paper.
 
-`UAVDT` is **blocked**: `UAV-benchmark-S.zip` downloads fine but contains no `anno/`, and the
-project page's SOT-toolkit link that held the ground truth returns 404.
+UAVDT is deliberately absent despite being a common column in this literature: its images
+download fine, but the project page's link to the SOT ground truth returns 404, so there is
+nothing to score against.
 
 ---
 

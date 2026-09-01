@@ -20,14 +20,9 @@ python bench/download.py --dataset <name> --dest /vol/bench
 | dataset | seqs | download | fetch method | automatable? |
 |---|---|---|---|---|
 | DTB70 | 70 | not published (Baidu-only) | Baidu Pan (images), GitHub (GT) | **manual** (GT: yes) |
-| UAVDT (SOT / UAV-benchmark-S) | 50 | 4.83 GiB | Google Drive | **gdown** (images only — GT link is dead) |
 | VisDrone-SOT test-dev | 35 | 11.27 GiB | Google Drive | **gdown** |
 | UAV123 | 123 | 13.08 GiB | Google Drive | **gdown** |
-| UAV20L | 20 | (same archive as UAV123) | Google Drive | **gdown** |
 | UAV123@10fps | 123 | 4.37 GiB | Google Drive | **gdown** |
-| UAVTrack112 (+ `_L`, 45) | 112 / 45 | not published (Baidu-only) | Baidu Pan | **manual** |
-| AVisT | 120 | 11.99 GiB | Google Drive | **gdown** |
-| VOT-LT2021 | 50 | 16.4 GiB (sum of 50 zips) | plain HTTPS | **yes** |
 | LaSOT test | 280 of 1400 | 248 GB (whole set — no test-only archive) | Hugging Face | **yes** (`huggingface_hub`) |
 | TrackingNet TEST | 511 | 35 GB | Hugging Face | **yes** (`huggingface_hub`) |
 
@@ -83,44 +78,7 @@ DTB70/
   11th column, motion blur, that the toolkit's name list omits). DTB70 does
   **not** separate partial from full occlusion.
 
-### 2. UAVDT — SOT subset (UAV-benchmark-S), 50 sequences
-
-- Project page: <https://sites.google.com/view/grli-uavdt>
-  (Du et al., *The Unmanned Aerial Vehicle Benchmark*, ECCV 2018)
-- Fetch: **Google Drive, automatable** — `UAV-benchmark-S.zip`,
-  id `1661_Z_zL1HxInbsA2Mll9al-Ax6Py1rG`, 5,186,865,276 B (4.83 GiB).
-
-```bash
-gdown 1661_Z_zL1HxInbsA2Mll9al-Ax6Py1rG -O UAV-benchmark-S.zip
-unzip -q UAV-benchmark-S.zip -d /vol/bench
-```
-
-- **The annotations are not in that zip.** Verified by reading the zip's central
-  directory: it holds only `UAV-benchmark-S/S####/img%06d.jpg` entries, no
-  `anno/`, no `att/`. The project page's separate "SOT toolkit" link
-  (`drive.google.com/open?id=1YMFTBatK6qUrtnIe4fZNMZ9FpCpD2cxm`), which carried
-  `anno/<seq>_gt.txt`, now returns **HTTP 404** — see manual steps below. (The
-  DET/MOT links on the same page still work: `UAV-benchmark-M.zip` 6.3 GB, id
-  `1m8KA6oPIRK_Iwt9TYFquC87vBc_8wRVc`; `UAV-benchmark-MOTD_v1.0.zip` 234 MB, id
-  `19498uJd7T9w4quwnQEy62nibt3uyT9pq`.)
-- Layout of the image zip (verified):
-
-```
-UAV-benchmark-S/
-  S0101/img000001.jpg ... img%06d.jpg     # 50 dirs: S0101 ... S1702
-```
-
-  The layout every tracker repo expects once the annotations are added is
-  `uavdt/sequences/<seq>/img%06d.jpg` + `uavdt/anno/<seq>_gt.txt`
-  (see <https://github.com/GXNU-ZhongLab/SGLATrack> `lib/test/evaluation/uavdtdataset.py`).
-- GT format: `<seq>_gt.txt`, one line per frame, `x,y,w,h`, comma-delimited.
-- Attributes: 8 per-sequence flags — background clutter, camera rotation, object
-  rotation, small object, illumination variation, object blur, scale variation,
-  large occlusion (ECCV'18 paper, <https://arxiv.org/pdf/1804.00518>). UAVDT
-  has a single occlusion attribute (**large occlusion**), not a partial/full
-  split.
-
-### 3. VisDrone-SOT test-dev — 35 sequences
+### 2. VisDrone-SOT test-dev — 35 sequences
 
 - Project page: <http://www.aiskyeye.com/>; mirror with direct links:
   <https://github.com/VisDrone/VisDrone-Dataset> (Task 3: Single-Object Tracking)
@@ -161,7 +119,7 @@ VisDrone2019-SOT-test-dev/
 - Counts (SOT toolkit README): train 86 clips / 69,941 frames, val 11 / 7,046,
   test 35 / 29,367.
 
-### 4+5. UAV123 (123 seqs) and UAV20L (20 seqs) — one archive
+### 3. UAV123 (123 seqs)
 
 - Project page: <https://ivul.kaust.edu.sa/benchmark-and-simulator-uav-tracking-dataset>
   (Mueller, Smith & Ghanem, ECCV 2016)
@@ -221,105 +179,7 @@ UAV123_10fps/
   treat as a fallback):
   `https://huggingface.co/datasets/xche32/UAV123/resolve/main/UAV123.tar.gz`
 
-### 6. UAVTrack112 (112 seqs) and UAVTrack112_L (45 seqs)
-
-- Project page / official repo: <https://github.com/vision4robotics/SiamAPN>
-  (Fu et al., SiamAPN/SiamAPN++; the dataset is also called **V4RFlight112**)
-- **Fetch: Baidu Pan only.** <https://pan.baidu.com/s/1HK7zCKaa_olToGVzLrOpqA>,
-  code `xb41`. Checked every vision4robotics repo that uses it (SiamAPN,
-  SiameseTracking4UAV, TCTrack, SGDViT, ABDNet, PRL-Track, ScaleAwareDA) plus
-  Hugging Face and Kaggle: every one points back to the same Baidu link.
-  **No Google Drive, HTTP or torrent mirror exists.**
-- Size: not published.
-- Layout expected by the trackers (`lib/test/evaluation/uavtrack112dataset.py`
-  and `uavtrackdataset.py` in SGLATrack, which is where the `_L` split lives):
-
-```
-V4RFlight112/
-  data_seq/<seq>/*.jpg        # sorted lexically; both subsets share these images
-  anno/<seq>.txt              # 112 sequences  -> UAVTrack112
-  anno_l/<seq>.txt            #  45 sequences  -> UAVTrack112_L (~60K frames)
-  attributes/
-```
-
-- GT format: one line per frame, `x,y,w,h`, comma-delimited
-  (`np.loadtxt(anno_path, delimiter=',')`).
-
-### 7. AVisT — 120 sequences
-
-- Project page: <https://sites.google.com/view/avist-benchmark>
-  (Noman et al., *AVisT*, BMVC 2022; eval code in
-  <https://github.com/visionml/pytracking>)
-- Fetch: **Google Drive, automatable.** The published Drive folder
-  `1rlwTP91a3GYobOoIE9sprFxISE5v8d90` holds a single file `avist.tar`,
-  id `1dsvLSiRRxUkqOo9myPEAtwFUSr3KlzXZ`, 12,876,738,560 B (11.99 GiB).
-
-```bash
-gdown 1dsvLSiRRxUkqOo9myPEAtwFUSr3KlzXZ -O avist.tar
-tar xf avist.tar -C /vol/bench          # unpacks to avist/
-```
-
-- Layout (verified from the tar header + `pytracking/evaluation/avistdataset.py`):
-
-```
-avist/
-  sequences/<seq>/img_00001.jpg ... img_%05d.jpg
-  anno/<seq>.txt
-  full_occlusion/<seq>_full_occlusion.txt
-  out_of_view/<seq>_out_of_view.txt
-```
-
-- GT format: `anno/<seq>.txt`, one line per frame, `x,y,w,h`.
-- Absence flags: two separate per-frame files, comma-delimited 0/1 —
-  `full_occlusion/<seq>_full_occlusion.txt` and
-  `out_of_view/<seq>_out_of_view.txt`. pytracking treats a frame as visible only
-  when both are 0. There are no per-sequence attribute list files; the 18
-  scenario labels are in the paper, not in the archive.
-- 120 sequences, ~79,653 annotated frames, 24–30 fps, 99–3,113 frames each.
-
-### 8. VOT-LT2021 — 50 long-term sequences
-
-- Project page: <https://www.votchallenge.net/vot2021/dataset.html>
-- **There is no raw archive.** The VOT2021 page states the datasets are only
-  obtained through the toolkit. The canonical workflow is:
-
-```bash
-pip install vot-toolkit                       # or git+https://github.com/votchallenge/toolkit
-vot initialize vot2021/longterm --workspace /vol/bench/vot-lt2021
-```
-
-  `vot initialize` creates the workspace and downloads the dataset; `vot
-  evaluate` would also pull it. Requirements: Python 3, network access to
-  `data.votchallenge.net` (which 307-redirects to `moja.shramba.arnes.si`), and
-  ~17 GB of disk. No registration, no credentials.
-- **It is also fetchable with plain HTTPS and no toolkit**, which is what
-  `bench/download.py --dataset vot_lt2021` does. The stack file
-  `vot/stack/vot2021/longterm.yaml` in the toolkit points VOT-LT2021 at the
-  *2019* long-term dataset (LT2021 reuses the LT2020/LT2019 sequences):
-
-```bash
-curl -sO https://data.votchallenge.net/vot2019/longterm/description.json
-# 50 sequences; per sequence:
-#   annotations: https://data.votchallenge.net/vot2019/longterm/<name>.zip   (~35 KB)
-#   images:      https://data.votchallenge.net/sequences/<uid>.zip           (relative ../../sequences/)
-```
-
-  Total of the 50 image zips: 17,583,998,383 B (16.38 GiB). The JSON also
-  carries per-file `checksum` (sha1), `length`, `fps`, `width`, `height`.
-- Layout produced (matches a VOT workspace's `sequences/` dir):
-
-```
-<seq>/
-  color/00000001.jpg ... %08d.jpg     # pattern is "%08d.jpg" in description.json
-  groundtruth.txt
-```
-
-- GT format (verified by downloading `ballet.zip`): one line per frame,
-  `x,y,w,h`, comma-delimited, floating point. **Target-absent frames are the
-  literal line `nan,nan,nan,nan`** — that is the long-term absence label. No
-  separate attribute files.
-
-### 9. LaSOT — 280 testing sequences (of 1,400)
+### 4. LaSOT — 280 testing sequences (of 1,400)
 
 - Project page: <https://hengfan2010.github.io/projects/LaSOT/> (backup of
   <http://vision.cs.stonybrook.edu/~lasot/>, whose TLS chain does not validate
@@ -374,7 +234,7 @@ LaSOT/
   `testing_set.txt lists <name> but <path> does not exist` naming the path it
   expected.
 
-### 10. TrackingNet — TEST split, 511 sequences
+### 5. TrackingNet — TEST split, 511 sequences
 
 - Official repo: <https://github.com/SilvioGiancola/TrackingNet-devkit>
   (Müller et al., ECCV 2018). 30 chunks in total; the test chunk is one of them.

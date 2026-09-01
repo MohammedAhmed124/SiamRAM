@@ -5,11 +5,8 @@ See bench/DATASETS.md for sources, layouts and the manual steps.
 """
 
 import argparse
-import json
 import os
 import sys
-import tarfile
-import urllib.parse
 import urllib.request
 import zipfile
 
@@ -21,23 +18,11 @@ DATASETS = {
         "size": 14049397769,
         "root": "UAV123",
     },
-    "uav20l": {  # same archive as uav123; annotations live in UAV123/anno/UAV20L
-        "url": "https://drive.google.com/file/d/0B6sQMCU1i4NbNGxWQzRVak5yLWs/view?usp=drivesdk&resourcekey=0-IjwQcWEzP2x3ec8kXtLBpA",
-        "file": "Dataset_UAV123.zip",
-        "size": 14049397769,
-        "root": "UAV123",
-    },
     "uav123_10fps": {
         "url": "https://drive.google.com/file/d/0B6sQMCU1i4NbZmFlQmJBVDlLRDg/view?usp=drivesdk&resourcekey=0--jsSKS1oGFidNhgMF75cSQ",
         "file": "Dataset_UAV123_10fps.zip",
         "size": 4688528930,
         "root": "UAV123_10fps",
-    },
-    "uavdt": {
-        "url": "https://drive.google.com/file/d/1661_Z_zL1HxInbsA2Mll9al-Ax6Py1rG/view",
-        "file": "UAV-benchmark-S.zip",
-        "size": 5186865276,
-        "root": "UAV-benchmark-S",
     },
     "visdrone_sot": {
         "url": "https://drive.google.com/file/d/1xCiHjU4JlR9QsYtiHYy2UUd3m6NthoBC/view",
@@ -45,15 +30,8 @@ DATASETS = {
         "size": 12097003333,
         "root": "VisDrone2019-SOT-test-dev",
     },
-    "avist": {
-        "url": "https://drive.google.com/file/d/1dsvLSiRRxUkqOo9myPEAtwFUSr3KlzXZ/view",
-        "file": "avist.tar",
-        "size": 12876738560,
-        "root": "avist",
-    },
 }
 
-VOT_LT2021_META = "https://data.votchallenge.net/vot2019/longterm/description.json"
 
 LASOT_SIZE_WARNING = """LaSOT publishes no testing-set-only archive: the 70 per-category zips each
 mix the 16 training and 4 testing sequences of that category, so all 248 GB come
@@ -69,19 +47,7 @@ public and can be fetched without Baidu:
   git clone --depth 1 https://github.com/flyers/drone-tracking
   # experiments/anno/<Seq>.txt  == <Seq>/groundtruth_rect.txt
   # experiments/anno/att/<Seq>.txt == 11 per-sequence attribute flags""",
-    "uavtrack112": """UAVTrack112 (a.k.a. V4RFlight112, includes the UAVTrack112_L subset) is only
-distributed on Baidu Pan (no mirror found):
-  https://pan.baidu.com/s/1HK7zCKaa_olToGVzLrOpqA   code: xb41
-  (from https://github.com/vision4robotics/SiamAPN)
-Download it manually and upload the archive to the volume; it unpacks to
-data_seq/, anno/ (112 seqs), anno_l/ (45 long seqs) and attributes/.""",
 }
-
-UAVDT_ANNO_WARNING = """UAV-benchmark-S.zip contains IMAGES ONLY (UAV-benchmark-S/S####/img%06d.jpg).
-The official 'SOT toolkit' Drive link on https://sites.google.com/view/grli-uavdt
-that held anno/<seq>_gt.txt is dead (HTTP 404), so the ground truth must be
-sourced separately - see the manual-steps section of bench/DATASETS.md."""
-
 
 def _download(url, path, size=None):
     """Fetch url to path via gdown for Drive links, urllib otherwise."""
@@ -102,33 +68,8 @@ def _download(url, path, size=None):
 
 def _extract(path, dest):
     print(f"extracting {path}")
-    if path.endswith(".zip"):
-        with zipfile.ZipFile(path) as z:
-            z.extractall(dest)
-    else:
-        with tarfile.open(path) as t:
-            t.extractall(dest)
-
-
-def _fetch_vot_lt2021(dest):
-    """Download the 50 VOT-LT2021 sequences straight from the toolkit's metadata."""
-    with urllib.request.urlopen(VOT_LT2021_META) as r:
-        meta = json.load(r)
-    for i, seq in enumerate(meta["sequences"], 1):
-        out = os.path.join(dest, seq["name"])
-        if os.path.exists(os.path.join(out, "groundtruth.txt")):
-            print(f"[{i}/{len(meta['sequences'])}] have {seq['name']}")
-            continue
-        print(f"[{i}/{len(meta['sequences'])}] {seq['name']} ({seq['length']} frames)")
-        os.makedirs(out, exist_ok=True)
-        for url, sub in (
-            (seq["annotations"]["url"], ""),
-            (seq["channels"]["color"]["url"], "color"),
-        ):
-            tmp = os.path.join(dest, "_vot.zip")
-            _download(urllib.parse.urljoin(VOT_LT2021_META, url), tmp)
-            _extract(tmp, os.path.join(out, sub))
-            os.remove(tmp)
+    with zipfile.ZipFile(path) as z:
+        z.extractall(dest)
 
 
 def _lasot_seq_name(member, cat):
@@ -186,7 +127,6 @@ def _fetch_trackingnet(dest):
 
 
 CUSTOM = {
-    "vot_lt2021": _fetch_vot_lt2021,
     "lasot": _fetch_lasot,
     "trackingnet": _fetch_trackingnet,
 }
@@ -205,9 +145,6 @@ def fetch(name, dest):
     _download(spec["url"], archive, spec["size"])
     if not os.path.isdir(os.path.join(dest, spec["root"])):
         _extract(archive, dest)
-    if name == "uavdt":
-        print(UAVDT_ANNO_WARNING, file=sys.stderr)
-        return 1
     return 0
 
 

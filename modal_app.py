@@ -82,11 +82,12 @@ def _trt_cache() -> str:
     return f"{RESULTS}/trt_cache/{name}"
 
 
-def _stage(dataset: str) -> str:
+def _stage(dataset: str, tar_limit: int = 0) -> str:
     """Data root for a dataset, extracting volume-side tars to local disk first.
 
-    A Modal Volume holds at most 500k inodes and LaSOT's test split is ~700k frames, so
-    bulky datasets live on the volume as tars and are unpacked per container.
+    A Modal Volume holds at most 500k inodes and LaSOT's test split is ~700k frames, so bulky
+    datasets live on the volume as tars and are unpacked per container. tar_limit stages only
+    the first few archives, which is all the TensorRT warm-up needs.
     """
     import shutil
     import tarfile
@@ -95,10 +96,12 @@ def _stage(dataset: str) -> str:
     tars = sorted(src.glob("*.tar"))
     if not tars:
         return str(src)
-    out = Path("/tmp") / dataset
+    if tar_limit:
+        tars = tars[:tar_limit]
+    out = Path("/tmp") / (f"{dataset}.partial" if tar_limit else dataset)
     if out.is_dir():
         return str(out)
-    staging = Path("/tmp") / f".{dataset}.staging"
+    staging = Path("/tmp") / f".{out.name}.staging"
     shutil.rmtree(staging, ignore_errors=True)
     staging.mkdir(parents=True)
     for i, t in enumerate(tars, 1):
@@ -106,7 +109,14 @@ def _stage(dataset: str) -> str:
         with tarfile.open(t) as tf:
             tf.extractall(staging)
     for extra in src.glob("*.txt"):
-        shutil.copy(extra, staging / extra.name)
+        if not tar_limit:
+            shutil.copy(extra, staging / extra.name)
+            continue
+        # A partial stage must not list sequences it did not unpack: LaSOT's loader reads
+        # testing_set.txt and raises on the first name with no directory.
+        present = {p.name for p in staging.rglob("*") if p.is_dir()}
+        names = [n for n in extra.read_text(encoding="utf-8-sig").split() if n in present]
+        (staging / extra.name).write_text("\n".join(names) + "\n")
     staging.rename(out)  # only visible once complete
     return str(out)
 
@@ -151,7 +161,7 @@ def warm_trt_cache(dataset: str, config: str) -> str:
     _run(
         "bench/run_tracker.py",
         "--dataset", dataset,
-        "--data-root", _stage(dataset),
+        "--data-root", _stage(dataset, tar_limit=1),
         "--config", _config(config),
         "--out", f"{RESULTS}/_warmup/{dataset}",
         "--limit", "1",

@@ -39,6 +39,7 @@ image = (
         "libxrender1",
         "libxcb1",
     )
+    .env({"HF_XET_HIGH_PERFORMANCE": "1"})  # faster HF Hub transfers
     .add_local_file(_here / "requirements.txt", "/tmp/requirements.txt", copy=True)
     .run_commands(
         "grep -v '^pynvvideocodec' /tmp/requirements.txt > /tmp/req.modal.txt",
@@ -96,7 +97,14 @@ def _config(name: str) -> str:
     return str(out)
 
 
-@app.function(volumes=VOLUMES, ephemeral_disk=1000 * 1000, timeout=60 * 60 * 12)
+@app.function(
+    volumes=VOLUMES,
+    ephemeral_disk=1000 * 1000,
+    timeout=60 * 60 * 12,
+    # LaSOT and TrackingNet come from the HF Hub, which rate-limits anonymous requests.
+    # Create it once:  modal secret create huggingface-secret HF_TOKEN=hf_...
+    secrets=[modal.Secret.from_name("huggingface-secret", required_keys=["HF_TOKEN"])],
+)
 def download_dataset(name: str) -> str:
     """Fetch a benchmark into the dataset volume."""
     dest = f"{DATA}/{name}"

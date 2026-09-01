@@ -47,6 +47,8 @@ image = (
     .add_local_dir(_here / "checkpoints", f"{REPO}/checkpoints")
     # data/ is not shipped, so bench/eval.py reads the committed manifest for its leakage check.
     .add_local_dir(_here / "splits", f"{REPO}/splits")
+    # Baseline configs (t1_vanilla_siamabc.yaml and the ablation rows) live here.
+    .add_local_dir(_here / "ablation" / "configs", f"{REPO}/ablation/configs")
     .add_local_file(_here / "predictor.py", f"{REPO}/predictor.py")
 )
 
@@ -80,7 +82,10 @@ def _config(name: str) -> str:
     """Copy a repo config to /tmp with NVDEC off and the GPU-keyed TRT cache path."""
     import yaml
 
-    src = Path(name) if Path(name).is_absolute() else Path(REPO) / "src" / "config" / name
+    src = Path(name)
+    if not src.is_absolute():
+        src = next(p for p in (Path(REPO) / "src" / "config" / name,
+                               Path(REPO) / "ablation" / "configs" / name) if p.is_file())
     cfg = yaml.safe_load(src.read_text())
     cfg.setdefault("runtime", {})["use_nvdec"] = False
     cfg.setdefault("trt_engine", {})["trt_cache_dir"] = _trt_cache()

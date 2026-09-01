@@ -7,6 +7,66 @@ what it looks like on disk) and [`MODAL.md`](../MODAL.md) (running the sweep on 
 
 ---
 
+## 0. Start here
+
+Read in this order. About 20 minutes.
+
+1. **This document, sections 1–5.** What we are producing and why the current numbers cannot
+   be used. Section 5 is the one that saves you a day.
+2. **[`bench/DATASETS.md`](../bench/DATASETS.md) — only your own dataset's section.** It has the
+   download route and the exact on-disk layout.
+3. **[`MODAL.md`](../MODAL.md)** when you are ready to run something.
+
+Then, before touching anything:
+
+```bash
+python bench/test_eval.py     # 12 checks, ~1 second. If this fails, stop and say so.
+```
+
+### Two shared gates — these happen once, for everybody
+
+Nobody's individual results mean anything until both are done. Whoever owns them, say so in
+the channel before starting.
+
+- **Gate A — toolkit validation.** Reproduce SiamABC's *published LaSOT* AUC to within ±0.5
+  with our evaluator. LaSOT is the sensitive check: 280 long sequences expose frame-ordering,
+  absence-handling and protocol bugs that short UAV clips hide entirely. **If this does not
+  reproduce, every number any of us produces is unverifiable.** Do not start dataset work
+  that depends on it.
+- **Gate B — TensorRT warm-up.** One person runs one dataset to completion first, which
+  builds and commits the engines. If several people start from cold at once they all build
+  into the same cache directory. See "Running several datasets in parallel" in `MODAL.md`.
+
+### Splitting by dataset
+
+Two people per dataset. Different datasets write to different paths
+(`/results/<dataset>/<tracker>`), so you will not collide once Gate B is done.
+
+| Dataset | Start it | Why |
+|---|---|---|
+| **LaSOT** | **immediately** | 248 GB download and 685k frames — 62% of all inference. The long pole, and Gate A depends on it. |
+| **DTB70** | **immediately** | Blocked on a manual Baidu download that needs a human with an account. Unblock it early or it becomes the last thing standing. |
+| UAV123 | after Gate B | |
+| UAV123@10fps | after Gate B | Same archive family as UAV123 — worth pairing with that team. |
+| VisDrone | after Gate B | Carries the partial-occlusion attribute split (column 9 of `<seq>_attr.txt`). |
+| TrackingNet | last | Produces a submission zip, not a score. Rate-limited uploads, so do it once when everything else is settled. |
+
+### What "done" means for a dataset
+
+1. `python bench/download.py --dataset <name> --dest <dir>` completes, or the manual upload is in.
+2. `python bench/datasets.py --dataset <name> --data-root <dir>` lists the expected sequence
+   count (70, 123, 123, 35, 280, 511) and the expected frame counts.
+3. `bench/eval.py --protocol-check` reports **no** missing files and **no** length mismatches.
+4. SiamABC S-Tiny, SiamABC S-Small and SiamRAM full have all run.
+5. The per-sequence `.txt` predictions are pulled down and archived. They cannot be
+   regenerated later once configs move on, and reviewers ask for them.
+6. Anything you assumed about the layout is written down — see section 8.
+
+Report the sequence count and the protocol-check output when you claim a dataset is done.
+A silently truncated result file is the failure mode we are most likely to ship.
+
+---
+
 ## 1. Why this exists
 
 The numbers in `ablation/results/` cannot be compared to any published tracker. Five reasons,

@@ -251,14 +251,16 @@ def main(
     # return_exceptions: one bad sequence must not discard a multi-hour sweep.
     jobs = [(d, c, t) for d in ds for c, t in zip(cfgs, trackers)]
     failed = []
-    for job, out in zip(jobs, bench.starmap(jobs, return_exceptions=True)):
+    # list() first: zip() against a live generator abandons it un-exhausted, and Modal's
+    # async cleanup then prints a page of "asynchronous generator is already running".
+    for job, out in zip(jobs, list(bench.starmap(jobs, return_exceptions=True))):
         print("failed:" if isinstance(out, Exception) else "tracked:", job, out)
         if isinstance(out, Exception):
             failed.append(job)
 
     local = Path(out_dir)
     local.mkdir(parents=True, exist_ok=True)
-    evals = evaluate.starmap([(d, trackers) for d in ds], return_exceptions=True)
+    evals = list(evaluate.starmap([(d, trackers) for d in ds], return_exceptions=True))
     for dataset, csv_text in zip(ds, evals):
         if isinstance(csv_text, Exception):
             print(f"\n### {dataset}\n\neval failed: {csv_text}")

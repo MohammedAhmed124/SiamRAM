@@ -6,6 +6,7 @@ See bench/DATASETS.md for sources, layouts and the manual steps.
 
 import argparse
 import os
+import shutil
 import re
 import sys
 import urllib.request
@@ -36,8 +37,9 @@ DATASETS = {
 
 LASOT_SIZE_WARNING = """LaSOT publishes no testing-set-only archive: the 70 per-category zips each
 mix the 16 training and 4 testing sequences of that category, so all 248 GB come
-down for the 280 sequences we evaluate. Delete the training sequences afterwards
-if space is tight - bench/datasets.py reads testing_set.txt and ignores them."""
+down for the 280 sequences we evaluate. Only the test sequences are kept, packed as
+one tar per category - a Modal Volume holds at most 500k inodes and the loose frames
+are ~700k files."""
 
 MANUAL = {
     "dtb70": """DTB70 images are only on Baidu Pan (no mirror found):
@@ -125,35 +127,50 @@ def _lasot_seq_name(member, cat):
 
 
 def _fetch_lasot(dest):
-    """Pull the 70 per-category LaSOT zips off the authors' Hugging Face mirror, keeping test only.
+    """Pull the 70 per-category LaSOT zips off the HF mirror, keeping one tar of test frames each.
 
-    Each category zip holds 16 training and 4 testing sequences. Only the testing_set.txt names
-    are extracted and each zip is deleted straight after, so the volume holds ~50 GB not ~248 GB.
+    Each category zip holds 16 training and 4 testing sequences; only the testing_set.txt names
+    are kept. The result is stored as one tar per category rather than loose frames: LaSOT's test
+    split is ~700k JPEGs and a Modal Volume holds at most 500k inodes. Staging is the reader's job.
     """
+    import tarfile
+    import tempfile
+
     from huggingface_hub import hf_hub_download
 
     print(LASOT_SIZE_WARNING, file=sys.stderr)
-    root = os.path.join(dest, "LaSOT")
-    os.makedirs(root, exist_ok=True)
-    listing = hf_hub_download("l-lt/LaSOT", "testing_set.txt", repo_type="dataset", local_dir=root)
+    os.makedirs(dest, exist_ok=True)
+    listing = hf_hub_download("l-lt/LaSOT", "testing_set.txt", repo_type="dataset",
+                              local_dir=tempfile.mkdtemp())
     keep = {n.strip() for n in open(listing, encoding="utf-8-sig") if n.strip()}
+    shutil.copy(listing, os.path.join(dest, "testing_set.txt"))
     cats = sorted({n.rsplit("-", 1)[0] for n in keep})
     print(f"{len(keep)} test sequences across {len(cats)} categories")
     for i, cat in enumerate(cats, 1):
-        wanted = {n for n in keep if n.rsplit("-", 1)[0] == cat}
-        if all(os.path.isdir(os.path.join(root, cat, n)) for n in wanted):
+        out_tar = os.path.join(dest, f"{cat}.tar")
+        if os.path.isfile(out_tar):
             print(f"[{i}/{len(cats)}] have {cat}")
             continue
-        print(f"[{i}/{len(cats)}] {cat}")
-        archive = hf_hub_download("l-lt/LaSOT", f"{cat}.zip", repo_type="dataset", local_dir=root)
-        with zipfile.ZipFile(archive) as z:
-            members = [m for m in z.namelist() if _lasot_seq_name(m, cat) in wanted]
-            if not members:
-                raise RuntimeError(f"{cat}.zip contained none of {sorted(wanted)}")
-            # Zips that already nest under <cat>/ extract to root; flat ones get it added.
-            nested = members[0].startswith(cat + "/")
-            z.extractall(root if nested else os.path.join(root, cat), members)
-        os.remove(archive)
+        wanted = {n for n in keep if n.rsplit("-", 1)[0] == cat}
+        print(f"[{i}/{len(cats)}] {cat}", flush=True)
+        work = tempfile.mkdtemp()
+        try:
+            archive = hf_hub_download("l-lt/LaSOT", f"{cat}.zip", repo_type="dataset",
+                                      local_dir=work)
+            with zipfile.ZipFile(archive) as z:
+                members = [m for m in z.namelist() if _lasot_seq_name(m, cat) in wanted]
+                if not members:
+                    raise RuntimeError(f"{cat}.zip contained none of {sorted(wanted)}")
+                # Zips that already nest under <cat>/ extract as-is; flat ones get it added.
+                nested = members[0].startswith(cat + "/")
+                staged = os.path.join(work, "x")
+                z.extractall(staged if nested else os.path.join(staged, cat), members)
+            os.remove(archive)
+            with tarfile.open(out_tar + ".part", "w") as t:
+                t.add(os.path.join(staged, cat), arcname=cat)
+            os.replace(out_tar + ".part", out_tar)
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
 
 
 def _fetch_trackingnet(dest):

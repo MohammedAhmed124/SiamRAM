@@ -59,6 +59,7 @@ data_vol = modal.Volume.from_name("siamram-data", create_if_missing=True)
 results_vol = modal.Volume.from_name("siamram-results", create_if_missing=True)
 
 VOLUMES = {DATA: data_vol, RESULTS: results_vol}
+STAGE_DISK = 200 * 1024  # MiB; room to unpack the largest dataset locally
 GPU_TIMEOUT = 60 * 60 * 8  # ~168k frames is the largest single set in the plan
 
 app = modal.App(APP_NAME, image=image)
@@ -79,6 +80,35 @@ def _trt_cache() -> str:
 
     name = re.sub(r"[^a-z0-9]+", "_", torch.cuda.get_device_name(0).lower()).strip("_")
     return f"{RESULTS}/trt_cache/{name}"
+
+
+def _stage(dataset: str) -> str:
+    """Data root for a dataset, extracting volume-side tars to local disk first.
+
+    A Modal Volume holds at most 500k inodes and LaSOT's test split is ~700k frames, so
+    bulky datasets live on the volume as tars and are unpacked per container.
+    """
+    import shutil
+    import tarfile
+
+    src = Path(DATA) / dataset
+    tars = sorted(src.glob("*.tar"))
+    if not tars:
+        return str(src)
+    out = Path("/tmp") / dataset
+    if out.is_dir():
+        return str(out)
+    staging = Path("/tmp") / f".{dataset}.staging"
+    shutil.rmtree(staging, ignore_errors=True)
+    staging.mkdir(parents=True)
+    for i, t in enumerate(tars, 1):
+        print(f"staging [{i}/{len(tars)}] {t.name}", flush=True)
+        with tarfile.open(t) as tf:
+            tf.extractall(staging)
+    for extra in src.glob("*.txt"):
+        shutil.copy(extra, staging / extra.name)
+    staging.rename(out)  # only visible once complete
+    return str(out)
 
 
 def _config(name: str) -> str:
@@ -113,7 +143,7 @@ def download_dataset(name: str) -> str:
     return dest
 
 
-@app.function(gpu="A10G", volumes=VOLUMES, timeout=GPU_TIMEOUT)
+@app.function(gpu="A10G", volumes=VOLUMES, timeout=GPU_TIMEOUT, ephemeral_disk=STAGE_DISK)
 def warm_trt_cache(dataset: str, config: str) -> str:
     """Build and cache the TensorRT engines for this GPU by tracking one sequence."""
     data_vol.reload()
@@ -121,7 +151,7 @@ def warm_trt_cache(dataset: str, config: str) -> str:
     _run(
         "bench/run_tracker.py",
         "--dataset", dataset,
-        "--data-root", f"{DATA}/{dataset}",
+        "--data-root", _stage(dataset),
         "--config", _config(config),
         "--out", f"{RESULTS}/_warmup/{dataset}",
         "--limit", "1",
@@ -130,7 +160,7 @@ def warm_trt_cache(dataset: str, config: str) -> str:
     return _trt_cache()
 
 
-@app.function(gpu="A10G", volumes=VOLUMES, timeout=GPU_TIMEOUT)
+@app.function(gpu="A10G", volumes=VOLUMES, timeout=GPU_TIMEOUT, ephemeral_disk=STAGE_DISK)
 def run_benchmark(dataset: str, config: str, tracker_name: str) -> str:
     """Track every sequence of a dataset and write per-sequence boxes to the results volume."""
     data_vol.reload()
@@ -140,7 +170,7 @@ def run_benchmark(dataset: str, config: str, tracker_name: str) -> str:
     _run(
         "bench/run_tracker.py",
         "--dataset", dataset,
-        "--data-root", f"{DATA}/{dataset}",
+        "--data-root", _stage(dataset),
         "--config", _config(config),
         "--out", out,
     )
@@ -148,7 +178,7 @@ def run_benchmark(dataset: str, config: str, tracker_name: str) -> str:
     return out
 
 
-@app.function(volumes=VOLUMES, timeout=60 * 30)
+@app.function(volumes=VOLUMES, timeout=60 * 60 * 2, ephemeral_disk=STAGE_DISK)
 def evaluate(dataset: str, trackers: list[str]) -> str:
     """Score tracked results for a dataset and return the metrics CSV."""
     results_vol.reload()
@@ -169,7 +199,7 @@ def evaluate(dataset: str, trackers: list[str]) -> str:
         "bench/eval.py",
         "--results", f"{RESULTS}/{dataset}",
         "--dataset", dataset,
-        "--data-root", f"{DATA}/{dataset}",
+        "--data-root", _stage(dataset),
         "--trackers", ",".join(trackers),
         "--out", out,
         "--protocol-check",

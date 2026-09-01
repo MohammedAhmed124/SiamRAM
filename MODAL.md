@@ -58,6 +58,25 @@ and commit them to the volume, then `run_benchmark` fans out over every
 (dataset x config) pair, then `evaluate` scores each dataset. Markdown tables print to
 the terminal and the CSVs land in `./bench_results/`.
 
+### Volumes have an inode limit, not a size limit
+
+A Modal Volume holds at most **500,000 files and directories** and returns `ENOSPC` past it.
+`df` will not warn you - volumes do not report capacity at the filesystem level. They are also
+only fast below ~50,000 files.
+
+That is why LaSOT is stored as one tar per category (70 files) rather than ~700,000 loose
+JPEGs, and why `_stage()` unpacks it to container-local disk before a run. Datasets that fit
+comfortably - UAV123 at ~113k files, UAV123@10fps at ~38k - stay as plain directories and are
+read straight off the volume.
+
+Check what a volume holds:
+
+```bash
+modal volume ls siamram-data /
+```
+
+If a run ever dies with "No space left on device", count files before assuming it is bytes.
+
 ### TrackingNet is different
 
 TrackingNet withholds its test ground truth, so `evaluate` cannot score it. For that dataset

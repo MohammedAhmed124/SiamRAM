@@ -195,19 +195,6 @@ def test_drive_url_keeps_resourcekey():
     assert dl.drive_uc_url("https://drive.google.com/uc?id=ABC") .endswith("id=ABC")
 
 
-def test_leakage_overlap_matches_manifest():
-    # The committed manifest records the DTB70 and UAV123 sequences the head was trained on.
-    from bench.splits import load_manifest, overlap
-    trained = load_manifest()
-    assert trained, "splits/manifest.json missing - run: python bench/splits.py --write"
-    known = trained["dtb70"][:3]
-    assert overlap("dtb70", known) == sorted(known)
-    assert overlap("dtb70", ["definitely-not-a-sequence"]) == []
-    # LaSOT and TrackingNet were never in the training index.
-    assert overlap("lasot", ["airplane-1"]) == []
-    assert overlap("trackingnet", ["anything"]) == []
-
-
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

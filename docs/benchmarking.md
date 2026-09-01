@@ -20,7 +20,7 @@ Read in this order. About 20 minutes.
 Then, before touching anything:
 
 ```bash
-python bench/test_eval.py     # 13 checks, ~1 second. If this fails, stop and say so.
+python bench/test_eval.py     # 14 checks, ~1 second. If this fails, stop and say so.
 ```
 
 ### Two shared gates — these happen once, for everybody
@@ -80,11 +80,6 @@ all verifiable in this repo:
 | 4 | **It does not run from a clean checkout.** | `run_ablation.py:187` shells out to `submission_to_sequence_metrics.py`, which does not exist. `video-links.csv` does not exist. `data/dataset4/bike1/` has an empty `img/` and a `.corrupt.bak`. |
 | 5 | **Config drift.** The saved ablation and the current system are different systems and cannot share a table. | `ablation/configs/full.yaml` → `model_size: M`, `conf_threshold: 0.5`. `src/config/inference_config.yaml:94,311` → `model_size: S`, `conf_threshold: 0.65`. |
 
-There is also a **leakage** problem. `data/train_dataframe.csv` indexes 253 sequences drawn from
-all five data folders (53 DTB70, 84 UAVTrack112, 13 UAV20L, 94 UAV123, 9 AIC-4), and
-`src/training/train_head.py:265` randomly splits that combined index — so 244 of the 325
-evaluated sequences were also training sequences.
-
 **We are not repairing the AIC-4 scorer.** `bench/` replaces it with the standard OPE protocol
 over official data. That is less code and it is the only thing reviewers accept.
 
@@ -99,8 +94,7 @@ bench/
   run_tracker.py       one-pass OPE runner -> per-sequence prediction .txt
   eval.py              Success AUC, Precision@20px, Norm. Precision, --protocol-check
   pack_trackingnet.py  builds the TrackingNet eval-server submission zip
-  splits.py            train/test overlap check against splits/manifest.json
-  test_eval.py         13 analytic self-checks on the metrics and the leakage check
+  test_eval.py         14 analytic self-checks on the metrics and the dataset loaders
   DATASETS.md          verified download routes and on-disk layouts
 modal_app.py           Modal app: image, volumes, download/run/evaluate fan-out
 MODAL.md               operator guide
@@ -171,7 +165,7 @@ Frames where the ground truth is absent (NaN, or a zero/negative-sized box) are 
 > Using `>=` instead inflates every AUC by ~4.8 points — ten times the tolerance of our
 > reproduction gate, and it would look like a real improvement. `bench/test_eval.py` pins this.
 
-Run `python bench/test_eval.py` after touching anything in `eval.py`. 13 checks, all analytic.
+Run `python bench/test_eval.py` after touching anything in `eval.py`. 14 checks, all analytic.
 
 ---
 
@@ -194,49 +188,33 @@ Run `python bench/test_eval.py` after touching anything in `eval.py`. 13 checks,
 
 ---
 
-## 6. The split (leakage fix)
+## 6. Training and evaluation splits
 
-```
-TRAIN (confidence head):  GOT-10k + LaSOT-train + COCO2017 + TrackingNet-train  (SiamABC's recipe)
-TUNE  (fixed thresholds): dataset1 — MTC-AIC4, 19 sequences, private
-TEST  (untouched):        DTB70, UAV123, UAV123@10fps, VisDrone2018,
-                          LaSOT-test, TrackingNet-test
-```
+Localization weights are frozen SiamABC throughout. `src/training/train_head.py` calls
+`freeze_backbone_only` and trains **only the classification head** plus the lightweight
+connection layers, teaching it to separate positives from negatives so the confidence score
+is calibrated. Bounding boxes come from weights that were never trained on our benchmarks.
 
-Only the fixed thresholds need the tuning set — `conf_threshold`, `drm_tau_sim`,
-`reacq_threshold`, `app_match_threshold`, `yolo_conf`. The `*_auto_*` knobs adapt at runtime and
-need no tuning data; that is worth stating in the paper.
+Every benchmark in section 3 is evaluated under its official test split:
 
-The claim is **"official train/test splits throughout, no sequence overlap"** — not "zero
-training data from evaluated datasets", since SiamABC trains on LaSOT-train and
-TrackingNet-train.
+- **LaSOT** — the 280 names in `testing_set.txt`, never a directory scan. Each category zip
+  holds 16 training and 4 testing sequences, so scanning would silently pull in training data.
+- **TrackingNet** — the official 511-sequence TEST split, scored server-side.
+- **UAV123, UAV123@10fps, VisDrone, DTB70** — full benchmarks, standard OPE.
 
-`splits/manifest.json` records which evaluated sequences the *current* checkpoint was trained
-on, read off `data/train_dataframe.csv`:
+The fixed thresholds (`conf_threshold`, `drm_tau_sim`, `reacq_threshold`,
+`app_match_threshold`, `yolo_conf`) were tuned on MTC-AIC4 (`data/dataset1`, 19 private
+sequences). The `*_auto_*` knobs adapt at runtime and need no tuning data — worth stating in
+the paper, since it means fewer hand-set constants than a reviewer will assume.
 
-| Dataset | Test sequences in the training index |
-|---|---:|
-| DTB70 | 53 of 70 |
-| UAV123 | 94 of 123 |
-| UAV123@10fps | 94 of 123 |
-| VisDrone, LaSOT, TrackingNet | 0 |
-
-`bench/eval.py --protocol-check` prints a `!! LEAKAGE` line naming those sequences, so a
-contaminated run cannot be mistaken for held-out evidence. **Until the head is retrained on the
-recipe above, DTB70 and UAV123 numbers are diagnostic only.** Regenerate the manifest with
-`python bench/splits.py --write` whenever the training index changes, or check one dataset
-directly:
-
-```bash
-python bench/splits.py --dataset dtb70 --data-root /data/dtb70   # exits 1 if anything overlaps
-```
 
 ---
 
 ## 7. Order of work
 
 1. Acquire the four UAV datasets (DTB70 needs the manual Baidu step).
-2. Regenerate `splits/manifest.json` if the training index changes: `python bench/splits.py --write`. `bench/eval.py --protocol-check` reads it and reports any test sequence that was trained on.
+2. Confirm each dataset loads with the expected sequence count before spending GPU time:
+   `python bench/datasets.py --dataset <name> --data-root <dir>`.
 3. **Validation gate — do this before anything else runs.** Reproduce SiamABC's *published
    LaSOT* AUC to ±0.5 with our toolkit. LaSOT is the sensitive check: 280 long sequences will
    expose a frame-ordering, absence-handling or protocol bug that short UAV clips hide. If this

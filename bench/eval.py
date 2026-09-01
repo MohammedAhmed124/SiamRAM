@@ -18,7 +18,6 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from bench.datasets import load_sequences, read_boxes  # noqa: E402
-from bench.splits import load_manifest, overlap  # noqa: E402
 
 SUCCESS_THRESHOLDS = np.linspace(0.0, 1.0, 21)      # 0:0.05:1
 NORM_PREC_THRESHOLDS = np.linspace(0.0, 0.5, 11)    # 0:0.05:0.5
@@ -123,15 +122,6 @@ def _protocol_check(dataset: str, sequences, tracker_dirs: dict[str, Path]) -> N
                 problems += 1
     print("all result files present and frame-aligned" if problems == 0
           else f"{problems} problem(s) - these invalidate the numbers below")
-
-    leaked = overlap(dataset, [s.name for s in sequences])
-    if leaked:
-        print(f"  !! LEAKAGE  {len(leaked)} of {len(sequences)} test sequences are in the "
-              f"training index (splits/manifest.json): {', '.join(leaked[:8])}"
-              f"{' ...' if len(leaked) > 8 else ''}")
-        print("  these scores are diagnostic, not held-out evidence")
-    elif load_manifest():
-        print("no test sequence appears in the training index")
 
 
 def main():

@@ -28,6 +28,8 @@ image = (
     .entrypoint([])
     .apt_install(
         "build-essential",
+        # torchreid compiles rank_cylib, and add_python's interpreter reports CC=clang.
+        "clang",
         "ca-certificates",
         "git",
         "libglib2.0-0",

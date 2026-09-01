@@ -153,6 +153,30 @@ def test_trackingnet_numeric_frame_order():
         assert s.init_box == (10.0, 20.0, 30.0, 40.0)
 
 
+def test_uav123_family_finds_both_archive_roots():
+    # Dataset_UAV123.zip unpacks to UAV123/, Dataset_UAV123_10fps.zip to UAV123_10fps/.
+    # Both must resolve from the dataset's own --data-root.
+    import tempfile
+    from pathlib import Path
+
+    from PIL import Image
+
+    from bench.datasets import load_sequences
+
+    for key, top in (("uav123", "UAV123"), ("uav123_10fps", "UAV123_10fps")):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / top
+            (root / "anno" / top).mkdir(parents=True)
+            frames = root / "data_seq" / top / "bike1"
+            frames.mkdir(parents=True)
+            for i in range(1, 4):
+                Image.new("RGB", (8, 8)).save(frames / f"{i:06d}.jpg")
+            (root / "anno" / top / "bike1.txt").write_text(("1,2,3,4" + chr(10)) * 3)
+            seqs = load_sequences(key, td)
+            assert [s.name for s in seqs] == ["bike1"], key
+            assert len(seqs[0].frames) == 3, key
+
+
 def test_leakage_overlap_matches_manifest():
     # The committed manifest records the DTB70 and UAV123 sequences the head was trained on.
     from bench.splits import load_manifest, overlap

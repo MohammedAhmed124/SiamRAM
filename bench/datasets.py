@@ -173,7 +173,7 @@ def _uav123_family(root: Path, anno_sub: str, seq_sub: str, stride: int = 1) -> 
     fires if that is wrong for any folder. UAV123_10fps falls back to every third frame of
     data_seq/UAV123 when data_seq/UAV123_10fps is absent; that alignment is a guess.
     """
-    root = _dig(root, "UAV123", "Dataset_UAV123")
+    root = _dig(root, seq_sub, f"Dataset_{seq_sub}", "UAV123", "Dataset_UAV123")
     anno_dir = _pick_dir(root, f"anno/{anno_sub}", f"anno/{anno_sub.lower()}", "anno")
     seq_root = _pick_dir(root, f"data_seq/{seq_sub}", "data_seq", "sequences")
     if stride > 1 and seq_root.name != seq_sub:

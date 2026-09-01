@@ -187,6 +187,30 @@ def run_benchmark(dataset: str, config: str, tracker_name: str) -> str:
     return out
 
 
+@app.function(gpu="A10G", volumes=VOLUMES, timeout=GPU_TIMEOUT, ephemeral_disk=STAGE_DISK)
+def run_baseline(dataset: str, variant: str = "tiny") -> str:
+    """Track a dataset with the authors' own SiamABC, as an independent check on bench/eval.py.
+
+    The upstream repo carries its weights in-tree, so the clone lands on the data volume
+    rather than in the image. Its dependencies (hydra, mobile-cv, pytorch-toolbelt,
+    spikingjelly, got10k) are already in the pinned requirements.txt.
+    """
+    data_vol.reload()
+    results_vol.reload()
+    out = f"{RESULTS}/{dataset}/siamabc_official_{variant}"
+    _run(
+        "bench/baselines/siamabc_official.py",
+        "--dataset", dataset,
+        "--data-root", _stage(dataset),
+        "--out", out,
+        "--variant", variant,
+        "--work-dir", f"{DATA}/siamabc_official",
+    )
+    data_vol.commit()
+    results_vol.commit()
+    return out
+
+
 @app.function(volumes=VOLUMES, timeout=60 * 60 * 2, ephemeral_disk=STAGE_DISK)
 def evaluate(dataset: str, trackers: list[str]) -> str:
     """Score tracked results for a dataset and return the metrics CSV."""

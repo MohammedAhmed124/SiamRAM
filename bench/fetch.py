@@ -1,6 +1,6 @@
 """Fetch single-object-tracking benchmarks onto a headless machine.
 
-Usage: python bench/download.py --dataset uav123 --dest /vol/bench
+Usage: python bench/fetch.py --dataset uav123 --dest /vol/bench
 See bench/DATASETS.md for sources, layouts and the manual steps.
 """
 

@@ -53,6 +53,7 @@ image = (
     # Baseline configs (t1_vanilla_siamabc.yaml and the ablation rows) live here.
     .add_local_dir(_here / "ablation" / "configs", f"{REPO}/ablation/configs")
     .add_local_file(_here / "predictor.py", f"{REPO}/predictor.py")
+    .add_local_file(_here / "download.py", f"{REPO}/download.py")
 )
 
 data_vol = modal.Volume.from_name("siamram-data", create_if_missing=True)
@@ -148,7 +149,7 @@ def _config(name: str) -> str:
 def download_dataset(name: str) -> str:
     """Fetch a benchmark into the dataset volume."""
     dest = f"{DATA}/{name}"
-    _run("bench/download.py", "--dataset", name, "--dest", dest)
+    _run("bench/fetch.py", "--dataset", name, "--dest", dest)
     data_vol.commit()
     return dest
 

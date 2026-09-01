@@ -53,7 +53,7 @@ Two people per dataset. Different datasets write to different paths
 
 ### What "done" means for a dataset
 
-1. `python bench/download.py --dataset <name> --dest <dir>` completes, or the manual upload is in.
+1. `python bench/fetch.py --dataset <name> --dest <dir>` completes, or the manual upload is in.
 2. `python bench/datasets.py --dataset <name> --data-root <dir>` lists the expected sequence
    count (70, 123, 123, 35, 280, 511) and the expected frame counts.
 3. `bench/eval.py --protocol-check` reports **no** missing files and **no** length mismatches.
@@ -95,7 +95,7 @@ over official data. That is less code and it is the only thing reviewers accept.
 ```
 bench/
   datasets.py          adapters: official benchmark layout on disk -> Sequence objects
-  download.py          acquisition (gdown / HuggingFace / plain HTTPS / manual instructions)
+  fetch.py             acquisition (gdown / HuggingFace / plain HTTPS / manual instructions)
   run_tracker.py       one-pass OPE runner -> per-sequence prediction .txt
   eval.py              Success AUC, Precision@20px, Norm. Precision, --protocol-check
   pack_trackingnet.py  builds the TrackingNet eval-server submission zip
@@ -111,7 +111,7 @@ Nothing under `src/`, `ablation/` or `data/` was modified. This is purely additi
 ### The interface
 
 ```bash
-python bench/download.py   --dataset uav123 --dest /data/uav123
+python bench/fetch.py   --dataset uav123 --dest /data/uav123
 python bench/run_tracker.py --dataset uav123 --data-root /data/uav123 \
                             --config src/config/inference_config.yaml --out results/uav123/siamram
 python bench/eval.py       --dataset uav123 --data-root /data/uav123 \

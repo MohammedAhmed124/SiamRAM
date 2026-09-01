@@ -238,7 +238,7 @@ def _trackingnet(root: Path) -> list[Sequence]:
 LOADERS = {
     "dtb70": _dtb70,
     "visdrone2018": _visdrone2018,
-    "visdrone_sot": _visdrone2018,  # bench/download.py's name for the same set
+    "visdrone_sot": _visdrone2018,  # bench/fetch.py's name for the same set
     "uav123": lambda r: _uav123_family(r, "UAV123", "UAV123"),
     "uav123_10fps": lambda r: _uav123_family(r, "UAV123_10fps", "UAV123_10fps", stride=3),
     "lasot": _lasot,

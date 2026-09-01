@@ -182,7 +182,7 @@ def test_drive_url_keeps_resourcekey():
     # instead of the pre-2021 UAV123 archives.
     import importlib.util
     from pathlib import Path
-    spec = importlib.util.spec_from_file_location("dl", Path(__file__).parent / "download.py")
+    spec = importlib.util.spec_from_file_location("dl", Path(__file__).parent / "fetch.py")
     dl = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(dl)
 

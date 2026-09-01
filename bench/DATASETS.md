@@ -9,10 +9,10 @@ layouts were verified by range-reading the archives' zip central directories
 (no full downloads). Where no non-interactive route exists, that is said
 plainly rather than guessed at.
 
-`bench/download.py` implements the automatable half:
+`bench/fetch.py` implements the automatable half:
 
 ```
-python bench/download.py --dataset <name> --dest /vol/bench
+python bench/fetch.py --dataset <name> --dest /vol/bench
 ```
 
 ## (a) Summary
@@ -30,7 +30,7 @@ Google Drive files here are all >100 MB, so `wget`/`curl` hit the virus-scan
 interstitial. **Do not use `gdown` for these.** `gdown==6.0.0` rebuilds every link
 as `uc?id=<id>` and discards the `resourcekey`, and the two UAV123 archives are
 pre-2021 links that need it: without it Drive serves a sign-in page, not the file.
-`bench/download.py` talks to Drive directly instead - it normalises the link with
+`bench/fetch.py` talks to Drive directly instead - it normalises the link with
 `drive_uc_url()`, keeps the resourcekey, and submits the virus-scan confirm form.
 Verified against the live host: both UAV123 archives resolve to their exact pinned
 byte counts. A `Quota exceeded` page means the file has been fetched too often
@@ -92,7 +92,7 @@ DTB70/
   12,097,003,333 B (11.27 GiB). Ground truth is included for test-dev.
 
 ```bash
-python bench/download.py --dataset <name> --dest /vol/bench   # -> VisDrone2019-SOT-test-dev.zip
+python bench/fetch.py --dataset <name> --dest /vol/bench   # -> VisDrone2019-SOT-test-dev.zip
 unzip -q VisDrone2019-SOT-test-dev.zip -d /vol/bench
 ```
 
@@ -133,7 +133,7 @@ VisDrone2019-SOT-test-dev/
   the only route.
 
 ```bash
-python bench/download.py --dataset <name> --dest /vol/bench   # -> Dataset_UAV123.zip
+python bench/fetch.py --dataset <name> --dest /vol/bench   # -> Dataset_UAV123.zip
 unzip -q Dataset_UAV123.zip -d /vol/bench
 ```
 
@@ -141,7 +141,7 @@ unzip -q Dataset_UAV123.zip -d /vol/bench
   4,688,528,930 B (4.37 GiB) — trivially available, same recipe:
 
 ```bash
-python bench/download.py --dataset <name> --dest /vol/bench   # -> Dataset_UAV123_10fps.zip
+python bench/fetch.py --dataset <name> --dest /vol/bench   # -> Dataset_UAV123_10fps.zip
 ```
 
   (Also on the page: annotation-details PDF `0B6sQMCU1i4NbWUI5Nk5wempDQUU`,
@@ -201,7 +201,7 @@ UAV123_10fps/
   pinned in `requirements.txt`.
 
 ```bash
-python bench/download.py --dataset lasot --dest /vol/bench     # 248 GB
+python bench/fetch.py --dataset lasot --dest /vol/bench     # 248 GB
 # equivalent to:
 python -c "from huggingface_hub import snapshot_download; \
   snapshot_download('l-lt/LaSOT', repo_type='dataset', local_dir='/vol/bench/LaSOT', \
@@ -249,7 +249,7 @@ LaSOT/
   be fetched on its own.
 
 ```bash
-python bench/download.py --dataset trackingnet --dest /vol/bench    # 35 GB
+python bench/fetch.py --dataset trackingnet --dest /vol/bench    # 35 GB
 # equivalent to:
 python -c "from huggingface_hub import snapshot_download; \
   snapshot_download('SilvioGiancola/TrackingNet', repo_type='dataset', \
@@ -326,6 +326,6 @@ the fetch on a normal desktop and uploads the archive to the Modal volume.
      which is Baidu again and covers DTB70 + UAVTrack112 + VisDrone in the same
      bundle, so it may be worth doing this one download instead of three.
 
-Note also that `bench/download.py --dataset uavdt` exits non-zero after
+Note also that `bench/fetch.py --dataset uavdt` exits non-zero after
 downloading and extracting the images, precisely because the annotations are
 still missing.

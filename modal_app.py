@@ -59,7 +59,7 @@ data_vol = modal.Volume.from_name("siamram-data", create_if_missing=True)
 results_vol = modal.Volume.from_name("siamram-results", create_if_missing=True)
 
 VOLUMES = {DATA: data_vol, RESULTS: results_vol}
-STAGE_DISK = 200 * 1024  # MiB; room to unpack the largest dataset locally
+STAGE_DISK = 512 * 1024  # MiB; Modal's floor. Staging needs ~35 GB, the minimum is 512 GiB.
 GPU_TIMEOUT = 60 * 60 * 8  # ~168k frames is the largest single set in the plan
 
 app = modal.App(APP_NAME, image=image)
@@ -129,7 +129,7 @@ def _config(name: str) -> str:
 
 @app.function(
     volumes=VOLUMES,
-    ephemeral_disk=1000 * 1000,
+    ephemeral_disk=STAGE_DISK,
     timeout=60 * 60 * 12,
     # LaSOT and TrackingNet come from the HF Hub, which rate-limits anonymous requests.
     # Create it once:  modal secret create huggingface-secret HF_TOKEN=hf_...

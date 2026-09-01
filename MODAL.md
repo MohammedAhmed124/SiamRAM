@@ -58,6 +58,19 @@ and commit them to the volume, then `run_benchmark` fans out over every
 (dataset x config) pair, then `evaluate` scores each dataset. Markdown tables print to
 the terminal and the CSVs land in `./bench_results/`.
 
+### Windows: Git Bash mangles volume paths
+
+MSYS rewrites a leading-slash argument into a Windows path before the command runs, so
+`modal volume ls siamram-data /` asks for `C:/Program Files/Git` inside the volume and fails
+with "No such file or directory". Either omit the path, prefix the command, or use PowerShell:
+
+```bash
+modal volume ls siamram-data                              # no path, no problem
+MSYS_NO_PATHCONV=1 modal volume rm -r siamram-data /lasot  # or //lasot
+```
+
+PowerShell and Linux/macOS shells are unaffected.
+
 ### Volumes have an inode limit, not a size limit
 
 A Modal Volume holds at most **500,000 files and directories** and returns `ENOSPC` past it.

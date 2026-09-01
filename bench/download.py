@@ -6,6 +6,7 @@ See bench/DATASETS.md for sources, layouts and the manual steps.
 
 import argparse
 import os
+import re
 import sys
 import urllib.request
 import zipfile
@@ -49,16 +50,59 @@ public and can be fetched without Baidu:
   # experiments/anno/att/<Seq>.txt == 11 per-sequence attribute flags""",
 }
 
+
+def drive_uc_url(url):
+    """Any Google Drive link normalised to uc?id=..., keeping the resourcekey."""
+    ids = re.search(r"/d/([A-Za-z0-9_-]+)|[?&]id=([A-Za-z0-9_-]+)", url)
+    if not ids:
+        raise SystemExit(f"no Drive file id in {url}")
+    fid = next(g for g in ids.groups() if g)
+    key = re.search(r"[?&]resourcekey=([A-Za-z0-9_-]+)", url)
+    return f"https://drive.google.com/uc?id={fid}" + (f"&resourcekey={key.group(1)}" if key else "")
+
+
+def _drive_get(url):
+    """Streaming response for a Drive file, past the large-file virus-scan interstitial.
+
+    gdown 6 rebuilds every link as uc?id=<id> and drops the resourcekey, which the
+    pre-2021 UAV123 links need - without it Drive serves a sign-in page.
+    """
+    import requests
+
+    session = requests.Session()
+    r = session.get(drive_uc_url(url), stream=True, timeout=60)
+    if not r.headers.get("Content-Type", "").startswith("text/html"):
+        return r
+    html = r.text
+    if "Quota exceeded" in html:
+        raise SystemExit(f"Google Drive download quota exceeded for {url}; retry in a few hours")
+    action = re.search(r'<form[^>]+action="([^"]+)"', html)
+    if not action:
+        raise SystemExit(f"no confirm form at {url}; the link may be private or removed")
+    fields = dict(re.findall(r'<input type="hidden" name="([^"]+)" value="([^"]*)"', html))
+    r = session.get(action.group(1).replace("&amp;", "&"), params=fields, stream=True, timeout=60)
+    if r.headers.get("Content-Type", "").startswith("text/html"):
+        why = "quota exceeded" if "Quota exceeded" in r.text else "an unexpected page"
+        raise SystemExit(f"Google Drive returned {why} for {url}")
+    return r
+
+
 def _download(url, path, size=None):
-    """Fetch url to path via gdown for Drive links, urllib otherwise."""
+    """Fetch url to path, handling Google Drive's confirm step."""
     if size and os.path.exists(path) and os.path.getsize(path) == size:
         print(f"have {path}")
         return
     print(f"downloading {url} -> {path}")
     if "drive.google.com" in url:
-        import gdown
-
-        gdown.download(url, path, fuzzy=True, resume=True)
+        r = _drive_get(url)
+        total = int(r.headers.get("Content-Length", 0))
+        done = 0
+        with open(path, "wb") as fh:
+            for chunk in r.iter_content(1 << 20):
+                fh.write(chunk)
+                done += len(chunk)
+                if total and done % (1 << 28) < (1 << 20):
+                    print(f"  {done / total:.0%} ({done >> 20} MiB)", flush=True)
     else:
         urllib.request.urlretrieve(url, path)
     got = os.path.getsize(path)

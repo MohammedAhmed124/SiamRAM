@@ -20,17 +20,21 @@ python bench/download.py --dataset <name> --dest /vol/bench
 | dataset | seqs | download | fetch method | automatable? |
 |---|---|---|---|---|
 | DTB70 | 70 | not published (Baidu-only) | Baidu Pan (images), GitHub (GT) | **manual** (GT: yes) |
-| VisDrone-SOT test-dev | 35 | 11.27 GiB | Google Drive | **gdown** |
-| UAV123 | 123 | 13.08 GiB | Google Drive | **gdown** |
-| UAV123@10fps | 123 | 4.37 GiB | Google Drive | **gdown** |
+| VisDrone-SOT test-dev | 35 | 11.27 GiB | Google Drive | **yes** (direct) |
+| UAV123 | 123 | 13.08 GiB | Google Drive | **yes** (direct) |
+| UAV123@10fps | 123 | 4.37 GiB | Google Drive | **yes** (direct) |
 | LaSOT test | 280 of 1400 | 248 GB (whole set — no test-only archive) | Hugging Face | **yes** (`huggingface_hub`) |
 | TrackingNet TEST | 511 | 35 GB | Hugging Face | **yes** (`huggingface_hub`) |
 
 Google Drive files here are all >100 MB, so `wget`/`curl` hit the virus-scan
-interstitial. Use `gdown` (`gdown==6.0.0` is already pinned in
-`requirements.txt`). The two UAV123 links are pre-2021 Drive links that carry a
-`resourcekey`; `gdown` needs `--fuzzy` / `fuzzy=True` and the **full** URL
-including `&resourcekey=…` for those — a bare file id returns 404.
+interstitial. **Do not use `gdown` for these.** `gdown==6.0.0` rebuilds every link
+as `uc?id=<id>` and discards the `resourcekey`, and the two UAV123 archives are
+pre-2021 links that need it: without it Drive serves a sign-in page, not the file.
+`bench/download.py` talks to Drive directly instead - it normalises the link with
+`drive_uc_url()`, keeps the resourcekey, and submits the virus-scan confirm form.
+Verified against the live host: both UAV123 archives resolve to their exact pinned
+byte counts. A `Quota exceeded` page means the file has been fetched too often
+today; that is transient, so retry in a few hours.
 
 ---
 
@@ -88,7 +92,7 @@ DTB70/
   12,097,003,333 B (11.27 GiB). Ground truth is included for test-dev.
 
 ```bash
-gdown 1xCiHjU4JlR9QsYtiHYy2UUd3m6NthoBC -O VisDrone2019-SOT-test-dev.zip
+python bench/download.py --dataset <name> --dest /vol/bench   # -> VisDrone2019-SOT-test-dev.zip
 unzip -q VisDrone2019-SOT-test-dev.zip -d /vol/bench
 ```
 
@@ -129,7 +133,7 @@ VisDrone2019-SOT-test-dev/
   the only route.
 
 ```bash
-gdown --fuzzy "https://drive.google.com/file/d/0B6sQMCU1i4NbNGxWQzRVak5yLWs/view?usp=drivesdk&resourcekey=0-IjwQcWEzP2x3ec8kXtLBpA" -O Dataset_UAV123.zip
+python bench/download.py --dataset <name> --dest /vol/bench   # -> Dataset_UAV123.zip
 unzip -q Dataset_UAV123.zip -d /vol/bench
 ```
 
@@ -137,7 +141,7 @@ unzip -q Dataset_UAV123.zip -d /vol/bench
   4,688,528,930 B (4.37 GiB) — trivially available, same recipe:
 
 ```bash
-gdown --fuzzy "https://drive.google.com/file/d/0B6sQMCU1i4NbZmFlQmJBVDlLRDg/view?usp=drivesdk&resourcekey=0--jsSKS1oGFidNhgMF75cSQ" -O Dataset_UAV123_10fps.zip
+python bench/download.py --dataset <name> --dest /vol/bench   # -> Dataset_UAV123_10fps.zip
 ```
 
   (Also on the page: annotation-details PDF `0B6sQMCU1i4NbWUI5Nk5wempDQUU`,

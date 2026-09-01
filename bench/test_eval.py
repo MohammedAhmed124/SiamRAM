@@ -177,6 +177,24 @@ def test_uav123_family_finds_both_archive_roots():
             assert len(seqs[0].frames) == 3, key
 
 
+def test_drive_url_keeps_resourcekey():
+    # gdown 6 drops the resourcekey, and without it Drive serves a sign-in page
+    # instead of the pre-2021 UAV123 archives.
+    import importlib.util
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location("dl", Path(__file__).parent / "download.py")
+    dl = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(dl)
+
+    view = ("https://drive.google.com/file/d/0B6sQMCU1i4NbZmFlQmJBVDlLRDg/view"
+            "?usp=drivesdk&resourcekey=0--jsSKS1oGFidNhgMF75cSQ")
+    assert dl.drive_uc_url(view) == ("https://drive.google.com/uc?id=0B6sQMCU1i4NbZmFlQmJBVDlLRDg"
+                                     "&resourcekey=0--jsSKS1oGFidNhgMF75cSQ")
+    plain = "https://drive.google.com/file/d/1xCiHjU4JlR9QsYtiHYy2UUd3m6NthoBC/view"
+    assert dl.drive_uc_url(plain) == "https://drive.google.com/uc?id=1xCiHjU4JlR9QsYtiHYy2UUd3m6NthoBC"
+    assert dl.drive_uc_url("https://drive.google.com/uc?id=ABC") .endswith("id=ABC")
+
+
 def test_leakage_overlap_matches_manifest():
     # The committed manifest records the DTB70 and UAV123 sequences the head was trained on.
     from bench.splits import load_manifest, overlap

@@ -21,7 +21,7 @@ Both are created on first use.
 
 ## Getting datasets in
 
-Automatic, for anything `bench/download.py` supports:
+Automatic, for anything `bench/fetch.py` supports:
 
 ```bash
 modal run modal_app.py::download_dataset --name dtb70

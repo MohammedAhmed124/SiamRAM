@@ -212,15 +212,20 @@ def run_baseline(dataset: str, variant: str = "tiny") -> str:
 
 
 @app.function(volumes=VOLUMES, timeout=60 * 60 * 2, ephemeral_disk=STAGE_DISK)
-def evaluate(dataset: str, trackers: list[str]) -> str:
-    """Score tracked results for a dataset and return the metrics CSV."""
+def evaluate(dataset: str, trackers: str) -> str:
+    """Score tracked results for a dataset and return the metrics CSV.
+
+    trackers is comma-separated so this is callable directly:
+        modal run modal_app.py::evaluate --dataset lasot --trackers a,b
+    """
+    names = [t.strip() for t in trackers.split(",") if t.strip()]
     results_vol.reload()
     out = f"{RESULTS}/metrics/{dataset}.csv"
     Path(out).parent.mkdir(parents=True, exist_ok=True)
     # TrackingNet withholds test ground truth: pack a server submission instead of scoring.
     if dataset == "trackingnet":
         zips = []
-        for tracker in trackers:
+        for tracker in names:
             zip_path = f"{RESULTS}/metrics/trackingnet_{tracker}.zip"
             _run("bench/pack_trackingnet.py",
                  "--results", f"{RESULTS}/{dataset}/{tracker}", "--out", zip_path)
@@ -233,7 +238,7 @@ def evaluate(dataset: str, trackers: list[str]) -> str:
         "--results", f"{RESULTS}/{dataset}",
         "--dataset", dataset,
         "--data-root", _stage(dataset),
-        "--trackers", ",".join(trackers),
+        "--trackers", ",".join(names),
         "--out", out,
         "--protocol-check",
     )
@@ -282,7 +287,8 @@ def main(
 
     local = Path(out_dir)
     local.mkdir(parents=True, exist_ok=True)
-    evals = list(evaluate.starmap([(d, trackers) for d in ds], return_exceptions=True))
+    evals = list(evaluate.starmap([(d, ",".join(trackers)) for d in ds],
+                                  return_exceptions=True))
     for dataset, csv_text in zip(ds, evals):
         if isinstance(csv_text, Exception):
             print(f"\n### {dataset}\n\neval failed: {csv_text}")

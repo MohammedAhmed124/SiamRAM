@@ -72,6 +72,9 @@ def build_tracker(repo: Path, variant: str, weights: Path, dtta: bool, overrides
 
     cfg = load_hydra_config_from_path(config_path="core/config", config_name="SiamABC_tracker")
     cfg["model"]["model_size"] = model_size
+    # The ImageNet init is overwritten by the checkpoint below, and mobile_cv ships an empty
+    # PRETRAINED_MODELS registry ("Invalid arch fbnet_c, supported arch dict_keys([])").
+    cfg["model"]["pretrained"] = False
     cfg["tracker"].update(PAPER_TRACKER_CONFIG)
     cfg["tracker"].update(overrides)
     print(f"tracker config: {cfg['tracker']}")
@@ -84,8 +87,34 @@ def build_tracker(repo: Path, variant: str, weights: Path, dtta: bool, overrides
     # core.utils.utils.to_device indexes GPUs by int and falls back to CPU on its own.
     cuda_id = 0 if torch.cuda.is_available() else "cpu"
     model = load_model(model, str(weights), map_location=cuda_id, strict=False)
+    _assert_weights_loaded(model, weights)
     model = (model.cuda() if torch.cuda.is_available() else model).eval()
     return instantiate(cfg["tracker"], model=model, cuda_id=cuda_id)
+
+
+def _assert_weights_loaded(model, weights: Path, floor: float = 0.9) -> None:
+    """Fail if the checkpoint populated less than `floor` of the model, which strict=False hides."""
+    import torch
+
+    obj = torch.load(weights, map_location="cpu", weights_only=False)
+    for key in ("state_dict", "model", "net"):
+        if isinstance(obj, dict) and key in obj and isinstance(obj[key], dict):
+            obj = obj[key]
+            break
+    if not isinstance(obj, dict):
+        print(f"[warn] cannot inspect {weights.name}; skipping the load check")
+        return
+    ckpt = {k.split("module.", 1)[-1]: v for k, v in obj.items() if hasattr(v, "shape")}
+    live = model.state_dict()
+    matched = sum(1 for k, v in live.items() if k in ckpt and ckpt[k].shape == v.shape)
+    frac = matched / max(len(live), 1)
+    print(f"checkpoint: {matched}/{len(live)} tensors matched ({frac:.1%})")
+    if frac < floor:
+        raise SystemExit(
+            f"{weights.name} populated only {frac:.1%} of the model. strict=False means the "
+            f"tracker would run on mostly random weights and score near zero, which would look "
+            f"like an evaluator bug. Check the variant: --variant tiny is model_size 'S'."
+        )
 
 
 def track_sequence(tracker, seq: Sequence) -> tuple[list[tuple[float, ...]], list[float]]:
